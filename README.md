@@ -2,7 +2,7 @@
 
 An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hemi mainnet (`eip155:43111`) and Hemi testnet (`eip155:743111`) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint.
 
-It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and nineteen small patches. Eighteen make its error responses match the x402 v2 spec, and one keeps its settlements from being underpriced on Hemi (D-018). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
+It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and nineteen small patches. Eighteen make its error responses match the x402 v2 spec, and one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
 **Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and a live USDC.e payment settled ([docs/testnet-run.md](docs/testnet-run.md)); the hBTC payment waits for Bitcoin-testnet funds. Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
 
@@ -81,7 +81,7 @@ This starts both forks, the facilitator (pointed at the forks) and the seller. I
 
 ### The facilitator
 
-x402-rs refuses to start if any configured chain lacks Permit2, the x402 exact proxy or the EIP-6492 validator. Pick the config that matches what is deployed. Today neither live network has all three (see [Contracts](#contracts-and-addresses)), so only the fork recipe works until a deployment runs.
+x402-rs refuses to start if any configured chain lacks Permit2, the x402 exact proxy or the EIP-6492 validator. Pick the config that matches what is deployed. Since 2026-10-29 testnet has all three, so `config.testnet.json` works live. Mainnet still lacks the proxy and the validator (see [Contracts](#contracts-and-addresses)), so `config.json` and `config.mainnet.json` fail on live networks until the mainnet go.
 
 ```bash
 # Local forks, works now. Primaries point at a dead port; fallbacks at the forks.
@@ -114,7 +114,7 @@ Stock x402-rs does not return the x402 v2 spec's error shapes, and on a quiet He
 - **Protocol version:** a missing or unsupported `x402Version` returns `invalid_x402_version`.
 - **Permit2 spender:** a Permit2 payload whose spender is not the x402 exact proxy returns `invalid_payload`.
 - **Client disconnects:** a settlement finishes even if the client hangs up, and its tx hash is logged once the node accepts the transaction. The record is kept, and an identical `/settle` retry gets `settlement_pending` with the hash while the tx is unmined. The first retry after it mines gets the success; later retries are replays. A stock seller always verifies before settling, and `/verify` refuses an authorization with a record. So only a client that calls `/settle` directly can claim a kept success. For a stock seller, see "Charged but not served" under [Limits](#limits-and-open-items).
-- **Settlement tips:** a settlement tips at least the node's suggested priority fee, 0.001 gwei on both Hemi chains. After ten blocks without tips, stock x402-rs tips 1 wei. Hemi's sequencer never mines that, and the stuck nonce would block every later settlement (D-018).
+- **Settlement tips:** a settlement tips at least the node's suggested priority fee, which is 0.001 gwei on both Hemi chains. After ten blocks without tips, stock x402-rs tips 1 wei. Hemi testnet's sequencer never mines that, and the stuck nonce would block every later settlement. Mainnet has mined tips as low as 21 wei, so there the floor is a precaution that costs about 1e-7 ETH per settlement (D-018).
 - **HTTP status codes as the reference facilitator uses them:** 200 for every verdict on a readable request, `isValid: false`, `success: false` and `settlement_pending` included. 400 is only for a request that cannot be read; 500 for unexpected failures. A stock TS seller then receives the bare §9 code.
 
 None of them changes where funds go. The exact-amount patch narrows what is accepted. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) and D-016 explain each one. The unpatched stock image is kept, by digest, in a comment in `docker-compose.yml`.

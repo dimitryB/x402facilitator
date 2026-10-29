@@ -1,20 +1,21 @@
-From 77050f249671b0a48eb07420793966dd812fa1d5 Mon Sep 17 00:00:00 2001
+From bf3f885e1c801d192bc13d9f9747676988d2acc0 Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 15:06:57 -0400
 Subject: [PATCH] eip155: tip at least the node's suggested priority fee
 
 alloy's default EIP-1559 estimate takes the median of recent non-zero
 tips and falls back to a 1-wei tip when the last ten blocks carry none,
-which is common on quiet chains. An OP Stack sequencer skips a
-transaction tipping below its minimum (op-geth's 0.001 gwei by
-default), so a settlement sent then is never mined: it returns
-settlement_pending, holds its nonce, and every later settlement queues
-behind it.
+which is common on quiet chains. A sequencer with a minimum tip skips
+such a transaction, so a settlement sent then is never mined: it
+returns settlement_pending, holds its nonce, and every later settlement
+queues behind it.
 
 Seen on Hemi testnet (OP Stack): a 1-wei-tip transaction stayed pending
 while empty blocks were produced; the same transaction with a 0.001 gwei
-tip was mined in the next block. Both Hemi chains answer
-eth_maxPriorityFeePerGas with 1000000.
+tip was mined in the next block. Hemi testnet mines no tip below that,
+which is what its node answers to eth_maxPriorityFeePerGas. Hemi mainnet
+mines tips as low as 21 wei, so there the floor is a precaution costing
+about 1e-7 ETH per settlement.
 
 On EIP-1559 chains, send_transaction now sets the fees itself: the tip
 is the larger of alloy's estimate and eth_maxPriorityFeePerGas, and the

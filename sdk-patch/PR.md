@@ -77,9 +77,9 @@ The testnet token has no EIP-712 domain at all: no `version()`, no `DOMAIN_SEPAR
   - canonical Permit2 at `0x000000000022D473030F116dDEE9F6B43aC78BA3`
   - `x402ExactPermit2Proxy` at `0x402085c248EeA27D92E8b30b2C58ed07f9E20001`
 
-  As of 2026-10-29 neither has code on Hemi Testnet (`eth_getCode` returns `0x`). Until both are deployed, `"$0.001"` on testnet produces valid payment requirements that no facilitator can settle.
+  Both were deployed on Hemi Testnet on 2026-10-29, at their canonical CREATE2 addresses, and a `"$0.001"` USDC.e payment has settled there through the proxy.
 - **Mainnet.** Canonical Permit2 is present and byte-identical to Ethereum's apart from its chain-specific immutables. The exact proxy is not deployed yet. This doesn't affect the mainnet default asset, which settles through EIP-3009 and never touches Permit2.
-- **Deployment.** We plan to deploy both contracts at their canonical CREATE2 addresses through the deterministic deployer `0x4e59b44847b379578588920cA78FbF26c0B4956C`, which is present on both chains. A dry run with `eth_call` reproduces the expected addresses. Once deployed, the proxy rows can go into `contracts/evm/README.md`.
+- **Deployment.** Both contracts go to their canonical CREATE2 addresses through the deterministic deployer `0x4e59b44847b379578588920cA78FbF26c0B4956C`, which is present on both chains. That is done on testnet; on mainnet, a dry run with `eth_call` reproduces the expected address of the proxy. Once deployed, the proxy rows can go into `contracts/evm/README.md`.
 - **Options for reviewers.** Merge as is (the entry is correct, and it becomes usable once the contracts land), hold the PR until the deployments are confirmed, or merge the mainnet entry now and the testnet entry later.
 - **`upto` scheme.** `upto` always copies `name`/`version` into `extra`. If a facilitator advertises `eip2612GasSponsoring`, a client could try an EIP-2612 permit against the testnet token and fail at `nonces()`. Igra already has the same pre-existing behaviour. The `upto` proxy (`0x4020A4f3…0002`) isn't deployed on Hemi either.
 

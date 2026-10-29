@@ -25,8 +25,8 @@ how a payment is settled. What they change:
   400 is kept for a request that cannot be read, and 500 for an unexpected failure (0018; see
   [HTTP status codes](#http-status-codes)).
 - the fees a settlement pays: on an EIP-1559 chain the tip is at least the node's suggested priority fee,
-  so a settlement sent after a run of tip-less blocks is still mined on an OP Stack chain such as Hemi
-  (0019). This is the one patch about liveness rather than error shapes.
+  so a settlement sent after a run of tip-less blocks is still mined where the sequencer has a minimum
+  tip, as Hemi testnet's does (0019). This is the one patch about liveness rather than error shapes.
 
 Spec references are to `x402-foundation/x402` at `e4a0868`:
 
@@ -54,7 +54,7 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0016](patches/0016-eip155-keep-a-success-whose-caller-left-for-that-cal.patch) | a settlement that succeeds after its client left discards the success: the retry gets a replay error, and the buyer is charged and not served | §5.3.2, §9 `invalid_transaction_state` |
 | [0017](patches/0017-facilitator-local-report-an-x402Version-the-payload-.patch) | a top-level `x402Version` that `paymentPayload.x402Version` contradicts is reported as `invalid_payload` | §9 `invalid_x402_version` |
 | [0018](patches/0018-facilitator-local-answer-a-rejected-payment-with-200.patch) | a rejected payment is answered with 400 (412 for a missing allowance), so a stock TS seller throws and reports `"<code>: <message>"`, and never answers 412 | TS reference facilitator; scheme_exact_evm.md Permit2 step 2 |
-| [0019](patches/0019-eip155-tip-at-least-the-node-s-suggested-priority-fe.patch) | after ten blocks without tips, a settlement tips 1 wei; Hemi's sequencer never mines it, and it holds the signer's nonce and every later settlement | none: liveness (§9 `settlement_pending` is what the buyer sees) |
+| [0019](patches/0019-eip155-tip-at-least-the-node-s-suggested-priority-fe.patch) | after ten blocks without tips, a settlement tips 1 wei; Hemi testnet's sequencer never mines it, and it holds the signer's nonce and every later settlement | none: liveness (§9 `settlement_pending` is what the buyer sees) |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -1066,8 +1066,9 @@ e2e: every rejection test now expects 200 (`tests/lib/spec.ts` `STATUS_VERDICT`)
 default estimate takes the median of the non-zero 20th-percentile tips of the last ten blocks and falls
 back to a 1-wei tip when there are none (`EIP1559_MIN_PRIORITY_FEE`, alloy-provider 2.0.5
 `utils.rs`). Hemi's blocks are often empty apart from the L1-info deposit, whose tip is 0, so the
-fallback is common. Hemi's sequencer does not mine a transaction tipping below 0.001 gwei (1,000,000
-wei, op-geth's default minimum). Such a settlement is broadcast, its receipt times out, the buyer gets
+fallback is common. Hemi testnet's sequencer does not mine a transaction tipping below 0.001 gwei
+(1,000,000 wei). Hemi mainnet's mines tips as low as 21 wei, so there the floor is a precaution that
+costs about 1e-7 ETH per settlement. On testnet, such a settlement is broadcast, its receipt times out, the buyer gets
 `settlement_pending`, and since 0006 keeps the nonce, every later settlement queues behind it.
 
 Seen live on Hemi testnet with the same estimator, through `cast send` (DECISIONS D-018): a 1-wei-tip
@@ -1085,14 +1086,15 @@ on each fork, checks that the fee history has no tips and that anvil suggests 1 
 reads the transaction: its tip must be at least the suggestion. Against hemi.7 it fails with a 1-wei tip
 on both forks.
 
-**Live.** The first live Hemi testnet settlement, `0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5`, tipped exactly 1,000,000 wei. That was the
-floor, so alloy's own estimate was lower at that moment.
+**Live.** The first live Hemi testnet settlement, `0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5`, tipped 1,000,000 wei. It does
+not demonstrate the patch: the fee history held 1,000,000-wei tips from the deployment and the buyer's
+approval, so alloy's estimate was the same (D-018).
 
 <details><summary>Upstream issue / PR draft</summary>
 
 > **Title:** Settlements on quiet OP Stack chains tip 1 wei and are never mined; use eth_maxPriorityFeePerGas as a floor
 >
-> On EIP-1559 chains the facilitator relies on alloy's default fee estimate. When the last ten blocks carry no non-zero tips, which is common on quiet L2s where most blocks only hold the L1-info deposit, alloy falls back to a 1-wei tip. OP Stack sequencers do not include transactions below their minimum tip (op-geth defaults to 0.001 gwei), so the settlement is never mined, the receipt times out, and the signer's nonce is stuck. This PR reads `eth_maxPriorityFeePerGas` alongside the estimate and uses it as a floor for the tip, keeping the estimate's base-fee headroom in the max fee. Nodes without the method keep the old behaviour. Observed on Hemi (chain 43111 and testnet 743111, both answering `eth_maxPriorityFeePerGas` with 1000000).
+> On EIP-1559 chains the facilitator relies on alloy's default fee estimate. When the last ten blocks carry no non-zero tips, which is common on quiet L2s where most blocks only hold the L1-info deposit, alloy falls back to a 1-wei tip. A sequencer with a minimum tip does not include such a transaction, so the settlement is never mined, the receipt times out, and the signer's nonce is stuck. This PR reads `eth_maxPriorityFeePerGas` alongside the estimate and uses it as a floor for the tip, keeping the estimate's base-fee headroom in the max fee. Nodes without the method keep the old behaviour. Observed on Hemi testnet (chain 743111), whose sequencer mines no tip below 1000000 wei, the value its node answers to `eth_maxPriorityFeePerGas`.
 </details>
 
 ## What these patches do not change

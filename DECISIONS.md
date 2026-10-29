@@ -626,9 +626,9 @@ $ curl -s https://mempool.space/testnet/api/tx/6d1e2ea41e126bbeb6077feec0c6eb417
 
 So hBTC needs Bitcoin testnet3 coins, a UniSat wallet on "Bitcoin Testnet", a Portal deposit and a claim transaction. There is no faster on-chain source: the top hBTC holders are wallets, not pools.
 
-## D-018. Settlement tips: Hemi's sequencer minimum and patch 0019
+## D-018. Settlement tips: Hemi testnet's sequencer minimum and patch 0019
 
-Found on 2026-10-29 while funding the testnet buyer (D-017). Hemi's sequencer does not mine a transaction whose tip is below 0.001 gwei (1,000,000 wei). alloy's default fee estimate, which Foundry and the facilitator both use, tips 1 wei whenever the last ten blocks carry no tips. On Hemi that is common, because most blocks hold only the L1-info deposit.
+Found on 2026-10-29 while funding the testnet buyer (D-017). Hemi testnet's sequencer does not mine a transaction whose tip is below 0.001 gwei (1,000,000 wei). Hemi mainnet does mine lower tips; see the end of this entry. alloy's default fee estimate, which Foundry and the facilitator both use, tips 1 wei whenever the last ten blocks carry no tips. On Hemi that is common, because most blocks hold only the L1-info deposit.
 
 The live evidence is a swap from the buyer on Hemi testnet, sent twice with the same nonce:
 
@@ -643,7 +643,7 @@ $ curl -sS 'https://testnet.explorer.hemi.xyz/api/v2/transactions?filter=validat
 1000000                      # no recently mined transaction tips less
 ```
 
-Both chains suggest exactly that minimum, and both have tip-less fee histories:
+Both chains' nodes suggest exactly that tip, and both have tip-less fee histories:
 
 ```
 $ cast rpc eth_maxPriorityFeePerGas --rpc-url https://testnet.rpc.hemi.network/rpc    → "0xf4240" (1000000)
@@ -657,7 +657,7 @@ $ curl -sS https://raw.githubusercontent.com/alloy-rs/alloy/v2.0.5/crates/provid
 96:    if rewards.is_empty() {
 ```
 
-alloy takes the median of the non-zero rewards and falls back to 1 wei when there are none. The facilitator (x402-rs on alloy-provider 2.0.5, `eip1559: true`) leaves its fees to that estimate, so a settlement sent after two quiet minutes would never be mined. Since patch 0006 keeps the nonce of an unconfirmed transaction, every later settlement from that signer would queue behind it. The forks never showed this, because anvil mines any tip.
+alloy takes the median of the non-zero rewards and falls back to 1 wei when there are none. The facilitator (x402-rs on alloy-provider 2.0.5, `eip1559: true`) leaves its fees to that estimate, so on testnet a settlement sent after two quiet minutes would never be mined. Since patch 0006 keeps the nonce of an unconfirmed transaction, every later settlement from that signer would queue behind it. The forks never showed this, because anvil mines any tip.
 
 What else sends transactions:
 
@@ -672,12 +672,23 @@ AssertionError: expected 1 to be greater than or equal to 1000000000
  ❯ e2e/07-priority-fee.test.ts:47:37
 ```
 
-Live, the first Hemi testnet settlement through hemi.8 tipped exactly the floor, so alloy's estimate alone was below it:
+The first live Hemi testnet settlement through hemi.8 tipped 1,000,000 wei. It did not exercise the patch: my deployment and the buyer's approval had just put 1,000,000-wei tips into the fee history, so alloy's own estimate was the same and hemi.7 would have tipped alike. The patch is shown by `07-priority-fee.test.ts` and the swap above.
 
 ```
 $ cast tx 0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5 --rpc-url https://testnet.rpc.hemi.network/rpc --json | jq -c '{type, maxPriorityFeePerGas, maxFeePerGas}'
 {"type":"0x2","maxPriorityFeePerGas":"0xf4240","maxFeePerGas":"0xf443a"}       # tip 1000000; max fee 1000506 = 2 * 253 + tip
+$ cast rpc eth_feeHistory 10 0x6c5355 '[20]' --rpc-url https://testnet.rpc.hemi.network/rpc | jq -c '[.reward[][0]]'    # the ten blocks before it
+["0xf4240","0xf4240","0xf4240","0x0","0xf4240","0x0","0x0","0x0","0x0","0xf4240"]
 ```
+
+Hemi mainnet's sequencer has no 0.001 gwei minimum, although its node suggests that tip too. The critic pass on this change scanned recent mainnet blocks and found 179 mined transactions from 28 senders tipping less, the lowest at 21 wei:
+
+```
+$ cast tx 0xe1789ca9346d26d06007a3f0abeb11408fdbf7d405d6c3f0adaa9073ce63b48b --rpc-url https://rpc.hemi.network/rpc --json | jq -c '{blockNumber, maxPriorityFeePerGas, maxFeePerGas}'
+{"blockNumber":"0x55a872","maxPriorityFeePerGas":"0x16","maxFeePerGas":"0x116"}   # mined in block 5613682 (it reverted, but it was included); base fee 257
+```
+
+Whether mainnet mines a 1-wei tip is unproven either way. On mainnet the floor is a precaution: a settlement uses about 103,000 gas, so a 1,000,000-wei tip costs about 1e-7 ETH.
 
 The alternative was `eip1559: false`, which needs no image change, since `eth_gasPrice` is the base fee plus 1,000,000. It was rejected for two reasons. A legacy transaction priced at exactly the base fee plus the minimum falls below the minimum as soon as the base fee rises by 1 wei. And a config change would not fix x402-rs for other OP Stack chains.
 
