@@ -58,7 +58,9 @@ const accepts: RouteConfig["accepts"] = networks.flatMap(network => [
 
 const resourceServer = new x402ResourceServer(new HTTPFacilitatorClient({ url: facilitatorUrl }))
   .onAfterVerify(async ({ result, requirements }) => {
-    if (!result.isValid) {
+    if (result.isValid) {
+      console.log(`[seller] verified ${requirements.amount} of ${requirements.asset} on ${requirements.network} from ${result.payer}`);
+    } else {
       console.warn(`[seller] verify rejected (${requirements.network} ${requirements.asset}): ${result.invalidReason} ${result.invalidMessage ?? ""}`);
     }
   })

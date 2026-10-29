@@ -341,6 +341,40 @@ Fork funding writes balances into each token's `balanceOf` mapping. The slots we
 
 Workstation setup recorded for reproducibility: Foundry 1.8.6, plus Colima, the Docker CLI and Compose, all from Homebrew. Colima shares only `$HOME` with containers, so files mounted into containers must live under the repo, not `/tmp`. The project `.npmrc` pins the public npm registry, because the user-level npm config points at a private registry.
 
+## D-014. Seller, buyer and SDK: explicit Hemi assets until the SDK patch lands
+
+The published x402 TypeScript SDK (2.29.0) does not know Hemi. That has two consequences, both handled without forking the SDK:
+
+- **Seller prices:** a price string like `"$0.001"` resolves through the SDK's default-asset table, which has no Hemi entry. The seller therefore prices each accepted asset explicitly, as `{asset, amount, extra}`. USDC.e is 1000 base units ($0.001). The BTC asset defaults to 1 sat, about $0.001 at ~$100k/BTC, and `SELLER_BTC_AMOUNT` changes it. `extra.assetTransferMethod` is `eip3009` for mainnet USDC.e, with `name` and `version` from D-010, and `permit2` for the rest.
+- **Buyer spend controls:** stock `x402Client` spend controls reject every asset that is not an SDK default asset ("All payment requirements were rejected by spendControls"). The buyer allow-lists only the requested Hemi asset, with a per-payment cap (`setSpendControls({allowedAssets: [...]})`), rather than turning spend controls off.
+
+`sdk-patch/0001-hemi-networks.patch` adds Hemi USDC.e to the SDK's default assets and the v1 names `hemi` and `hemi-testnet`. It follows upstream's Arc (`dd89698`), Monad-testnet (`a9955ae`) and Igra (`d9bd02d`) additions, and applies cleanly to `e4a0868`. The `@x402/evm` suite passes with it: 57 files, 1650 tests. Even with the patch, hemiBTC and hBTC still need explicit prices and allow-listing, because default assets are stablecoins only. The upstream PR text is drafted in `sdk-patch/PR.md` and has not been opened.
+
+All four payments were checked end to end on local forks with `buyer/demo-fork.sh`: testnet USDC.e, testnet hBTC, mainnet USDC.e and mainnet hemiBTC. Each settle receipt is from the facilitator signer. Its single `Transfer` log goes from the buyer straight to `payTo`.
+
+## D-015. RPC behaviour: fan-out confirmed, dRPC testnet reports a stale block number
+
+P-2 is confirmed against alloy-transport 2.0.5, the version in x402-rs's `Cargo.lock`. `FallbackLayer` sends every read to all configured RPCs in parallel and takes the first success; only the `*Sync` send methods are exempt. In an experiment with two logging anvil forks as primary and fallback and no rate limits, 5 verifies produced 5 `eth_call`s on each. With this repo's limits (20/s and 4/s), the throttled public RPC sees fewer calls, because a queued copy is dropped once the other RPC answers. When the primary is dead, all traffic runs through the public RPC at up to 4 requests per second.
+
+dRPC's free-tier testnet endpoint answers `eth_blockNumber` from a stale backend, while its `eth_getBlockByNumber("latest")` and `eth_call` are current:
+
+```
+$ curl … '{"method":"eth_blockNumber"}' https://hemi-testnet.drpc.org                     # 6 calls
+4170444 4170447 4170449 4170453 4170456 4170459
+$ curl … '{"method":"eth_getBlockByNumber","params":["latest",false]}' https://hemi-testnet.drpc.org
+7094224 … 7094225
+$ cast call 0xcA11bde05977b3631167028862bE2a173976CA11 'getBlockNumber()(uint256)' --rpc-url https://hemi-testnet.drpc.org
+7094227
+$ cast block-number --rpc-url https://testnet.rpc.hemi.network/rpc
+7094225
+$ curl … '{"method":"eth_blockNumber"}' https://hemi.drpc.org   vs   cast block-number --rpc-url https://rpc.hemi.network/rpc
+5614567 = 5614567                                                                        # mainnet dRPC is fine
+```
+
+Impact on the facilitator: verification reads and nonce reads are correct. Settlement waits for its receipt through alloy's `get_receipt`. With x402-rs's one confirmation (`MetaTransaction::confirmations = 1`, `chain/provider.rs:396`), that polls `eth_getTransactionReceipt` on a timer, independent of the `eth_blockNumber` block stream (`alloy-provider` 2.0.5, `heart.rs` `get_receipt`). A stale block number therefore cannot hide the receipt. dRPC stays the testnet primary as the brief specifies, and the live testnet run checks this.
+
+Impact on forks: an unpinned anvil fork of dRPC testnet would start ~2.9M blocks back. `scripts/fork.sh` defaults to the public RPCs and falls back to dRPC on testnet only with a pinned block.
+
 ### Open questions
 
 - Q-1. Cross-check the mainnet token addresses on `explorer.hemi.xyz` from a network that isn't blocked (D-002). They currently rest on Hemi's token list and on-chain `name`/`symbol` reads.
