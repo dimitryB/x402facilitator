@@ -4,7 +4,7 @@
   "chains": {
     "eip155:743111": {
       "eip1559": true,
-      "receipt_timeout_secs": 120,
+      "receipt_timeout_secs": 60,
       "signers": [
         "$FACILITATOR_TESTNET_PRIVATE_KEY"
       ],

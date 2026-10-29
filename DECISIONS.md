@@ -187,7 +187,16 @@ The x402 upto proxy `0x4020A4f3…0002` is also absent on both networks; the upt
 
 ## D-007. USDC.e addresses
 
-Source: Hemi's token list, which feeds the tunnel UI. It is `hemilabs/token-list@7a326ac4bf501e9205e0580625c9932fa8955f63` (2026-10-23, package `@hemilabs/token-list` 4.2.0), file `src/hemi.tokenlist.json`. The mainnet explorer is blocked locally (D-002); the testnet explorer agrees with the list.
+Source: Hemi's token list, `hemilabs/token-list@7a326ac4bf501e9205e0580625c9932fa8955f63` (2026-10-23, package `@hemilabs/token-list` 4.2.0), file `src/hemi.tokenlist.json`. The tunnel UI uses this list. Hemi's Portal at app.hemi.xyz, which serves `/tunnel`, depends on that exact package version:
+
+```
+$ curl -sS https://raw.githubusercontent.com/hemilabs/ui-monorepo/605713de4b12e8bb8c2b214d822b7287a0d58039/portal/package.json | jq -r '.name, .dependencies["@hemilabs/token-list"]'
+portal
+4.2.0
+$ curl -sS https://raw.githubusercontent.com/hemilabs/ui-monorepo/605713de…/README.md | grep app.hemi
+- **portal**: Portal webapp living at [https://app.hemi.xyz](https://app.hemi.xyz).
+# the repo tree has portal/app/[locale]/tunnel
+``` The mainnet explorer is blocked locally (D-002); the testnet explorer agrees with the list.
 
 ```
 $ curl -sS https://raw.githubusercontent.com/hemilabs/token-list/7a326ac4…/src/hemi.tokenlist.json | jq -c '.tokens[] | select(.symbol=="USDC.e")'
@@ -259,13 +268,25 @@ PRESENT ef55bec6 receiveWithAuthorization(v,r,s)    PRESENT e94a0102 authorizati
 Testnet: not implemented. Every probe reverts with empty data, like the control, and the selectors are absent from the runtime code. The contract is not a proxy; both the EIP-1967 and the FiatToken implementation slots are zero.
 
 ```
-$ cast call 0xD479…6443 "transferWithAuthorization(…v,r,s)" … --rpc-url https://testnet.rpc.hemi.network/rpc
+$ cast call 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 authorizationState(address,bytes32)(bool) 0x000000000000000000000000000000000000dEaD 0x0000000000000000000000000000000000000000000000000000000000000000 --rpc-url https://testnet.rpc.hemi.network/rpc
 Error: server returned an error response: error code 3: execution reverted, data: "0x"
-$ cast call 0xD479…6443 "definitelyNotAFunction_x402()" --rpc-url https://testnet.rpc.hemi.network/rpc
+$ cast call 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32) 0x000000000000000000000000000000000000dEaD 0x000000000000000000000000000000000000dEaD 1 0 0 0x0000000000000000000000000000000000000000000000000000000000000000 27 0x0000000000000000000000000000000000000000000000000000000000000000 0x0000000000000000000000000000000000000000000000000000000000000000 --rpc-url https://testnet.rpc.hemi.network/rpc
 Error: server returned an error response: error code 3: execution reverted, data: "0x"
-# selector scan of 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 (bytes=5544)
-PRESENT a9059cbb transfer [control]   PRESENT 095ea7b3 approve [control]
-absent  e3ee160e  absent cf092995  absent ef55bec6  absent e94a0102
+$ cast call 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes) 0x000000000000000000000000000000000000dEaD 0x000000000000000000000000000000000000dEaD 1 0 0 0x0000000000000000000000000000000000000000000000000000000000000000 0x --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+$ cast call 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 definitelyNotAFunction_x402() --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+# selector scan of the runtime code (scripts/spike.sh "Extra B")
+# USDC.e 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 bytes=5544
+  PRESENT a9059cbb transfer(address,uint256) [control]
+  PRESENT 095ea7b3 approve(address,uint256) [control]
+  absent  e3ee160e transferWithAuthorization(v,r,s)
+  absent  cf092995 transferWithAuthorization(bytes)
+  absent  ef55bec6 receiveWithAuthorization(v,r,s)
+  absent  e94a0102 authorizationState(address,bytes32)
+  absent  d505accf permit(address,address,uint256,uint256,uint8,bytes32,bytes32)
+  absent  7ecebe00 nonces(address)
+  absent  3644e515 DOMAIN_SEPARATOR()
 ```
 
 ## D-010. USDC.e and EIP-2612
@@ -290,7 +311,20 @@ Error: execution reverted: FiatTokenV2: permit is expired
 
 The matching domain separator also confirms the EIP-712 name and version that EIP-3009 signatures must use. `eip712Domain()` (EIP-5267) is not implemented, so the SDK cannot discover these values and the seller must send them in `extra`.
 
-Testnet: not implemented. `DOMAIN_SEPARATOR()`, `nonces(address)`, `permit(…)`, `version()` and `eip712Domain()` all revert with empty data, and the selectors `d505accf`, `7ecebe00` and `3644e515` are absent from the runtime code.
+Testnet: not implemented. Every call reverts with empty data, the same as the control call in D-009, and the selectors `d505accf`, `7ecebe00` and `3644e515` are absent from the runtime code (`docs/spike/testnet.log`, "Extra B").
+
+```
+$ cast call 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 version()(string) --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+$ cast call 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 eip712Domain()(bytes1,string,string,uint256,address,bytes32,uint256[]) --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+$ cast call 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 DOMAIN_SEPARATOR()(bytes32) --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+$ cast call 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 nonces(address)(uint256) 0x000000000000000000000000000000000000dEaD --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+$ cast call 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 permit(address,address,uint256,uint256,uint8,bytes32,bytes32) 0x000000000000000000000000000000000000dEaD 0x000000000000000000000000000000000000dEaD 1 0 27 0x0000000000000000000000000000000000000000000000000000000000000000 0x0000000000000000000000000000000000000000000000000000000000000000 --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+```
 
 ## D-011. hemiBTC (mainnet) and hBTC (testnet): neither standard
 
@@ -407,7 +441,7 @@ Impact on the facilitator: verification reads and nonce reads are correct. Settl
 
 Impact on forks: an unpinned anvil fork of dRPC testnet would start ~2.9M blocks back. `scripts/fork.sh` defaults to the public RPCs and falls back to dRPC on testnet only with a pinned block.
 
-## D-016. Facilitator image: x402-rs e75adda plus five spec-conformance patches
+## D-016. Facilitator image: x402-rs e75adda plus spec-conformance patches
 
 This supersedes the image choice in D-013. The config in D-013 is unchanged.
 

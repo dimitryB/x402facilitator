@@ -27,13 +27,13 @@ Output, from a run against the local forks:
 ```
 [buyer] buyer 0x90F79bf6EB2c4f870365E785982E1f101E93b906 holds 1000 USDC.e
 [buyer] GET http://localhost:24021/echo?demo=fork&network=testnet&asset=usdc
-[buyer] paying 1000 base units of USDC.e (0xD47971C7F5B1067d25cd45d30b2c9eb60de96443) on eip155:743111 to 0x15d3…6A65 via permit2
-[buyer] approve(Permit2, max) sent: 0x475d…7c3a
-[buyer]   https://testnet.explorer.hemi.xyz/tx/0x475d…7c3a
+[buyer] paying 1000 base units of USDC.e (0xD47971C7F5B1067d25cd45d30b2c9eb60de96443) on eip155:743111 to 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65 via permit2
+[buyer] approve(Permit2, max) sent: 0x877b4fc3a6358a8b0c2bcbe982f651f8fa63e11459c8ac469fb7b77caecb72d9
+[buyer]   https://testnet.explorer.hemi.xyz/tx/0x877b4fc3a6358a8b0c2bcbe982f651f8fa63e11459c8ac469fb7b77caecb72d9  (local fork: not on the explorer)
 [buyer] asset:    USDC.e 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 (eip155:743111)
-[buyer] response: {"echo":{"demo":"fork","network":"testnet","asset":"usdc"},"timestamp":"2026-10-29T02:21:12.313Z"}
-[buyer] tx:       0xae65…72c6
-[buyer] explorer: https://testnet.explorer.hemi.xyz/tx/0xae65…72c6
+[buyer] response: {"echo":{"demo":"fork","network":"testnet","asset":"usdc"},"timestamp":"2026-10-29T03:51:30.459Z"}
+[buyer] tx:       0x14796f03f3787976cb9b042bdac2e11eaeac5e099aad0e219f9495feb545a1b3
+[buyer] explorer: https://testnet.explorer.hemi.xyz/tx/0x14796f03f3787976cb9b042bdac2e11eaeac5e099aad0e219f9495feb545a1b3  (local fork: not on the explorer)
 [buyer] buyer balance: 1000 USDC.e -> 999.999 USDC.e
 [buyer] payTo balance: 0 USDC.e -> 0.001 USDC.e
 ```

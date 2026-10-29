@@ -65,13 +65,13 @@ Networks:
 You need Docker (any engine with Compose v2), Foundry (`cast`, `anvil`, `forge`), `jq` and Node 22.9 or later. The npm scripts use `--env-file-if-exists`, which Node added in 22.9. All Hemi values come from [`shared/hemi.json`](shared/hemi.json).
 
 ```bash
-cp .env.example .env    # then fill in the keys
+cp -n .env.example .env    # only if you have no .env yet; then fill in the keys
 npm install
 ```
 
 ### Without funds: everything on local forks
 
-`scripts/fork.sh` forks both Hemi chains with anvil and replays the three contract deployments onto the forks. Nothing is sent to a live network.
+`scripts/fork.sh` forks both Hemi chains with anvil and replays the missing contract deployments onto the forks: all three on testnet, and the proxy and validator on mainnet, where Permit2 already exists. Nothing is sent to a live network.
 
 ```bash
 buyer/demo-fork.sh
@@ -95,7 +95,7 @@ FACILITATOR_CONFIG=config.mainnet.json docker compose up   # mainnet only: after
 docker compose up                                          # both chains (config.json): after both
 ```
 
-If a contract or key is missing, the container exits with the reason. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently.
+If a contract or key is missing, the container exits with the reason. A missing contract shows as `Contract at address … does not exist`. An empty `FACILITATOR_*_PRIVATE_KEY` shows as `Invalid evm private key: invalid string length`. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently.
 
 The image, `hemi-x402-facilitator:e75adda-hemi.2`, is x402-rs at commit `e75adda` plus seven small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it, which takes about 2 minutes; add `--build` after changing a patch.
 
@@ -115,7 +115,7 @@ None of them changes what is settled or to whom. [`facilitator/x402-rs/README.md
 - **Scheme:** `v2-eip155-exact` on each chain. It accepts both EIP-3009 and Permit2 payloads. `/supported` lists `exact` per network; which transfer method a payment uses is set per asset by the seller's `extra.assetTransferMethod`.
 - **RPCs:** dRPC first, the Hemi public RPC second, overridable with `HEMI_{TESTNET,MAINNET}_RPC_{PRIMARY,FALLBACK}`. x402-rs sends every read to all RPCs at once and takes the first answer, so a dead or stalled RPC costs nothing as long as one answers (D-015). The public RPC is throttled to 4 requests per second, under its ~300 per minute limit.
 - **Signers:** one key per chain, `FACILITATOR_TESTNET_PRIVATE_KEY` and `FACILITATOR_MAINNET_PRIVATE_KEY`. The signer only pays gas.
-- **Receipt timeout:** 120 seconds, because Hemi RPCs do stall (the brief's outage note).
+- **Receipt timeout:** 60 seconds. Hemi RPCs do stall (the brief's outage note), and if a broadcast tx has no receipt by then, `/settle` returns `settlement_pending` with the tx hash instead of losing it. The timeout must stay under the seller SDK's 90-second facilitator timeout, or a stock seller gives up first and never sees the hash.
 
 ### Why the facilitator never holds funds
 
@@ -151,7 +151,7 @@ Until Hemi is in the SDK's default assets ([`sdk-patch/`](sdk-patch/)), price wi
 | Mainnet USDC.e | `{"assetTransferMethod": "eip3009", "name": "Bridged USDC (Stargate)", "version": "2"}` |
 | hemiBTC, testnet USDC.e, hBTC | `{"assetTransferMethod": "permit2"}` |
 
-The seller SDK checks the facilitator's `/supported` at startup and refuses to serve a network the facilitator does not list.
+The seller SDK checks the facilitator's `/supported` at startup and refuses to serve a network the facilitator does not list. Keep the SDK's default facilitator timeout (90 s) or raise it. Lowering it below the facilitator's 60-second receipt timeout would cut off a `settlement_pending` answer.
 
 ## For buyers: approving Permit2 (or not)
 

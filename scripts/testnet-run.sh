@@ -59,7 +59,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== 1. contracts"
-contracts/deploy.sh testnet --broadcast 2>&1 | tee "$LOGDIR/deploy.log"
+# Deploy with the facilitator's testnet key: it is the wallet whose balance was checked above.
+# deploy.sh would otherwise pick DEPLOYER_PRIVATE_KEY from .env, which may be a mainnet key.
+DEPLOYER_PRIVATE_KEY=$FACILITATOR_TESTNET_PRIVATE_KEY contracts/deploy.sh testnet --broadcast 2>&1 | tee "$LOGDIR/deploy.log"
 contracts/verify.sh testnet 2>&1 | tee "$LOGDIR/verify.log" || echo "(verification is best effort; see contracts/README.md)"
 
 echo "== 2. facilitator (testnet config)"
