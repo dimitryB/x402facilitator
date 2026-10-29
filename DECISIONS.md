@@ -557,6 +557,57 @@ Verified on 2026-10-29 against a no-cache hemi.7 build (113 s):
 
 The alternative was the stock image with the deviations documented. It was rejected because it fails a Definition-of-done item. The TypeScript facilitator fallback in the brief is for cases where the Rust config cannot express what Hemi needs. This gap is not Hemi-specific, and a patch keeps the Rust facilitator the brief chose.
 
+## D-017. Testnet funding: where USDC.e and hBTC come from
+
+Checked on 2026-10-29 for the live testnet run. Ethereum Sepolia reads use `https://ethereum-sepolia-rpc.publicnode.com`, since dRPC's free plan refuses Sepolia and `rpc.sepolia.org` timed out.
+
+**USDC.e** is an OP Stack bridged token. Its L1 token is Aave V3's Sepolia test USDC, which Aave's faucet mints to anyone. Circle's Sepolia USDC is a different token and does not bridge to it.
+
+```
+$ cast call 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 'remoteToken()(address)' / 'bridge()(address)' --rpc-url https://testnet.rpc.hemi.network/rpc
+0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8    0x4200000000000000000000000000000000000010
+$ cast call 0x4200000000000000000000000000000000000010 'OTHER_BRIDGE()(address)' --rpc-url https://testnet.rpc.hemi.network/rpc
+0xc94b1BEe63A3e101FE5F71C80F912b4F4b055925
+$ cast call 0xc94b1BEe63A3e101FE5F71C80F912b4F4b055925 'OTHER_BRIDGE()(address)' --rpc-url $SEPOLIA     # the pair points back
+0x4200000000000000000000000000000000000010
+$ cast call 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8 'mint(uint256)(bool)' 1000000 --from <buyer> --rpc-url $SEPOLIA
+Error: execution reverted: Ownable: caller is not the owner
+$ cast call 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8 'owner()(address)' --rpc-url $SEPOLIA
+0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D         # Blockscout name "Faucet"
+$ curl -sS https://raw.githubusercontent.com/bgd-labs/aave-address-book/main/src/AaveV3Sepolia.sol | grep -E 'FAUCET|USDC_UNDERLYING'
+  address internal constant FAUCET = 0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D;
+  address internal constant USDC_UNDERLYING = 0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8;
+$ cast call 0xC959483DBa39aa9E78757139af0e9a2EDEb3f42D 'isPermissioned()(bool)' --rpc-url $SEPOLIA
+false
+$ cast call 0xC959…f42D 'mint(address,address,uint256)(uint256)' 0x94a9…E4C8 <buyer> 1000000 --from <buyer> --rpc-url $SEPOLIA
+1000000 [1e6]
+```
+
+`scripts/testnet-fund-usdc.sh --go` does the mint, the approval and `depositERC20To` from the buyer, then waits for the balance on Hemi testnet. It reads the route from chain state and refuses if any link above no longer holds. On an anvil fork of Sepolia, all three transactions succeeded, the bridge's USDC balance rose by the deposited 10 USDC, and the portal `0xB6f9…2516` emitted `TransactionDeposited`.
+
+Hemi testnet also has Uniswap V3 WETH/USDC.e pools with liquidity, for example `0xA2Ecdf4bdb501cde058608F02fB8c4FC111fDF5C` (1% fee, 18.4 WETH and 12.4M USDC.e) and `0x2f53025Ac91D2843018495014F95f0CB956e3719` (0.3%). Swaps go through an unverified router, `0xA18019E62f266C2E17e33398448e4105324e0d0F`, which is called with `execute`. This route needs no Sepolia ETH and is the fallback.
+
+**hBTC** has no bridge link. Only the Bitcoin tunnel's vault manager mints it:
+
+```
+$ cast call 0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7 'minter()(address)' --rpc-url https://testnet.rpc.hemi.network/rpc
+0x8221CFD3Eca3c5F9FA27b2AE774151642f1C449e         # createVault, confirmDeposit, initiateWithdrawal, ...
+```
+
+The most recent mint shows the testnet flow end to end. Testnet `confirmDeposit` tx `0x8741add5…1aac` (2026-09-03) names Bitcoin txid `6d1e2ea4…a63f`. That txid exists on Bitcoin **testnet3**, not testnet4 or signet:
+
+```
+$ curl -s https://mempool.space/testnet/api/tx/6d1e2ea41e126bbeb6077feec0c6eb417e28041195d759c776294d3e210ea63f | jq -c '[.vout[] | {value, type: .scriptpubkey_type}]'
+[{"value":2000000,"type":"p2pkh"},{"value":0,"type":"op_return"},{"value":7137856320,"type":"v0_p2wpkh"}]
+# The OP_RETURN holds the recipient's EVM address as ASCII hex. It was confirmed at 2025-12-12T16:41:10Z, and hBTC minted on Hemi was 1990000.
+```
+
+- **Fee:** 2,000,000 sats in, 1,990,000 minted, so 0.5%. Hemi's docs give a minimum of 0.0001 BTC and six Bitcoin confirmations.
+- **Claim:** the mint is not automatic on testnet. The depositor's own EVM address sent `confirmDeposit`, nine months after the Bitcoin transaction confirmed.
+- **Activity:** the vault manager's history shows two confirmed deposits in 2026, both from that one address. The tunnel works, but it is barely used.
+
+So hBTC needs Bitcoin testnet3 coins, a UniSat wallet on "Bitcoin Testnet", a Portal deposit and a claim transaction. There is no faster on-chain source: the top hBTC holders are wallets, not pools.
+
 ### Open questions
 
 - Q-1. Cross-check the mainnet token addresses on `explorer.hemi.xyz` from a network that isn't blocked (D-002). They currently rest on Hemi's token list and on-chain `name`/`symbol`/`decimals` reads. On 2026-10-29 a retry from this workstation still hit the TLS block, and no alternative mainnet explorer host resolved (`hemi.blockscout.com` and `hemi.explorer.caldera.xyz` return 404; `explorer.hemi.network` does not resolve). Needs someone on another network: `curl -sS 'https://explorer.hemi.xyz/api/v2/tokens?q=USDC.e'` and `?q=hemiBTC`.

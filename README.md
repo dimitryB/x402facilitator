@@ -181,7 +181,7 @@ The buyer prints the settlement tx hash and its explorer link. [`buyer/README.md
 
 ## Testnet run
 
-Not run yet: the testnet wallets in `.env` are unfunded. Everything else is scripted. With no flag, the script only checks balances and prints what to fund; it sends nothing:
+Not run yet: both wallets now hold Hemi testnet ETH, but the buyer still needs USDC.e and hBTC. Everything else is scripted. With no flag, the script only checks balances and prints what to fund; it sends nothing:
 
 ```bash
 scripts/testnet-run.sh
@@ -192,15 +192,30 @@ It needs two funded wallets:
 - **Facilitator/deployer:** about 0.001 testnet ETH. It deploys the three contracts (about 0.0000048 ETH in the `contracts/deploy.sh testnet` simulation) and pays settlement gas.
 - **Buyer:** about 0.0001 ETH for its two one-time approvals, at least 0.001 USDC.e and at least 1 sat of hBTC.
 
-Where the funds come from, all through the Hemi Portal tunnel in testnet mode (https://app.hemi.xyz/en/tunnel/?networkType=testnet):
+Where the funds come from (D-017):
 
 | Asset | Path | Wait |
 |------|------|------|
-| Testnet ETH | Sepolia ETH, from any Sepolia faucet, tunneled Sepolia → Hemi testnet | minutes |
-| Testnet USDC.e `0xD479…6443` | A transfer from an existing Hemi-testnet holder; the explorer shows about 206k holders. Or tunnel Sepolia token `0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` (the token list's `bridgeInfo`) from Sepolia. Its `mint` is owner-only, so the Sepolia side also has to come from a holder | minutes |
-| Testnet hBTC `0x36Ab…fAe7` | Bitcoin testnet coins (Hemi's docs point to a tBTC faucet) deposited through the Bitcoin tunnel | about 1 hour for 6 Bitcoin confirmations, sometimes plus a manual vault confirmation |
+| Testnet ETH | Ethereum Sepolia ETH from any Sepolia faucet, tunneled to Hemi testnet in the [Hemi Portal](https://app.hemi.xyz/en/tunnel/?networkType=testnet) | minutes |
+| Testnet USDC.e `0xD479…6443` | Aave's Sepolia test USDC `0x94a9…E4C8`, which Aave's open faucet mints, tunneled to Hemi testnet. `scripts/testnet-fund-usdc.sh --go` does both from the buyer and needs about 0.001 Ethereum Sepolia ETH there. By hand: app.aave.com/faucet in testnet mode, then the Portal. Circle's Sepolia USDC is a different token and does not work | minutes |
+| Testnet hBTC `0x36Ab…fAe7` | Bitcoin **testnet3** coins, deposited through the Portal's Bitcoin tunnel with UniSat set to "Bitcoin Testnet", then claimed | over an hour |
 
-hBTC has no Sepolia route. A Hemi-testnet transfer from an existing holder is the fast alternative.
+For USDC.e, the funding script sends nothing without `--go`. Without a flag it checks the route on-chain and prints what is missing:
+
+```bash
+scripts/testnet-fund-usdc.sh
+```
+
+The Sepolia transactions need Ethereum Sepolia ETH; Hemi testnet ETH cannot pay for them. If none is at hand, Hemi testnet's Uniswap V3 WETH/USDC.e pools are a fallback (D-017).
+
+hBTC needs more care:
+
+- **Network:** the tunnel watches Bitcoin testnet3. Many faucets now pay out testnet4, and those coins never reach the tunnel. Hemi's docs point to coinfaucet.eu.
+- **Amounts:** the minimum deposit is 0.0001 BTC, and the last testnet deposit paid a 0.5% fee. One payment needs 1 sat.
+- **Claim:** after six Bitcoin confirmations, the depositor's EVM wallet must send the claim, `confirmDeposit`, from the Portal. Nothing is minted until it does, and it costs a little Hemi testnet ETH.
+- **Reliability:** the testnet tunnel is barely used, with two claimed deposits in 2026. If a claim fails, Hemi's Discord is the fallback for a few sats.
+
+Deposit to your own wallet and then send some hBTC to the buyer, or deposit to the buyer's address directly.
 
 Then run:
 

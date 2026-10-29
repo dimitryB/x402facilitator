@@ -46,8 +46,8 @@ echo "seller payTo         $SELLER_PAY_TO"
 missing=0
 [ "$fac_eth" -ge $NEED_FAC_WEI ] || { echo "MISSING: send >= 0.001 testnet ETH to $FAC"; missing=1; }
 [ "$buyer_eth" -ge $NEED_BUYER_WEI ] || { echo "MISSING: send >= 0.0001 testnet ETH to $BUYER (for the one-time approve(Permit2) per token)"; missing=1; }
-[ "$buyer_usdc" -ge $NEED_USDC ] || { echo "MISSING: send >= 0.001 testnet USDC.e ($USDC) to $BUYER"; missing=1; }
-[ "$buyer_hbtc" -ge $NEED_HBTC ] || { echo "MISSING: send >= 1 sat of testnet hBTC ($HBTC) to $BUYER"; missing=1; }
+[ "$buyer_usdc" -ge $NEED_USDC ] || { echo "MISSING: send >= 0.001 testnet USDC.e ($USDC) to $BUYER (scripts/testnet-fund-usdc.sh mints and tunnels it)"; missing=1; }
+[ "$buyer_hbtc" -ge $NEED_HBTC ] || { echo "MISSING: send >= 1 sat of testnet hBTC ($HBTC) to $BUYER (Bitcoin testnet3 via the Bitcoin tunnel; see README)"; missing=1; }
 [ "${1:-}" = --go ] || { [ $missing = 0 ] && echo "Balances OK. Re-run with --go."; exit $missing; }
 [ $missing = 0 ] || die "fund the addresses above first"
 
