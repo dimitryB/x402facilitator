@@ -2,7 +2,7 @@
 
 An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hemi mainnet (`eip155:43111`) and Hemi testnet (`eip155:743111`) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint.
 
-It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and seven small patches that make its errors and check order match the x402 v2 spec. The patches don't change what is settled or to whom (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
+It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and eleven small patches that make its checks and error responses match the x402 v2 spec. The patches don't change what is settled or to whom (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
 **Status:** built and tested end to end on local forks of both Hemi chains. The live testnet run is scripted but waits for testnet funds. Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
 
@@ -97,18 +97,21 @@ docker compose up                                          # both chains (config
 
 If a contract or key is missing, the container exits with the reason. A missing contract shows as `Contract at address … does not exist`. An empty `FACILITATOR_*_PRIVATE_KEY` shows as `Invalid evm private key: invalid string length`. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently.
 
-The image, `hemi-x402-facilitator:e75adda-hemi.2`, is x402-rs at commit `e75adda` plus seven small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it, which takes about 2 minutes; add `--build` after changing a patch.
+The image, `hemi-x402-facilitator:e75adda-hemi.3`, is x402-rs at commit `e75adda` plus eleven small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it, which takes about 2 minutes; add `--build` after changing a patch.
 
 Stock x402-rs does not return the x402 v2 spec's error shapes. The patches fix that:
 
-- **Signature first:** the payer's signature is checked before balance or allowance. A bad signature returns `invalid_exact_evm_payload_signature`; stock x402-rs gives HTTP 500 `unexpected_error`.
+- **Signature first:** the payer's signature is checked before balance or allowance. A bad signature returns `invalid_exact_evm_payload_signature`; stock x402-rs gives HTTP 500 `unexpected_error`. This holds for plain wallets and for contract wallets: an EIP-1271 wallet is asked `isValidSignature`.
 - **Error bodies:** they carry the real `payer` and `network`.
 - **Permit2:** allowance is checked before balance, and both are re-checked on settle.
 - **Replay:** a replay returns `invalid_transaction_state`.
 - **Receipt timeout:** a settlement whose receipt doesn't arrive in time returns `settlement_pending` with its tx hash, instead of dropping the hash.
 - **Wrong network:** an unsupported network returns `invalid_network`.
+- **Exact amount:** a signed amount must equal the price; over- and under-payment return `invalid_exact_evm_payload_authorization_value_mismatch`.
+- **Spec codes everywhere:** expired or early authorizations, recipient mismatch, wrong asset, malformed bodies and failed simulations return the spec's §9 codes.
+- **Pending retries:** a retried settle of a pending payment returns the same tx hash, and its success once mined, instead of broadcasting again.
 
-None of them changes what is settled or to whom. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) and D-016 explain each one. The unpatched stock image is kept, by digest, in a comment in `docker-compose.yml`.
+None of them changes where funds go. The exact-amount patch narrows what is accepted. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) and D-016 explain each one. The unpatched stock image is kept, by digest, in a comment in `docker-compose.yml`.
 
 [`facilitator/config.json`](facilitator/config.json) holds both chains, and [`config.testnet.json`](facilitator/config.testnet.json) and [`config.mainnet.json`](facilitator/config.mainnet.json) hold one each. Settings, all explained in D-013:
 
@@ -239,9 +242,11 @@ The end-to-end suite starts both forks and the facilitator image from this repo.
 - verify and settle in all four assets, with exact balance checks
 - bad signatures and insufficient balance under both transfer methods, checked against the spec's error shapes
 - the same bad-signature cases with an unfunded, unapproved payer, which must still report the signature first
+- contract-wallet (EIP-1271) payers that accept and that reject a signature
+- over- and under-payment, expired and early authorizations, recipient and asset mismatches, and malformed bodies
 - missing Permit2 allowance
 - replay
-- a stalled receipt returning `settlement_pending` with the hash
+- a stalled receipt returning `settlement_pending` with the hash; a retry returns the same hash, then success once mined
 - an unsupported network returning `invalid_network`
 - that the facilitator and the proxy never hold tokens
 - that the dead primary really is dead inside the container
@@ -250,7 +255,7 @@ Latest results (2026-10-29), against a no-cache build of the image:
 
 | Suite | Result |
 |------|------|
-| `npm test -w tests` | 7 files, 55 tests passed, 0 failed (65 s) |
+| `npm test -w tests` | 8 files, 73 tests passed, 0 failed (77 s) |
 | `forge test` | 17 passed, 0 failed |
 | `buyer/demo-fork.sh` | all four payments settled; payTo received exactly the price each time |
 

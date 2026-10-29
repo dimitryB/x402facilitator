@@ -5,16 +5,22 @@ The facilitator image is x402-rs at commit `e75adda8a0e3cf23db446883ba91b88bbab2
 spec's error shapes, and no setting in `config.json` changes that. The Definition of done requires those
 shapes (a failed signature and an insufficient balance must "return the spec's error shapes").
 
-Each patch is small, does one thing, has unit tests and is meant to go upstream. None changes what gets
-settled, to whom, or for how much. What they change:
+Each patch is small, does one thing, has unit tests and is meant to go upstream. None changes to whom or
+how a payment is settled. What they change:
 
 - which error is returned, and with which fields (all patches);
-- the order of the checks: the signature first, then allowance before balance (0003, 0004);
-- one piece of transaction handling: after a broadcast transaction's receipt times out, the signer's
-  nonce is kept instead of reset, so that the next settlement cannot reuse it (0006).
+- the order and strictness of the checks: the signature first, including a contract wallet's own
+  EIP-1271 answer, then allowance before balance (0003, 0004, 0008);
+- what may be settled: the exact scheme now settles only the exact required amount and rejects an
+  over-authorization, which stock x402-rs settled in full (0010);
+- transaction handling in two places: after a broadcast transaction's receipt times out, the signer's
+  nonce is kept instead of reset (0006); and a retry of such a settle is answered from that transaction,
+  without sending another (0011).
 
 HTTP status codes follow x402-rs's existing mapping: 400 for a rejected payment, 412 for a missing Permit2
-allowance, 500 for an unexpected failure. The one addition is `settlement_pending`, answered with 200 (see 0006).
+allowance, 500 for an unexpected failure (an RPC that cannot be reached). Additions: `settlement_pending` is
+answered with 200 (0006); a mined settlement that reverted gets 400 `invalid_transaction_state` with its
+hash (0011); a body that is not JSON keeps axum's status (400) but gets a JSON `invalid_payload` body (0009).
 
 Spec references are to `x402-foundation/x402` at `e4a0868`:
 
@@ -31,6 +37,10 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0005](patches/0005-eip155-report-a-replayed-authorization-as-invalid_tr.patch) | a replayed authorization returns HTTP 500 `unexpected_error` | §9 |
 | [0006](patches/0006-settle-report-an-unconfirmed-settlement-as-settlemen.patch) | a receipt timeout returns 500 with `"transaction": ""`, losing the hash of a transaction that later pays out | §5.3.2, §9 `settlement_pending` |
 | [0007](patches/0007-facilitator-local-report-a-request-for-an-unsupporte.patch) | a request for a network the facilitator does not serve returns `unsupported_scheme` | §9 `invalid_network` |
+| [0008](patches/0008-eip155-verify-EIP-1271-signatures-before-the-transfe.patch) | a contract wallet (EIP-1271) with a signature it rejects gets HTTP 500 `unexpected_*_error` | scheme_exact_evm.md step 1, §9 |
+| [0009](patches/0009-errors-report-the-remaining-failures-with-x402-v2-9-.patch) | the remaining errors use x402-rs names (`invalid_payment_expired`, `recipient_mismatch`, ...); `"network": ""` for a request without one; plain-text 400 for a body that is not JSON | §9, §5.3.2 |
+| [0010](patches/0010-eip155-require-exactly-the-required-amount-in-the-v2.patch) | the exact scheme accepts and settles an amount above the requirement | §9 `…_value_mismatch` |
+| [0011](patches/0011-eip155-answer-a-retried-pending-settlement-from-its-.patch) | a retried `settlement_pending` settle is settled again from scratch; a mined revert loses its hash | §9 `settlement_pending`, §5.3.2 |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -47,17 +57,24 @@ validAfter, token/network, simulation (Phase 3). The patched facilitator, on bot
 | Step | EIP-3009 | Permit2 |
 |------|------|------|
 | 1 | `accepted` equals the requirements; network | **signature** |
-| 2 | **signature** | `accepted` equals the requirements; spender; recipient; deadline and validAfter; amount; token |
-| 3 | recipient; validity window; amount | **allowance** (412 `permit2_allowance_required`) |
+| 2 | **signature** | `accepted` equals the requirements; spender; recipient; deadline and validAfter; exact amount; token |
+| 3 | recipient; validity window; exact amount | **allowance** (412 `permit2_allowance_required`) |
 | 4 | **balance** (`insufficient_funds`) | **balance** (`insufficient_funds`) |
 | 5 | simulation (verify) or send (settle) | simulation (verify) or send (settle) |
 
 The **signature check** reads nothing from the chain unless it needs to:
 
 - An EOA signature must recover to `from`, which needs no RPC.
-- A signature that does not recover to `from` is accepted only as EIP-1271, so `from` must have code. This
-  costs one `eth_getCode`, and only on this path.
+- A signature that does not recover to `from` is accepted only as EIP-1271: `from` must have code, and
+  its `isValidSignature(hash, signature)` must return `0x1626ba7e` for the EIP-712 hash the token or
+  Permit2 will check. Anything else, a revert included, is an invalid signature. This costs an
+  `eth_getCode` and an `eth_call`, and only on this path. It is the TS reference facilitator's strict
+  EIP-1271 check.
 - An EIP-6492 signature (a counterfactual wallet) is still checked by the on-chain validator.
+- If the transfer simulation or send still reverts with a signature error, that is reported as an invalid
+  signature too: FiatToken "invalid signature", or Permit2 `InvalidSigner()`, `InvalidSignature()`,
+  `InvalidContractSignature()` or `InvalidSignatureLength()`. That covers an EIP-712 domain in the
+  requirements that differs from the token's.
 
 As a result, an unfunded, unapproved payer with a bad signature gets `invalid_exact_evm_payload_signature`.
 Stock x402-rs answered `insufficient_funds` or `permit2_allowance_required` there.
@@ -67,10 +84,36 @@ allowance and balance reads, although the spec lists them after: requirements ma
 validity window, amount and token. They need no RPC. So a payload that is both expired and unfunded is
 reported as expired. The TS reference facilitator orders them the same way.
 
+## Error codes after the patches
+
+Every reason the v2 exact handler can return, with the §9 code it is reported as. "Generic" means the
+mapping lives in `x402-types` and applies to every chain. "Exact EVM" means it applies only to the v2
+exact handler, where §9 has a scheme-specific code.
+
+| x402-rs error | §9 code | Why this code |
+|------|------|------|
+| `InvalidSignature` (incl. EIP-1271 rejection and signature reverts) | `invalid_exact_evm_payload_signature` | §9: "signature is invalid or improperly signed" (exact EVM) |
+| `Early` | `invalid_exact_evm_payload_authorization_valid_after` | §9: "not yet valid (before validAfter)" (exact EVM) |
+| `Expired` | `invalid_exact_evm_payload_authorization_valid_before` | §9: "has expired (after validBefore)"; Permit2's `deadline` plays that role (exact EVM) |
+| `InvalidPaymentAmount` (now any difference) | `invalid_exact_evm_payload_authorization_value_mismatch` | §9: "does not exactly match the required amount" (exact EVM) |
+| `RecipientMismatch` | `invalid_exact_evm_payload_recipient_mismatch` | §9: "Recipient address does not match payment requirements" (exact EVM) |
+| `InsufficientFunds` | `insufficient_funds` | unchanged |
+| `InsufficientAllowance` | `permit2_allowance_required` (412) | scheme_exact_evm.md Permit2 step 2; same spelling as the TS reference |
+| `AuthorizationAlreadyUsed` | `invalid_transaction_state` | the chain rejects the transfer because the nonce is spent (0005) |
+| `TransactionSimulation`, other simulation reverts | `invalid_transaction_state` | §9: "Blockchain transaction failed or was rejected": the transfer fails on chain (generic) |
+| a mined settlement that reverted | `invalid_transaction_state`, with its hash | same, and §5.3.2: a broadcast transaction is reported (0011) |
+| `AssetMismatch` | `invalid_payload` | the payload authorizes another token than the requirements ask for: "contains invalid data" (generic) |
+| `InvalidFormat`, a body that is not JSON, a request naming no network | `invalid_payload` | §9: "malformed or contains invalid data" (generic) |
+| `AcceptedRequirementsMismatch` | `invalid_payment_requirements` | the requirements sent are not the ones the payload accepted; §9: "requirements object is invalid" (generic) |
+| `ChainIdMismatch`, `UnsupportedChain` | `invalid_network` | §9: "network is not supported" (generic) |
+| `UnsupportedScheme` | `unsupported_scheme` | unchanged |
+| receipt not confirmed in time | `settlement_pending` (200, with the hash) | §9 (0006, 0011) |
+| an RPC that cannot be reached | `unexpected_verify_error` / `unexpected_settle_error` (500) | §9; the only case left as "unexpected" |
+
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.2` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.3` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -82,7 +125,10 @@ the classic builder, which is all Colima's Docker CLI has without buildx. It run
 If a patch has drifted, step 3 fails and names the patch. Measured on Colima (4 CPUs, 8 GB, Apple
 silicon), with the base images already pulled:
 
-- Cold build: 114 s. Of that, 57 s compiles the dependency graph and 12 s rebuilds after the patches.
+- Cold build: 114 s for hemi.1. Of that, 57 s compiles the dependency graph and 12 s rebuilds after the
+  patches.
+- `docker compose build --no-cache` of hemi.3, which re-fetches x402-rs and the crates and compiles
+  everything: 113 s (57.7 s dependencies, 11.7 s after the patches).
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -105,7 +151,7 @@ cargo test -p x402-types -p x402-facilitator-local -p x402-chain-eip155 \
 ```
 
 Every patch was checked one by one: `cargo fmt --check`, `cargo clippy --tests -D warnings`, and the
-tests, with 20 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
+tests, with 32 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
 the built image on anvil forks.
 
 ## The one non-spec field: `invalidReasonDetails`
@@ -420,17 +466,157 @@ After (HTTP 400):
 > A `/verify` or `/settle` request for a chain the facilitator is not configured for gets `unsupported_scheme`. §9 distinguishes `invalid_network` ("Specified blockchain network is not supported") from `unsupported_scheme`. This PR adds `SchemeRegistry::supports_chain`. When no handler matches, `FacilitatorLocal` reports `UnsupportedChain` if no handler serves the request's chain at all, and `UnsupportedScheme` otherwise. `UnsupportedChain`, already used by scheme handlers, now maps to a new `ErrorReason::InvalidNetwork` (`invalid_network`) instead of the non-spec `unsupported_chain`. Unit tests cover both lookups.
 </details>
 
+### 0008 eip155: verify EIP-1271 signatures before the transfer, and report signature reverts
+
+- **The bug.** A payer with code (a contract wallet) and a signature the wallet does not accept got HTTP
+  500 `unexpected_verify_error` / `unexpected_settle_error`. 0003 only checked that the payer had code,
+  and the signature itself was judged inside the transfer simulation. The revert surfaced as a transport
+  error: "FiatTokenV2: invalid signature", or Permit2 `InvalidContractSignature()` `0xb0669cbc`.
+- **The fix.**
+  - For an EIP-1271 signature, call the payer's `isValidSignature(hash, signature)` with the EIP-712 hash
+    that the token or Permit2 will check, and require the magic value `0x1626ba7e`.
+  - Any other answer, a revert included, is an invalid signature. Only an RPC that cannot be reached
+    stays an unexpected error. This mirrors the TS reference
+    (`mechanisms/evm/src/exact/facilitator/permit2.ts`, strict EIP-1271).
+  - A simulation or send that still reverts with a known signature error is reported as an invalid
+    signature. The known errors are FiatToken `Error(string)` reasons containing "invalid signature" and
+    Permit2's four signature errors, as in the TS reference's `eip3009-utils.ts`.
+- **EIP-6492** counterfactual wallets are unchanged.
+- **Tests.** The e2e suite gives two addresses code with `anvil_setCode`. One wallet returns the magic
+  value for anything, and must still verify and settle; tokens go from the wallet to `payTo`. The other
+  returns `0x00000000`. Both are tested with both methods.
+
+Before (hemi.2, critic's probe; stock x402-rs says `unexpected_error`):
+`{"isValid":false,"invalidReason":"unexpected_verify_error","invalidMessage":"… FiatTokenV2: invalid signature …", …}`.
+
+After (HTTP 400):
+
+```json
+{"isValid":false,"invalidReason":"invalid_exact_evm_payload_signature","invalidMessage":"0xa58FED5834D90Ba82d2AA1c0EC1b35A14D5C8B61 does not accept the signature (isValidSignature returned 0x00000000)","invalidReasonDetails":"…same…","payer":"0xa58FED5834D90Ba82d2AA1c0EC1b35A14D5C8B61"}
+{"success":false,"errorReason":"invalid_exact_evm_payload_signature","errorMessage":"0x1d973D8FE359Cf82f5d7BC36c8F8CE0b162a080C does not accept the signature (isValidSignature returned 0x00000000)","transaction":"","network":"eip155:43111","payer":"0x1d973D8FE359Cf82f5d7BC36c8F8CE0b162a080C"}
+```
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** exact/EVM: a contract wallet's rejected signature is HTTP 500; check `isValidSignature` first
+>
+> **Repro:** give the payer code that does not accept the signature (any EIP-1271 wallet, or anvil_setCode with code returning `0x00000000`), fund and approve it, and send a payload. `/verify` and `/settle` answer HTTP 500 `unexpected_error`: the signature is only judged inside the transfer simulation, whose revert ("FiatTokenV2: invalid signature", Permit2 `InvalidContractSignature()`) surfaces as a transport error.
+>
+> **Fix:** for a signature that does not recover to `from` (and therefore can only be EIP-1271), call `from.isValidSignature(hash, signature)` with the EIP-712 hash of the `TransferWithAuthorization` / `PermitWitnessTransferFrom`, and require `0x1626ba7e`. Anything else, a revert included, is an invalid signature; only a failure to reach the RPC is an error. As a fallback, a simulation or send that reverts with a known signature error (`Error(string)` mentioning an invalid signature; Permit2 `InvalidSignature()`, `InvalidSigner()`, `InvalidContractSignature()`, `InvalidSignatureLength()`) is reported as an invalid signature as well. EIP-6492 wallets are unchanged. This matches the TS reference facilitator. Unit tests use alloy's mocked transport.
+</details>
+
+### 0009 errors: report the remaining failures with x402 v2 §9 codes, and answer unreadable bodies in JSON
+
+- **The bug.** The remaining errors went out with x402-rs's own names, as listed in the error-code table
+  above. A `/settle` request that names no network got `"network": ""`. A body that is not JSON got
+  axum's plain-text 400.
+- **The fix.**
+  - The exact EVM codes are mapped at the v2 exact handler's boundary, next to the signature mapping, so
+    other chains keep their generic codes.
+  - The generic ones are mapped in `x402-types`.
+  - A transfer simulation that reverts for any other reason, for example a paused token, becomes
+    `invalid_transaction_state`. Only errors that are not reverts stay `unexpected_*_error`.
+  - A request without a network gets `invalid_payload`, and `network` is omitted instead of `""`.
+  - A body that is not JSON gets the endpoint's JSON error shape with `invalid_payload`, keeping axum's
+    status code.
+
+Before: stock x402-rs and hemi.2 used `invalid_payment_expired`, `invalid_payment_early`,
+`recipient_mismatch` and `asset_mismatch`. For a body that is not JSON they answered with a `text/plain`
+body: "Failed to parse the request body as JSON: …".
+
+After (HTTP 400, both endpoints), examples:
+
+```json
+{"isValid":false,"invalidReason":"invalid_exact_evm_payload_authorization_valid_before","invalidMessage":"Payment authorization is expired","invalidReasonDetails":"…same…","payer":"0xC5F46EdE7C19D96f982b2187C334d9CD9F0E8284"}
+{"success":false,"errorReason":"invalid_exact_evm_payload_recipient_mismatch","errorMessage":"Payment recipient is invalid with respect to the payment requirements","transaction":"","network":"eip155:43111","payer":"0x7b1FFAe7245f74d7ba5901E9C694150ddF977a0d"}
+{"success":false,"errorReason":"invalid_payload","errorMessage":"Payment asset is invalid with respect to the payment requirements","transaction":"","network":"eip155:43111","payer":"0x78523c398252CD83A8fA942F95E14972bfce8c1B"}
+{"success":false,"errorReason":"invalid_payload","errorMessage":"Failed to parse the request body as JSON: key must be a string at line 1 column 2","transaction":""}
+```
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** Report verification failures with x402 v2 §9 codes; JSON error bodies for unreadable requests
+>
+> Several `ErrorReason`s are not x402 v2 §9 codes: `invalid_payment_expired`, `invalid_payment_early`, `invalid_payment_amount`, `recipient_mismatch`, `asset_mismatch`, `chain_id_mismatch`, `accepted_requirements_mismatch`, `transaction_simulation`, `invalid_format`. This PR maps them as follows.
+>
+> - **EIP-155 v2 exact handler** (the codes §9 defines for the exact scheme on EVM): `…_authorization_valid_after`, `…_valid_before`, `…_value_mismatch`, `…_recipient_mismatch`.
+> - **Generic, in `x402-types`**: `invalid_payload` (format, asset), `invalid_network` (chain id), `invalid_payment_requirements` (accepted ≠ requirements), `invalid_transaction_state` (simulation).
+> - **Other reverts:** a transfer simulation that reverts for another reason is reported as `invalid_transaction_state` rather than an unexpected error.
+> - **Requests without a network:** they get `invalid_payload`, and `network` is omitted rather than `""`.
+> - **Bodies that are not JSON:** they get the endpoint's JSON error shape with `invalid_payload` instead of axum's plain-text rejection.
+>
+> Each mapping has a unit test.
+</details>
+
+### 0010 eip155: require exactly the required amount in the v2 exact scheme
+
+- **The bug.** `assert_enough_value` only rejected `sent < required`. A payload authorizing 5000 for a
+  1000 requirement verified, and settled 5000.
+- **The fix.** `assert_exact_value` rejects any difference. It is used by the v2 exact EIP-3009 and
+  Permit2 paths and reported as `invalid_exact_evm_payload_authorization_value_mismatch`. The TS
+  reference compares with `!==`. `upto` and v1 are unchanged.
+
+Before (hemi.2, critic's probe): required 1000, signed 5000, then `isValid: true`, and settle moved 5000.
+After (HTTP 400): `{"isValid":false,"invalidReason":"invalid_exact_evm_payload_authorization_value_mismatch","invalidMessage":"Payment amount does not match the required amount", …}`.
+Under-payment gets the same code.
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** exact scheme settles more than the required amount
+>
+> `assert_enough_value` accepts any authorized amount ≥ the requirement, so an `exact` payment authorizing 5× the price verifies and settles 5×. §9 defines `invalid_exact_evm_payload_authorization_value_mismatch` as "Payment amount does not exactly match the required amount", and the TS reference facilitator compares with `!==`. This PR adds `assert_exact_value` and uses it in the v2 exact EIP-3009 and Permit2 paths; `upto` (where the amount is a ceiling) and v1 are unchanged.
+</details>
+
+### 0011 eip155: answer a retried pending settlement from its transaction
+
+- **The bug.** §9 makes `settlement_pending` non-terminal, and the TS SDK's resource server re-sends the
+  same settle once, immediately (`settleWithPendingRetry`). x402-rs kept no record of the first attempt,
+  so the retry was settled from scratch. That produced either a second broadcast or
+  `invalid_transaction_state` once the first transaction had spent the nonce, although the payment went
+  through.
+- **The record.** The v2 exact handler remembers the transaction of each `settlement_pending` settle,
+  keyed by the hash of the parsed request: payload, signature and requirements.
+  - Only an identical request matches, so another payload is never answered with this payment's
+    transaction.
+  - It lives in memory, holds at most 10,000 entries (oldest dropped first), and expires after 15 minutes.
+- **How a retry is answered.** It sends nothing, looks up the receipt, and answers:
+  - success with that hash once the transaction is mined;
+  - `settlement_pending` with the same hash while it is not;
+  - `invalid_transaction_state` with the hash if it reverted.
+- **Mined reverts.** Any settlement transaction that was mined but reverted is now reported with its hash
+  (`TransactionFailed`, HTTP 400). Before, it went out as `unexpected_error` with `"transaction": ""`,
+  which §5.3.2 allows only if nothing was broadcast.
+- **Limits.**
+  - The record is per process, so a restart forgets it.
+  - Two identical requests arriving at the same moment are not deduplicated; only a retry that comes
+    after the first answer is.
+
+e2e (`06-settlement-pending.test.ts`), with automine off:
+
+1. A settle comes back `settlement_pending` (200) with hash H.
+2. A retry comes back at once with the same H, and the signer has sent no other transaction.
+3. One block is mined.
+4. A retry answers `{"success":true,"transaction":H,…}` (200), and `payTo` was paid exactly once.
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** Retrying a `settlement_pending` settle settles again; remember the pending transaction
+>
+> After `settlement_pending` (non-terminal per x402 v2 §9) the TS SDK's resource server retries the same settle once, immediately. x402-rs has no record of the first attempt, so the retry runs a fresh settlement: a second broadcast, or `invalid_transaction_state` once the first transaction has spent the nonce, although the payment succeeded. This PR keeps an in-memory, bounded (10,000) and expiring (15 min) map from the hash of the parsed settle request to its broadcast transaction. A retry of the same request is answered from that transaction's receipt (success, still `settlement_pending` with the same hash, or `invalid_transaction_state` with the hash if it reverted), and nothing is sent again. It also reports any mined-but-reverted settlement with its hash instead of `unexpected_error` with `"transaction": ""`. Unit tests cover the store and the request key.
+</details>
+
 ## What these patches do not change
 
-- **Some reasons still use x402-rs names.** They have §9 equivalents, but no test in this repo triggers
-  them and the Definition of done does not cover them:
-  - `invalid_payment_early` / `invalid_payment_expired` (§9 `…_authorization_valid_after` / `…_valid_before`)
-  - `invalid_payment_amount` (§9 `…_value_mismatch`)
-  - `recipient_mismatch` (§9 `…_recipient_mismatch`)
-  - `invalid_format` (§9 `invalid_payload`)
-  - `chain_id_mismatch`, `asset_mismatch`, `accepted_requirements_mismatch` and `transaction_simulation`,
-    which have no direct §9 code
-- **v1 and `upto` keep `invalid_signature`.** Only the v2 exact handler maps signature failures to
-  `invalid_exact_evm_payload_signature`, and only the v2 exact handler checks the signature first.
+- **v1 and `upto` keep x402-rs's own behaviour.** The changes specific to the v2 exact handler are:
+  - the exact EVM codes;
+  - the check of the signature first, including EIP-1271;
+  - the exact amount;
+  - the pending-settlement record.
+  The generic code mappings in `x402-types` apply to every chain.
 - **Unknown payers are omitted.** v1 handlers and non-EVM chains don't implement `payer`, so their error
   bodies leave the field out. The spec allows that.
+- **`invalidReasonDetails` remains.** It is the one non-spec field, kept for compatibility (see above).
+- **Untested end to end:**
+  - EIP-6492 counterfactual wallets, because the suite has no wallet factory. The code path is unchanged
+    from stock x402-rs, apart from the revert mapping.
+  - A mined settlement revert. The unit tests cover it.

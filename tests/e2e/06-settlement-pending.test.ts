@@ -7,7 +7,9 @@
  *
  * Stock x402-rs answered HTTP 500 `unexpected_error` with "transaction": "" while the transaction sat in
  * the mempool and paid out a block later; it also reset the signer's nonce, which could let the next
- * settlement reuse it.
+ * settlement reuse it. A retry of the same request (the TS SDK's resource server retries a
+ * settlement_pending once, immediately) was settled again from scratch; patch 0011 answers it from the
+ * first transaction instead.
  *
  * Setup: the facilitator is recreated with a copy of facilitator/config.json whose receipt_timeout_secs is
  * RECEIPT_TIMEOUT_SECS (written to .scratch, not committed), and the mainnet fork stops mining on its own
@@ -25,7 +27,7 @@ import { composeOutput, restartFacilitator } from "../lib/compose";
 import { BUYER_KEY, FACILITATOR_SIGNER, REPO_ROOT, STATE_DIR } from "../lib/env";
 import { record, settle } from "../lib/facilitator";
 import { freshAddress, requirementsFor, signPayment } from "../lib/payments";
-import { SPEC_INVALID_TRANSACTION_STATE, SPEC_SETTLEMENT_PENDING, settleFailureViolations } from "../lib/spec";
+import { SPEC_SETTLEMENT_PENDING, settleFailureViolations } from "../lib/spec";
 
 const RECEIPT_TIMEOUT_SECS = 5;
 const CONFIG_FILE = join(STATE_DIR, "config.settlement-pending.json");
@@ -57,7 +59,7 @@ describe("settlement_pending: the transaction is broadcast but its receipt does 
     expect(mounted.chains[network].receipt_timeout_secs).toBe(RECEIPT_TIMEOUT_SECS);
   });
 
-  it("answers success false, settlement_pending, the hash, network and payer; keeps the nonce; pays exactly once", async () => {
+  it("answers settlement_pending with the hash; a retry gets the same hash, then success once mined; pays exactly once", async () => {
     const chain = publicClient(network);
     const payTo = [freshAddress(), freshAddress()];
     const payments = await Promise.all(
@@ -102,6 +104,18 @@ describe("settlement_pending: the transaction is broadcast but its receipt does 
     expect(txs.map(tx => tx.nonce)).toEqual([signerNonceBefore, signerNonceBefore + 1]);
     for (const to of payTo) expect(await tokenBalance(network, asset, to)).toBe(0n);
 
+    // The client retries the first payment while it is pending (the TS SDK's resource server does this
+    // once, immediately): the same hash comes back at once and nothing new is sent (patch 0011).
+    const retryStarted = Date.now();
+    const retry = await settle(payments[0]!.payment, payments[0]!.requirements);
+    record("settle pending, retried while pending", retry);
+    expect(Date.now() - retryStarted).toBeLessThan(RECEIPT_TIMEOUT_SECS * 1000);
+    expect(retry.status).toBe(200);
+    expect(retry.body).toMatchObject({ success: false, errorReason: SPEC_SETTLEMENT_PENDING, transaction: hashes[0] });
+    expect(await chain.getTransactionCount({ address: FACILITATOR_SIGNER[network], blockTag: "pending" })).toBe(
+      signerNonceBefore + 2,
+    );
+
     // One block later both have paid out, once each.
     await testClient(network).mine({ blocks: 1 });
     for (const hash of hashes) {
@@ -110,12 +124,16 @@ describe("settlement_pending: the transaction is broadcast but its receipt does 
     for (const to of payTo) expect(await tokenBalance(network, asset, to)).toBe(amount);
     expect(await tokenBalance(network, asset, buyer.address)).toBe(buyerBefore - 2n * amount);
 
-    // Settling the first payment again is refused as a replay and pays nothing more.
+    // Retried once mined, each payment is answered with its success and the same transaction; nothing
+    // is sent again and nobody is paid twice.
     await testClient(network).setAutomine(true);
-    const again = await settle(payments[0]!.payment, payments[0]!.requirements);
-    record("settle pending, replayed after mining", again);
-    expect(again.body.errorReason).toBe(SPEC_INVALID_TRANSACTION_STATE);
-    expect(again.body.transaction).toBe("");
-    expect(await tokenBalance(network, asset, payTo[0]!)).toBe(amount);
+    for (const [i, { payment, requirements }] of payments.entries()) {
+      const again = await settle(payment, requirements);
+      record(`settle pending #${i + 1}, retried after mining`, again);
+      expect(again.status).toBe(200);
+      expect(again.body).toEqual({ success: true, payer: buyer.address, transaction: hashes[i], network });
+    }
+    for (const to of payTo) expect(await tokenBalance(network, asset, to)).toBe(amount);
+    expect(await nonceOf(network, FACILITATOR_SIGNER[network])).toBe(signerNonceBefore + 2);
   });
 });

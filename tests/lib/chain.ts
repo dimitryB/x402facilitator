@@ -97,3 +97,33 @@ export async function ensurePermit2Approval(
   if (receipt.status !== "success") throw new Error(`approve(Permit2) reverted: ${hash}`);
   return hash;
 }
+
+/**
+ * Turn `address` into a contract wallet on the fork: give it ETH, tokens and, for Permit2 assets, the
+ * one-time approve(Permit2) (sent while it is still an EOA, through anvil_impersonateAccount), then set
+ * `bytecode` as its code (anvil_setCode).
+ */
+export async function makeContractWallet(
+  network: HemiNetwork,
+  asset: HemiAsset,
+  address: Address,
+  tokens: bigint,
+  bytecode: `0x${string}`,
+): Promise<void> {
+  const test = testClient(network);
+  await fundEth(network, address);
+  await fundToken(network, asset, address, tokens);
+  if (asset.transferMethod === "permit2") {
+    await test.impersonateAccount({ address });
+    try {
+      const tx = createPermit2ApprovalTx(asset.address);
+      const wallet = createWalletClient({ account: address, chain: NETWORKS[network].chain, transport: http(FORK_RPC[network]) });
+      const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data, chain: NETWORKS[network].chain });
+      const receipt = await publicClient(network).waitForTransactionReceipt({ hash, pollingInterval: POLL_MS });
+      if (receipt.status !== "success") throw new Error(`approve(Permit2) from ${address} reverted`);
+    } finally {
+      await test.stopImpersonatingAccount({ address });
+    }
+  }
+  await test.setCode({ address, bytecode });
+}

@@ -8,11 +8,12 @@ export interface HttpResult<T = Record<string, unknown>> {
   body: T;
 }
 
-async function call<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<HttpResult<T>> {
+async function call<T>(method: "GET" | "POST", path: string, body?: unknown, raw?: string): Promise<HttpResult<T>> {
+  const payload = raw ?? (body === undefined ? undefined : JSON.stringify(body));
   const res = await fetch(`${FACILITATOR_URL}${path}`, {
     method,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: payload === undefined ? undefined : { "content-type": "application/json" },
+    body: payload,
   });
   const text = await res.text();
   let parsed: T;
@@ -22,6 +23,11 @@ async function call<T>(method: "GET" | "POST", path: string, body?: unknown): Pr
     throw new Error(`${method} ${path} returned ${res.status} with a non-JSON body: ${text.slice(0, 500)}`);
   }
   return { status: res.status, body: parsed };
+}
+
+/** POST a raw body (for deliberately unreadable requests). */
+export async function postRaw(path: "/verify" | "/settle", body: string): Promise<HttpResult<Record<string, unknown>>> {
+  return call<Record<string, unknown>>("POST", path, undefined, body);
 }
 
 /** x402 v2 facilitator request body (specs/x402-specification-v2.md §7.1). */

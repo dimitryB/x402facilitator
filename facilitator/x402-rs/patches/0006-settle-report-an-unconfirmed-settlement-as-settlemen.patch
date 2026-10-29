@@ -1,7 +1,7 @@
 From 75ad74db34456bc17a23634d661c2a811b0b58de Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 23:36:54 -0400
-Subject: [PATCH 6/7] settle: report an unconfirmed settlement as
+Subject: [PATCH 06/11] settle: report an unconfirmed settlement as
  settlement_pending with its hash
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

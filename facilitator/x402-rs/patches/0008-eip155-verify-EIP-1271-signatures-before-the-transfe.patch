@@ -1,0 +1,470 @@
+From b13fe98104f5332dac6b30593aa837d74dc123dc Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 00:15:58 -0400
+Subject: [PATCH 08/11] eip155: verify EIP-1271 signatures before the transfer,
+ and report signature reverts
+
+A payer with code (a contract wallet) and a signature the wallet does not
+accept got HTTP 500 unexpected_verify_error / unexpected_settle_error: the
+signature was only checked inside the transfer simulation or gas estimate,
+whose revert ("FiatTokenV2: invalid signature", Permit2
+InvalidContractSignature()) surfaced as a transport error.
+
+- For an EIP-1271 signature, after checking that the payer has code, call the
+  payer's isValidSignature(hash, signature) with the EIP-712 hash the token or
+  Permit2 will check, and require the magic value 0x1626ba7e. Any other answer
+  or a revert is an invalid signature; only a failure to reach the chain is
+  reported as such. This mirrors the TS reference facilitator's strict EIP-1271
+  check and runs before balances and allowances are read.
+- When a transfer simulation or send still fails, recognise signature reverts:
+  an Error(string) mentioning an invalid signature, or Permit2's
+  InvalidSignature(), InvalidSigner(), InvalidContractSignature() and
+  InvalidSignatureLength(). They are reported as invalid signatures, i.e.
+  invalid_exact_evm_payload_signature, which also covers an EIP-712 domain in
+  the requirements that differs from the token's and EIP-6492 wallets.
+- explain_used_eip3009_authorization / explain_used_permit2_nonce are renamed
+  explain_failed_eip3009_transfer / explain_failed_permit2_transfer, since they
+  now explain more than replays.
+
+EIP-6492 counterfactual wallets are unchanged: their signatures are still
+checked by the validator during the simulation.
+---
+ .../src/v1_eip155_exact/facilitator.rs        | 230 ++++++++++++++++--
+ .../v2_eip155_exact/facilitator/eip3009.rs    |   6 +-
+ .../v2_eip155_exact/facilitator/permit2.rs    |  37 ++-
+ 3 files changed, 245 insertions(+), 28 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+index 956a034..344bbe3 100644
+--- a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
++++ b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+@@ -16,7 +16,9 @@ use alloy_provider::{
+     MULTICALL3_ADDRESS, MulticallError, MulticallItem, PendingTransactionError, Provider,
+ };
+ use alloy_rpc_types_eth::TransactionReceipt;
+-use alloy_sol_types::{Eip712Domain, SolCall, SolStruct, SolType, eip712_domain, sol};
++use alloy_sol_types::{
++    Eip712Domain, Revert, SolCall, SolError, SolStruct, SolType, eip712_domain, sol,
++};
+ use alloy_transport::TransportError;
+ use std::collections::HashMap;
+ use std::fmt::{Debug, Display};
+@@ -772,20 +774,72 @@ pub async fn assert_eip1271_signer_has_code<P: Provider>(
+     }
+ }
+ 
+-/// Checks that `signature` is the payer's, reading nothing from the chain but, when needed, the payer's code.
++sol! {
++    /// EIP-1271 signature validation by a contract account.
++    #[sol(rpc)]
++    interface IERC1271 {
++        function isValidSignature(bytes32 hash, bytes signature) external view returns (bytes4 magicValue);
++    }
++}
++
++/// `IERC1271.isValidSignature.selector`: what a contract returns when it accepts a signature.
++pub const EIP1271_MAGIC_VALUE: [u8; 4] = [0x16, 0x26, 0xba, 0x7e];
++
++/// Asks `signer`'s contract whether it accepts `signature` for `hash` (EIP-1271), as the token or
++/// Permit2 will when the transfer executes. Any answer but the magic value, a revert included, is an
++/// invalid signature; only a failure to reach the chain is reported as such.
++pub async fn assert_eip1271_signature_valid<P: Provider>(
++    provider: &P,
++    signer: &Address,
++    hash: &B256,
++    signature: &Bytes,
++) -> Result<(), Eip155ExactError> {
++    let contract = IERC1271::new(*signer, provider);
++    let call = contract.isValidSignature(*hash, signature.clone());
++    match call.call().await {
++        Ok(magic) if magic.0 == EIP1271_MAGIC_VALUE => Ok(()),
++        Ok(magic) => Err(PaymentVerificationError::InvalidSignature(format!(
++            "{signer} does not accept the signature (isValidSignature returned {magic})"
++        ))
++        .into()),
++        Err(alloy_contract::Error::TransportError(e)) if !is_revert_response(&e) => {
++            Err(Eip155ExactError::Transport(e))
++        }
++        Err(e) => Err(PaymentVerificationError::InvalidSignature(format!(
++            "{signer} does not accept the signature: {e}"
++        ))
++        .into()),
++    }
++}
++
++/// Whether a JSON-RPC error is an execution revert rather than an RPC failure.
++fn is_revert_response(error: &TransportError) -> bool {
++    error
++        .as_error_resp()
++        .is_some_and(|payload| payload.message.contains("revert"))
++}
++
++/// Checks that `signature` is the payer's, reading nothing from the chain but, when needed, the payer's
++/// contract.
+ ///
+ /// x402's `exact` scheme on EVM checks the signature first, before balances and allowances
+-/// (`scheme_exact_evm.md`: EIP-3009 verification step 1, Permit2 verification step 1). An EOA signature
+-/// already recovered to the payer when it was parsed; an EIP-1271 one is only possible from a contract
+-/// ([`assert_eip1271_signer_has_code`]); an EIP-6492 one is left to the on-chain validator, because the
+-/// wallet may not be deployed yet.
++/// (`scheme_exact_evm.md`: EIP-3009 verification step 1, Permit2 verification step 1).
++/// - An EOA signature already recovered to the payer when it was parsed.
++/// - An EIP-1271 signature (one that does not recover to the payer) is only possible from a contract
++///   ([`assert_eip1271_signer_has_code`]), and that contract must accept it for `hash`, the EIP-712
++///   hash the token or Permit2 will check ([`assert_eip1271_signature_valid`]).
++/// - An EIP-6492 signature is left to the on-chain validator, because the wallet may not be deployed yet.
+ pub async fn assert_signed_by_payer<P: Provider>(
+     provider: &P,
+     signature: &StructuredSignature,
+     payer: &Address,
++    hash: &B256,
+ ) -> Result<(), Eip155ExactError> {
+     match signature {
+-        StructuredSignature::EIP1271(_) => assert_eip1271_signer_has_code(provider, payer).await,
++        StructuredSignature::EIP1271(signature) => {
++            assert_eip1271_signer_has_code(provider, payer).await?;
++            assert_eip1271_signature_valid(provider, payer, hash, signature).await
++        }
+         StructuredSignature::EOA(_) | StructuredSignature::EIP6492 { .. } => Ok(()),
+     }
+ }
+@@ -797,7 +851,13 @@ pub async fn assert_payment_signed_by_payer<P: Provider>(
+     eip712_domain: &Eip712Domain,
+ ) -> Result<(), Eip155ExactError> {
+     let signed_message = payment.as_signed_message(eip712_domain)?;
+-    assert_signed_by_payer(provider, &signed_message.signature, &signed_message.address).await
++    assert_signed_by_payer(
++        provider,
++        &signed_message.signature,
++        &signed_message.address,
++        &signed_message.hash,
++    )
++    .await
+ }
+ 
+ /// Whether `error` comes from executing the transfer (a reverted simulation, gas estimate or
+@@ -815,14 +875,58 @@ pub fn is_failed_execution(error: &Eip155ExactError) -> bool {
+     )
+ }
+ 
+-/// Explains a failed `transferWithAuthorization` simulation or send whose EIP-3009 authorization
+-/// was already used (a replay, or the payer cancelled or spent it).
++/// Permit2's signature errors: `InvalidSignature()`, `InvalidSigner()`, `InvalidContractSignature()`
++/// and `InvalidSignatureLength()`.
++const PERMIT2_SIGNATURE_ERRORS: [[u8; 4]; 4] = [
++    [0x8b, 0xaa, 0x57, 0x9f],
++    [0x81, 0x5e, 0x1d, 0x64],
++    [0xb0, 0x66, 0x9c, 0xbc],
++    [0x4b, 0xe6, 0x32, 0x1b],
++];
++
++/// Whether a failed transfer reverted because the token or Permit2 rejected the signature: an
++/// `Error(string)` reason mentioning an invalid signature (FiatToken's "FiatTokenV2: invalid signature",
++/// "ECRecover: invalid signature", ...) or one of Permit2's signature errors.
++///
++/// This catches what the checks before the transfer cannot: for example an EIP-712 domain in the
++/// payment requirements that differs from the token's, or a counterfactual (EIP-6492) wallet.
++pub fn is_signature_revert(error: &Eip155ExactError) -> bool {
++    let is_signature_error = |data: &[u8]| {
++        data.get(..4)
++            .is_some_and(|selector| PERMIT2_SIGNATURE_ERRORS.iter().any(|e| e == selector))
++            || Revert::abi_decode(data)
++                .is_ok_and(|revert| revert.reason.to_lowercase().contains("invalid signature"))
++    };
++    match error {
++        Eip155ExactError::Transport(e) => e
++            .as_error_resp()
++            .and_then(|payload| payload.as_revert_data())
++            .is_some_and(|data| is_signature_error(&data)),
++        // The EIP-6492 path simulates through Multicall3 and keeps the failure only as text.
++        Eip155ExactError::PaymentVerification(PaymentVerificationError::TransactionSimulation(
++            message,
++        )) => {
++            let message = message.to_lowercase();
++            message.contains("invalid signature")
++                // "invalid signature" inside ABI-encoded revert data
++                || message.contains("696e76616c6964207369676e6174757265")
++                || PERMIT2_SIGNATURE_ERRORS
++                    .iter()
++                    .any(|e| message.contains(&hex::encode(e)))
++        }
++        _ => false,
++    }
++}
++
++/// Explains a failed `transferWithAuthorization` simulation or send: the token rejected the
++/// signature ([`is_signature_revert`], reported as an invalid signature), or the EIP-3009
++/// authorization was already used (a replay, or the payer cancelled or spent it).
+ ///
+ /// x402 v2 §9 has no replay-specific code. Such a transfer is one the chain rejects because of the
+ /// authorization's on-chain state, which is what `invalid_transaction_state` ("Blockchain transaction
+ /// failed or was rejected") describes; it is not an unexpected error, and retrying cannot succeed.
+ /// The authorization state is read only after a failure, so successful payments cost no extra call.
+-pub async fn explain_used_eip3009_authorization<T, P: Provider>(
++pub async fn explain_failed_eip3009_transfer<T, P: Provider>(
+     contract: &IEIP3009::IEIP3009Instance<P>,
+     payment: &ExactEvmPayment,
+     result: Result<T, Eip155ExactError>,
+@@ -831,6 +935,12 @@ pub async fn explain_used_eip3009_authorization<T, P: Provider>(
+         Ok(value) => return Ok(value),
+         Err(error) => error,
+     };
++    if is_signature_revert(&error) {
++        return Err(PaymentVerificationError::InvalidSignature(format!(
++            "The token rejected the signature: {error}"
++        ))
++        .into());
++    }
+     if is_failed_execution(&error)
+         && matches!(
+             contract
+@@ -1260,11 +1370,103 @@ mod tests {
+         let signature = StructuredSignature::try_from_bytes(own, payer.address(), &hash).unwrap();
+         // No response is queued: any RPC call would fail the check.
+         let asserter = Asserter::new();
+-        let result =
+-            assert_signed_by_payer(&mocked_provider(&asserter), &signature, &payer.address()).await;
++        let result = assert_signed_by_payer(
++            &mocked_provider(&asserter),
++            &signature,
++            &payer.address(),
++            &hash,
++        )
++        .await;
+         assert!(result.is_ok(), "{result:?}");
+     }
+ 
++    /// ABI-encoded bytes4, as an eth_call result.
++    fn bytes4_word(value: [u8; 4]) -> Bytes {
++        let mut word = [0u8; 32];
++        word[..4].copy_from_slice(&value);
++        Bytes::from(word)
++    }
++
++    async fn eip1271_check(asserter: &Asserter) -> Result<(), Eip155ExactError> {
++        assert_eip1271_signature_valid(
++            &mocked_provider(asserter),
++            &Address::repeat_byte(0x11),
++            &B256::repeat_byte(0x42),
++            &Bytes::from_static(&[1, 2, 3]),
++        )
++        .await
++    }
++
++    fn is_invalid_signature(result: &Result<(), Eip155ExactError>) -> bool {
++        matches!(
++            result,
++            Err(Eip155ExactError::PaymentVerification(
++                PaymentVerificationError::InvalidSignature(_)
++            ))
++        )
++    }
++
++    #[tokio::test]
++    async fn eip1271_contract_that_returns_the_magic_value_accepts() {
++        let asserter = Asserter::new();
++        asserter.push_success(&bytes4_word(EIP1271_MAGIC_VALUE));
++        let result = eip1271_check(&asserter).await;
++        assert!(result.is_ok(), "{result:?}");
++    }
++
++    #[tokio::test]
++    async fn eip1271_contract_that_answers_anything_else_or_reverts_rejects() {
++        let asserter = Asserter::new();
++        asserter.push_success(&bytes4_word([0xff, 0xff, 0xff, 0xff]));
++        assert!(is_invalid_signature(&eip1271_check(&asserter).await));
++
++        let asserter = Asserter::new();
++        asserter.push_failure(
++            serde_json::from_value(serde_json::json!({
++                "code": 3, "message": "execution reverted", "data": "0x"
++            }))
++            .unwrap(),
++        );
++        assert!(is_invalid_signature(&eip1271_check(&asserter).await));
++    }
++
++    #[tokio::test]
++    async fn eip1271_check_that_cannot_reach_the_chain_is_not_an_invalid_signature() {
++        let asserter = Asserter::new();
++        asserter.push_failure_msg("rate limited");
++        let result = eip1271_check(&asserter).await;
++        assert!(
++            matches!(result, Err(Eip155ExactError::Transport(_))),
++            "{result:?}"
++        );
++    }
++
++    fn reverted(data: &str) -> Eip155ExactError {
++        Eip155ExactError::Transport(TransportError::ErrorResp(
++            serde_json::from_value(serde_json::json!({
++                "code": 3, "message": "execution reverted", "data": data
++            }))
++            .unwrap(),
++        ))
++    }
++
++    #[test]
++    fn signature_reverts_are_recognised() {
++        // Permit2 InvalidSigner(), InvalidContractSignature()
++        assert!(is_signature_revert(&reverted("0x815e1d64")));
++        assert!(is_signature_revert(&reverted("0xb0669cbc")));
++        // FiatToken "FiatTokenV2: invalid signature"
++        let fiat = Revert::from("FiatTokenV2: invalid signature").abi_encode();
++        assert!(is_signature_revert(&reverted(&hex::encode_prefixed(fiat))));
++        // Not signature errors: Permit2 InvalidNonce(), another revert reason, a non-revert error
++        assert!(!is_signature_revert(&reverted("0x756688fe")));
++        let used = Revert::from("FiatTokenV2: authorization is used or canceled").abi_encode();
++        assert!(!is_signature_revert(&reverted(&hex::encode_prefixed(used))));
++        assert!(!is_signature_revert(&Eip155ExactError::ContractCall(
++            "x".into()
++        )));
++    }
++
+     #[tokio::test]
+     async fn eip1271_signature_from_an_address_without_code_is_invalid() {
+         let asserter = Asserter::new();
+@@ -1301,7 +1503,7 @@ mod tests {
+         asserter.push_success(&Bytes::from(word));
+         let provider = mocked_provider(&asserter);
+         let contract = IEIP3009::new(Address::repeat_byte(0x44), &provider);
+-        explain_used_eip3009_authorization(&contract, &payment(), Err(error)).await
++        explain_failed_eip3009_transfer(&contract, &payment(), Err(error)).await
+     }
+ 
+     #[tokio::test]
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
+index 8bc1bba..6cefa12 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
+@@ -11,7 +11,7 @@ use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider};
+ use crate::v1_eip155_exact::{
+     Eip155ExactError, ExactEvmPayment, IEIP3009, PaymentRequirementsExtra, assert_domain,
+     assert_enough_balance, assert_enough_value, assert_payment_signed_by_payer, assert_time,
+-    explain_used_eip3009_authorization, settle_payment, verify_payment,
++    explain_failed_eip3009_transfer, settle_payment, verify_payment,
+ };
+ use crate::v2_eip155_exact::Eip3009Payload;
+ use crate::v2_eip155_exact::types::{Eip3009PaymentPayload, Eip3009PaymentRequirements};
+@@ -33,7 +33,7 @@ pub async fn verify_eip3009_payment<P: Eip155MetaTransactionProvider + ChainProv
+     .await?;
+ 
+     let verified = verify_payment(provider.inner(), &contract, &payment, &eip712_domain).await;
+-    let payer = explain_used_eip3009_authorization(&contract, &payment, verified).await?;
++    let payer = explain_failed_eip3009_transfer(&contract, &payment, verified).await?;
+     Ok(v2::VerifyResponse::valid(payer.to_string()))
+ }
+ 
+@@ -58,7 +58,7 @@ where
+     .await?;
+ 
+     let settled = settle_payment(provider, &contract, &payment, &eip712_domain).await;
+-    let tx_hash = explain_used_eip3009_authorization(&contract, &payment, settled).await?;
++    let tx_hash = explain_failed_eip3009_transfer(&contract, &payment, settled).await?;
+ 
+     Ok(v2::SettleResponse::Success {
+         payer: payment.from.to_string(),
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+index 2deaa99..ab4a7db 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+@@ -20,7 +20,7 @@ use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider, MetaTran
+ use crate::v1_eip155_exact::{
+     Eip155ExactError, StructuredSignature, VALIDATOR_ADDRESS, Validator6492, assert_enough_value,
+     assert_signed_by_payer, assert_time, is_contract_deployed, is_failed_execution,
+-    tx_hash_from_receipt,
++    is_signature_revert, tx_hash_from_receipt,
+ };
+ use crate::v2_eip155_exact::eip3009::assert_requirements_match;
+ use crate::v2_eip155_exact::types::{
+@@ -60,11 +60,13 @@ pub async fn verify_permit2_payment<P: Eip155MetaTransactionProvider + ChainProv
+             eip2612_gas_sponsoring_payload,
+         )
+         .await;
+-        explain_used_permit2_nonce(provider.inner(), payer, authorization.nonce, simulated).await?;
++        explain_failed_permit2_transfer(provider.inner(), payer, authorization.nonce, simulated)
++            .await?;
+     } else {
+         let simulated =
+             assert_onchain_exact_permit2(provider.inner(), provider.chain(), payment_payload).await;
+-        explain_used_permit2_nonce(provider.inner(), payer, authorization.nonce, simulated).await?;
++        explain_failed_permit2_transfer(provider.inner(), payer, authorization.nonce, simulated)
++            .await?;
+     }
+ 
+     Ok(v2::VerifyResponse::valid(payer.to_string()))
+@@ -112,7 +114,7 @@ where
+             eip2612_gas_sponsoring_payload,
+         )
+         .await;
+-        explain_used_permit2_nonce(
++        explain_failed_permit2_transfer(
+             provider.inner(),
+             authorization.from.0,
+             authorization.nonce,
+@@ -127,7 +129,7 @@ where
+         )
+         .await?;
+         let settled = settle_exact_permit2(provider, payment_payload).await;
+-        explain_used_permit2_nonce(
++        explain_failed_permit2_transfer(
+             provider.inner(),
+             authorization.from.0,
+             authorization.nonce,
+@@ -269,7 +271,13 @@ pub async fn assert_permit2_signed_by_payer<P: Provider>(
+     payment_payload: &Permit2PaymentPayload,
+ ) -> Result<(), Eip155ExactError> {
+     let prepared = PreparedExactPermit2::try_new(chain_reference, payment_payload)?;
+-    assert_signed_by_payer(provider, &prepared.structured_signature, &prepared.payer).await
++    assert_signed_by_payer(
++        provider,
++        &prepared.structured_signature,
++        &prepared.payer,
++        &prepared.eip712_hash,
++    )
++    .await
+ }
+ 
+ /// Generic Permit2 settlement execution.
+@@ -431,14 +439,15 @@ pub fn permit2_nonce_position(nonce: U256) -> (U256, U256) {
+     (nonce >> 8, U256::from(1) << bit)
+ }
+ 
+-/// Explains a failed Permit2 settle simulation or send whose Permit2 nonce was already used
+-/// (a replay, or the payer invalidated it).
++/// Explains a failed Permit2 settle simulation or send: Permit2 rejected the signature
++/// ([`is_signature_revert`], reported as an invalid signature), or the Permit2 nonce was already
++/// used (a replay, or the payer invalidated it).
+ ///
+ /// x402 v2 §9 has no replay-specific code; `invalid_transaction_state` ("Blockchain transaction failed
+ /// or was rejected") describes a transfer the chain rejects because of on-chain state. The nonce bitmap
+ /// is read only after a failure, so successful payments cost no extra call. See
+-/// [`crate::v1_eip155_exact::explain_used_eip3009_authorization`] for the EIP-3009 counterpart.
+-pub async fn explain_used_permit2_nonce<T, P: Provider>(
++/// [`crate::v1_eip155_exact::explain_failed_eip3009_transfer`] for the EIP-3009 counterpart.
++pub async fn explain_failed_permit2_transfer<T, P: Provider>(
+     provider: &P,
+     owner: Address,
+     nonce: U256,
+@@ -448,6 +457,12 @@ pub async fn explain_used_permit2_nonce<T, P: Provider>(
+         Ok(value) => return Ok(value),
+         Err(error) => error,
+     };
++    if is_signature_revert(&error) {
++        return Err(PaymentVerificationError::InvalidSignature(format!(
++            "Permit2 rejected the signature: {error}"
++        ))
++        .into());
++    }
+     if !is_failed_execution(&error) {
+         return Err(error);
+     }
+@@ -687,7 +702,7 @@ mod tests {
+         let asserter = Asserter::new();
+         asserter.push_success(&word(bitmap));
+         let provider = ProviderBuilder::new().connect_mocked_client(asserter);
+-        explain_used_permit2_nonce(
++        explain_failed_permit2_transfer(
+             &provider,
+             Address::repeat_byte(0x11),
+             U256::from(257),

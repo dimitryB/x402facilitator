@@ -17,17 +17,30 @@
  * tokens and no Permit2 allowance, where checking balance or allowance first would answer
  * insufficient_funds or permit2_allowance_required instead.
  *
+ * The last block uses contract-wallet payers (EIP-1271): code is set at `from` with anvil_setCode, and the
+ * wallet's owner key signs. One wallet accepts every signature (isValidSignature returns 0x1626ba7e), one
+ * accepts none. The accepting one must still settle; the other must get the §9 signature code.
+ *
  * Stock x402-rs answered all of these with HTTP 500 "unexpected_error" and "payer": "" (and "network": ""
- * on settle), and checked balance and allowance before the signature; facilitator/x402-rs/patches 0002
- * and 0003 fix that.
+ * on settle), and checked balance and allowance before the signature; facilitator/x402-rs/patches 0002,
+ * 0003 and 0008 fix that.
  */
 import { beforeAll, describe, expect, it } from "vitest";
-import type { Hex, LocalAccount } from "viem";
+import { erc20Abi, getAddress, parseEventLogs, type Hex, type LocalAccount } from "viem";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { btcAsset, MAINNET, usdcAsset, type HemiAsset, type HemiNetwork } from "@hemi-x402/shared";
-import { ensurePermit2Approval, fundEth, fundToken } from "../lib/chain";
+import { ensurePermit2Approval, fundEth, fundToken, makeContractWallet, publicClient, tokenBalance } from "../lib/chain";
 import { record, settle, verify } from "../lib/facilitator";
-import { freshAccount, freshAddress, requirementsFor, signPayment, tamperSignature, withFrom, withSignature } from "../lib/payments";
+import {
+  contractWalletSigner,
+  freshAccount,
+  freshAddress,
+  requirementsFor,
+  signPayment,
+  tamperSignature,
+  withFrom,
+  withSignature,
+} from "../lib/payments";
 import { snapshot, type Snapshot } from "../lib/snapshot";
 import { SPEC_INSUFFICIENT_FUNDS, SPEC_INVALID_SIGNATURE, settleFailureViolations, verifyFailureViolations } from "../lib/spec";
 
@@ -161,6 +174,63 @@ describe("bad signature from a payer with no tokens and no Permit2 allowance: th
           expect(await snapshot(m.network, m.asset, poor.address, payTo)).toEqual(before);
         });
       }
+    });
+  }
+});
+
+/** Runtime code answering every call with bytes4 0x1626ba7e: an EIP-1271 wallet that accepts any signature. */
+const ACCEPT_ALL_WALLET = "0x631626ba7e60e01b60005260206000f3" as const;
+/** Runtime code answering every call with 32 zero bytes: an EIP-1271 wallet that accepts no signature. */
+const REJECT_ALL_WALLET = "0x60206000f3" as const;
+
+describe("contract-wallet payers (EIP-1271): the wallet's isValidSignature decides", () => {
+  for (const m of METHODS) {
+    describe(`${m.method} (${m.asset.symbol} on ${m.network})`, () => {
+      const owner = freshAccount();
+
+      it("a wallet that accepts the signature verifies and settles; tokens move from the wallet to payTo", async () => {
+        const wallet = freshAddress();
+        await makeContractWallet(m.network, m.asset, wallet, 1_000_000n, ACCEPT_ALL_WALLET);
+        const payTo = freshAddress();
+        const requirements = requirementsFor(m.network, m.asset, payTo, m.amount);
+        const payment = await signPayment(contractWalletSigner(wallet, owner), requirements);
+
+        const v = await verify(payment, requirements);
+        record(`verify EIP-1271 accepting wallet: ${m.method}`, v);
+        expect(v.body).toEqual({ isValid: true, payer: wallet });
+
+        const s = await settle(payment, requirements);
+        record(`settle EIP-1271 accepting wallet: ${m.method}`, s);
+        expect(s.body).toMatchObject({ success: true, payer: wallet, network: m.network });
+        const receipt = await publicClient(m.network).getTransactionReceipt({ hash: s.body.transaction as Hex });
+        const transfers = parseEventLogs({ abi: erc20Abi, eventName: "Transfer", logs: receipt.logs });
+        expect(transfers.map(t => ({ from: t.args.from, to: t.args.to, value: t.args.value, token: getAddress(t.address) }))).toEqual([
+          { from: wallet, to: payTo, value: m.amount, token: m.asset.address },
+        ]);
+        expect(await tokenBalance(m.network, m.asset, payTo)).toBe(m.amount);
+      });
+
+      it(`a wallet that rejects the signature gets "${SPEC_INVALID_SIGNATURE}" from /verify and /settle`, async () => {
+        const wallet = freshAddress();
+        await makeContractWallet(m.network, m.asset, wallet, 1_000_000n, REJECT_ALL_WALLET);
+        const payTo = freshAddress();
+        const requirements = requirementsFor(m.network, m.asset, payTo, m.amount);
+        const payment = await signPayment(contractWalletSigner(wallet, owner), requirements);
+        const before = await snapshot(m.network, m.asset, wallet, payTo);
+
+        const v = await verify(payment, requirements);
+        record(`verify EIP-1271 rejecting wallet: ${m.method}`, v);
+        expect(verifyFailureViolations(v.body, { reason: SPEC_INVALID_SIGNATURE, payer: wallet })).toEqual([]);
+        expect(v.status).toBe(400);
+
+        const s = await settle(payment, requirements);
+        record(`settle EIP-1271 rejecting wallet: ${m.method}`, s);
+        expect(
+          settleFailureViolations(s.body, { reasons: [SPEC_INVALID_SIGNATURE], payer: wallet, network: m.network, broadcast: false }),
+        ).toEqual([]);
+        expect(s.status).toBe(400);
+        expect(await snapshot(m.network, m.asset, wallet, payTo)).toEqual(before);
+      });
     });
   }
 });
