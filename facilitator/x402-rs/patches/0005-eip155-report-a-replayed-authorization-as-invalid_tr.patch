@@ -1,7 +1,7 @@
-From cc86ed5e93dcf961fc7a03fbe29a915878801038 Mon Sep 17 00:00:00 2001
+From fe0a2c4156d804418d40e284025b66a671369967 Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 22:53:53 -0400
-Subject: [PATCH 5/5] eip155: report a replayed authorization as
+Subject: [PATCH 5/7] eip155: report a replayed authorization as
  invalid_transaction_state
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -24,16 +24,16 @@ no extra RPC call. Failures after broadcast (receipt timeouts) are not
 reclassified.
 ---
  .../src/v1_eip155_exact/facilitator.rs        |  99 ++++++++++++
- .../v2_eip155_exact/facilitator/eip3009.rs    |   9 +-
- .../v2_eip155_exact/facilitator/permit2.rs    | 147 +++++++++++++++++-
+ .../v2_eip155_exact/facilitator/eip3009.rs    |   8 +-
+ .../v2_eip155_exact/facilitator/permit2.rs    | 148 +++++++++++++++++-
  3 files changed, 245 insertions(+), 10 deletions(-)
 
 diff --git a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
-index c6fd4d0..76da5fd 100644
+index 1c4393a..4f3758e 100644
 --- a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
 +++ b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
-@@ -774,6 +774,52 @@ pub async fn assert_eip1271_signer_has_code<P: Provider>(
-     }
+@@ -800,6 +800,52 @@ pub async fn assert_payment_signed_by_payer<P: Provider>(
+     assert_signed_by_payer(provider, &signed_message.signature, &signed_message.address).await
  }
  
 +/// Whether `error` comes from executing the transfer (a reverted simulation, gas estimate or
@@ -85,7 +85,7 @@ index c6fd4d0..76da5fd 100644
  pub async fn verify_payment<P: Provider>(
      provider: &P,
      contract: &IEIP3009::IEIP3009Instance<&P>,
-@@ -1185,6 +1231,59 @@ mod tests {
+@@ -1222,6 +1268,59 @@ mod tests {
          );
      }
  
@@ -146,20 +146,19 @@ index c6fd4d0..76da5fd 100644
      async fn eip1271_signature_from_a_contract_is_left_to_the_contract() {
          let asserter = Asserter::new();
 diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
-index 6dceaf4..bea6987 100644
+index 95e1f29..8bc1bba 100644
 --- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
 +++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
-@@ -10,7 +10,8 @@ use tracing::instrument;
- use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider};
+@@ -11,7 +11,7 @@ use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider};
  use crate::v1_eip155_exact::{
      Eip155ExactError, ExactEvmPayment, IEIP3009, PaymentRequirementsExtra, assert_domain,
--    assert_enough_balance, assert_enough_value, assert_time, settle_payment, verify_payment,
-+    assert_enough_balance, assert_enough_value, assert_time, explain_used_eip3009_authorization,
-+    settle_payment, verify_payment,
+     assert_enough_balance, assert_enough_value, assert_payment_signed_by_payer, assert_time,
+-    settle_payment, verify_payment,
++    explain_used_eip3009_authorization, settle_payment, verify_payment,
  };
  use crate::v2_eip155_exact::Eip3009Payload;
  use crate::v2_eip155_exact::types::{Eip3009PaymentPayload, Eip3009PaymentRequirements};
-@@ -31,7 +32,8 @@ pub async fn verify_eip3009_payment<P: Eip155MetaTransactionProvider + ChainProv
+@@ -32,7 +32,8 @@ pub async fn verify_eip3009_payment<P: Eip155MetaTransactionProvider + ChainProv
      )
      .await?;
  
@@ -169,7 +168,7 @@ index 6dceaf4..bea6987 100644
      Ok(v2::VerifyResponse::valid(payer.to_string()))
  }
  
-@@ -55,7 +57,8 @@ where
+@@ -56,7 +57,8 @@ where
      )
      .await?;
  
@@ -180,7 +179,7 @@ index 6dceaf4..bea6987 100644
      Ok(v2::SettleResponse::Success {
          payer: payment.from.to_string(),
 diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
-index 3bfc9ab..12ea89a 100644
+index 1508daf..2deaa99 100644
 --- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
 +++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
 @@ -2,7 +2,7 @@ use alloy_primitives::{Address, B256, Bytes, TxHash, U256};
@@ -192,16 +191,17 @@ index 3bfc9ab..12ea89a 100644
  use x402_types::chain::ChainProviderOps;
  use x402_types::proto::{PaymentVerificationError, v2};
  use x402_types::scheme::X402SchemeFacilitatorError;
-@@ -20,7 +20,7 @@ use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider, MetaTran
+@@ -19,7 +19,8 @@ use crate::chain::permit2::{EXACT_PERMIT2_PROXY_ADDRESS, PERMIT2_ADDRESS};
+ use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider, MetaTransaction};
  use crate::v1_eip155_exact::{
-     Eip155ExactError, StructuredSignature, VALIDATOR_ADDRESS, Validator6492,
-     assert_eip1271_signer_has_code, assert_enough_value, assert_time, is_contract_deployed,
--    tx_hash_from_receipt,
-+    is_failed_execution, tx_hash_from_receipt,
+     Eip155ExactError, StructuredSignature, VALIDATOR_ADDRESS, Validator6492, assert_enough_value,
+-    assert_signed_by_payer, assert_time, is_contract_deployed, tx_hash_from_receipt,
++    assert_signed_by_payer, assert_time, is_contract_deployed, is_failed_execution,
++    tx_hash_from_receipt,
  };
  use crate::v2_eip155_exact::eip3009::assert_requirements_match;
  use crate::v2_eip155_exact::types::{
-@@ -50,15 +50,18 @@ pub async fn verify_permit2_payment<P: Eip155MetaTransactionProvider + ChainProv
+@@ -52,15 +53,18 @@ pub async fn verify_permit2_payment<P: Eip155MetaTransactionProvider + ChainProv
              return Err(PaymentVerificationError::eip2612_gas_sponsoring_not_enabled().into());
          }
          eip2612::assert_eip2612_offchain_valid(eip2612_gas_sponsoring_payload, payment_payload)?;
@@ -223,7 +223,7 @@ index 3bfc9ab..12ea89a 100644
      }
  
      Ok(v2::VerifyResponse::valid(payer.to_string()))
-@@ -97,11 +100,18 @@ where
+@@ -102,11 +106,18 @@ where
          eip2612::assert_eip2612_offchain_valid(eip2612_gas_sponsoring_payload, payment_payload)?;
          // The EIP-2612 permit grants the Permit2 allowance in the same transaction.
          assert_onchain_balance(&token_contract, authorization.from.0, required_amount).await?;
@@ -243,7 +243,7 @@ index 3bfc9ab..12ea89a 100644
          .await?
      } else {
          assert_onchain_allowance_and_balance(
-@@ -110,7 +120,14 @@ where
+@@ -115,7 +126,14 @@ where
              required_amount,
          )
          .await?;
@@ -259,7 +259,7 @@ index 3bfc9ab..12ea89a 100644
      };
  
      let payer = authorization.from;
-@@ -384,6 +401,53 @@ pub async fn assert_onchain_balance<P: Provider>(
+@@ -399,6 +417,53 @@ pub async fn assert_onchain_balance<P: Provider>(
      Ok(())
  }
  
@@ -313,7 +313,7 @@ index 3bfc9ab..12ea89a 100644
  /// Checks the payer's Permit2 allowance, then its balance, in the order x402 prescribes
  /// (`scheme_exact_evm.md`, Permit2 verification steps 2 and 3).
  ///
-@@ -584,6 +648,75 @@ mod tests {
+@@ -598,6 +663,75 @@ mod tests {
          }
      }
  

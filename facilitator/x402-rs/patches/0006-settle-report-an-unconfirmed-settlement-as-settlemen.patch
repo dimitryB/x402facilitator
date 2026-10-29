@@ -1,0 +1,276 @@
+From 75ad74db34456bc17a23634d661c2a811b0b58de Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 23:36:54 -0400
+Subject: [PATCH 6/7] settle: report an unconfirmed settlement as
+ settlement_pending with its hash
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When a settlement transaction was broadcast but its receipt did not arrive
+within receipt_timeout_secs (or the RPC failed while waiting), send_transaction
+dropped the transaction hash and reset the signer's nonce. /settle answered
+HTTP 500 unexpected_settle_error with "transaction": "", although the
+transaction was in the mempool and could, and typically did, still pay out.
+Resetting the nonce also let the next settlement query a node that had not
+seen the pending transaction and reuse its nonce, replacing or racing it.
+
+x402 v2 §5.3.2 allows an empty transaction only if nothing was broadcast, and
+§9 defines settlement_pending for exactly this case: non-terminal, with the
+broadcast hash in transaction and the network, so that the caller can
+reconcile on chain before retrying.
+
+- MetaTransactionSendError::ReceiptUnavailable carries the hash of a broadcast
+  transaction whose receipt did not arrive; the nonce is kept (submission
+  failures still reset it, as before).
+- It becomes Eip155ExactError::SettlementPending and then the new
+  X402SchemeFacilitatorError::SettlementPending, reported as
+  {"success": false, "errorReason": "settlement_pending", "transaction": <hash>,
+  "network", "payer"}.
+- The response is HTTP 200: it is not a failed request, the TS reference
+  facilitator returns it as an ordinary settle response, and x402-rs's own
+  facilitator client ignores the body of a 5xx, which would lose the hash.
+---
+ .../x402-chain-eip155/src/chain/provider.rs   | 31 +++++++++-----
+ .../src/v1_eip155_exact/facilitator.rs        | 14 +++++++
+ crates/x402-facilitator-local/src/handlers.rs | 40 ++++++++++++++++++-
+ crates/x402-types/src/proto/mod.rs            |  4 ++
+ crates/x402-types/src/scheme/mod.rs           | 13 ++++++
+ 5 files changed, 91 insertions(+), 11 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/chain/provider.rs b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+index 9106320..d1dc7a2 100644
+--- a/crates/chains/x402-chain-eip155/src/chain/provider.rs
++++ b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+@@ -1,5 +1,5 @@
+ use alloy_network::{Ethereum as AlloyEthereum, EthereumWallet, NetworkWallet, TransactionBuilder};
+-use alloy_primitives::{Address, B256, Bytes};
++use alloy_primitives::{Address, B256, Bytes, TxHash};
+ use alloy_provider::fillers::{
+     BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
+ };
+@@ -232,10 +232,10 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+     /// selects the next available signer using round-robin selection, and handles gas pricing
+     /// based on whether the network supports EIP-1559.
+     ///
+-    /// If the transaction fails at any point (during submission or receipt fetching), the nonce
+-    /// for the sending address is reset to force a fresh query on the next transaction. This
+-    /// ensures correctness even when transactions partially succeed (e.g., submitted but receipt
+-    /// fetch times out).
++    /// If submission fails, the nonce for the sending address is reset to force a fresh query on
++    /// the next transaction. If the transaction was submitted but its receipt does not arrive
++    /// (timeout or RPC error), the nonce is kept, because the transaction may still be mined, and
++    /// the error carries its hash ([`MetaTransactionSendError::ReceiptUnavailable`]).
+     ///
+     /// # Gas Pricing Strategy
+     ///
+@@ -247,7 +247,7 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+     /// Receipt fetching is subject to a configurable timeout:
+     /// - Default: 30 seconds
+     /// - Override via `TX_RECEIPT_TIMEOUT_SECS` environment variable
+-    /// - If the timeout expires, the nonce is reset and an error is returned
++    /// - If the timeout expires, an error carrying the transaction hash is returned
+     ///
+     /// # Parameters
+     ///
+@@ -306,7 +306,9 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+             }
+         };
+ 
+-        // Get receipt with timeout and error handling for nonce reset
++        let tx_hash = *pending_tx.tx_hash();
++
++        // Get receipt with timeout
+         // Default timeout of 30 seconds is reasonable for most EVM chains
+         let timeout = std::time::Duration::from_secs(self.receipt_timeout_secs);
+ 
+@@ -317,9 +319,11 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+         match watcher.get_receipt().await {
+             Ok(receipt) => Ok(receipt),
+             Err(e) => {
+-                // Receipt fetch failed (timeout or other error) - reset nonce to force requery
+-                self.nonce_manager.reset_nonce(from_address).await;
+-                Err(MetaTransactionSendError::PendingTransaction(e))
++                // Receipt fetch failed (timeout or other error), but the transaction was accepted for
++                // broadcast and may still be mined. Keep its nonce: resetting would let the next
++                // transaction query a node that has not seen this one and reuse the nonce, replacing or
++                // racing it. Report the hash so the caller can reconcile on chain.
++                Err(MetaTransactionSendError::ReceiptUnavailable { tx_hash, source: e })
+             }
+         }
+     }
+@@ -331,6 +335,13 @@ pub enum MetaTransactionSendError {
+     Transport(#[from] TransportError),
+     #[error(transparent)]
+     PendingTransaction(#[from] PendingTransactionError),
++    /// The transaction was broadcast, but its receipt did not arrive (timeout or RPC error while
++    /// waiting). It may still be mined.
++    #[error("transaction {tx_hash} was broadcast, but its receipt is not available: {source}")]
++    ReceiptUnavailable {
++        tx_hash: TxHash,
++        source: PendingTransactionError,
++    },
+     #[allow(dead_code)] // Public for consumption by downstream crates.
+     #[error("{0}")]
+     Custom(String),
+diff --git a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+index 4f3758e..956a034 100644
+--- a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
++++ b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+@@ -1144,6 +1144,10 @@ pub enum Eip155ExactError {
+     ContractCall(String),
+     #[error(transparent)]
+     PaymentVerification(#[from] PaymentVerificationError),
++    /// The settlement transaction was broadcast, but its receipt did not arrive in time.
++    /// It may still be mined.
++    #[error("Transaction {tx_hash} was broadcast, but its receipt is not available: {reason}")]
++    SettlementPending { tx_hash: TxHash, reason: String },
+ }
+ 
+ impl From<Eip155ExactError> for X402SchemeFacilitatorError {
+@@ -1154,6 +1158,10 @@ impl From<Eip155ExactError> for X402SchemeFacilitatorError {
+             Eip155ExactError::TransactionReverted(_) => Self::OnchainFailure(value.to_string()),
+             Eip155ExactError::ContractCall(_) => Self::OnchainFailure(value.to_string()),
+             Eip155ExactError::PaymentVerification(e) => Self::PaymentVerification(e),
++            Eip155ExactError::SettlementPending { tx_hash, .. } => Self::SettlementPending {
++                transaction: tx_hash.to_string(),
++                details: value.to_string(),
++            },
+         }
+     }
+ }
+@@ -1169,6 +1177,12 @@ impl From<MetaTransactionSendError> for Eip155ExactError {
+         match e {
+             MetaTransactionSendError::Transport(e) => Self::Transport(e),
+             MetaTransactionSendError::PendingTransaction(e) => Self::PendingTransaction(e),
++            MetaTransactionSendError::ReceiptUnavailable { tx_hash, source } => {
++                Self::SettlementPending {
++                    tx_hash,
++                    reason: source.to_string(),
++                }
++            }
+             MetaTransactionSendError::Custom(e) => Self::ContractCall(e),
+         }
+     }
+diff --git a/crates/x402-facilitator-local/src/handlers.rs b/crates/x402-facilitator-local/src/handlers.rs
+index 5bde4d9..9bab41f 100644
+--- a/crates/x402-facilitator-local/src/handlers.rs
++++ b/crates/x402-facilitator-local/src/handlers.rs
+@@ -264,11 +264,18 @@ impl AsJsonValue for FacilitatorLocalError {
+             }
+             FacilitatorLocalError::Settlement(scheme_handler_error, context) => {
+                 let problem = scheme_handler_error.as_payment_problem();
++                // §5.3.2: "" only if no transaction was broadcast; a pending one carries its hash.
++                let transaction = match scheme_handler_error {
++                    X402SchemeFacilitatorError::SettlementPending { transaction, .. } => {
++                        transaction
++                    }
++                    _ => "",
++                };
+                 let settlement_error_response = SettlementErrorResponse {
+                     success: false,
+                     // Required by §5.3.2; empty only if the request named no network at all.
+                     network: context.network.as_deref().unwrap_or(""),
+-                    transaction: "",
++                    transaction,
+                     error_reason: spec_reason(problem.reason(), ErrorReason::UnexpectedSettleError),
+                     error_message: problem.details(),
+                     payer: context.payer.as_deref(),
+@@ -301,6 +308,10 @@ fn scheme_error_to_status_code(error: &X402SchemeFacilitatorError) -> StatusCode
+             }
+         }
+         X402SchemeFacilitatorError::OnchainFailure(_) => StatusCode::INTERNAL_SERVER_ERROR,
++        // Not a failed request: the transaction is out and may still be mined. Like the TS reference
++        // facilitator, answer it as an ordinary settle response, so that clients read the body and
++        // its transaction hash (x402-rs's own facilitator client ignores the body of a 5xx).
++        X402SchemeFacilitatorError::SettlementPending { .. } => StatusCode::OK,
+     }
+ }
+ 
+@@ -377,6 +388,33 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn settlement_pending_carries_the_transaction_hash() {
++        let hash = "0x5e1fb6f2a0fe5ed1d4a2e9a2a0d6c7e8b3c4d5e6f708192a3b4c5d6e7f809102";
++        let pending = || X402SchemeFacilitatorError::SettlementPending {
++            transaction: hash.to_string(),
++            details: "receipt timed out".to_string(),
++        };
++        let body = FacilitatorLocalError::Settlement(pending(), context())
++            .as_json_value()
++            .unwrap();
++        assert_eq!(
++            body,
++            json!({
++                "success": false,
++                "errorReason": "settlement_pending",
++                "errorMessage": "receipt timed out",
++                "transaction": hash,
++                "network": "eip155:43111",
++                "payer": PAYER,
++            })
++        );
++        let status = FacilitatorLocalError::Settlement(pending(), context())
++            .into_response()
++            .status();
++        assert_eq!(status, StatusCode::OK);
++    }
++
+     #[test]
+     fn status_codes_are_unchanged() {
+         let status = |e: FacilitatorLocalError| e.into_response().status();
+diff --git a/crates/x402-types/src/proto/mod.rs b/crates/x402-types/src/proto/mod.rs
+index af1e832..09df5c9 100644
+--- a/crates/x402-types/src/proto/mod.rs
++++ b/crates/x402-types/src/proto/mod.rs
+@@ -398,6 +398,9 @@ pub enum ErrorReason {
+     UnexpectedVerifyError,
+     /// x402 v2 §9: "Unexpected error occurred during payment settlement".
+     UnexpectedSettleError,
++    /// x402 v2 §9: the settlement transaction was broadcast, but its confirmation could not be
++    /// established. Non-terminal: the transaction may still be mined.
++    SettlementPending,
+ }
+ 
+ /// Trait for converting errors into structured payment problems.
+@@ -474,6 +477,7 @@ mod tests {
+                 ErrorReason::UnexpectedSettleError,
+                 "unexpected_settle_error",
+             ),
++            (ErrorReason::SettlementPending, "settlement_pending"),
+             (ErrorReason::InsufficientFunds, "insufficient_funds"),
+         ];
+         for (reason, code) in cases {
+diff --git a/crates/x402-types/src/scheme/mod.rs b/crates/x402-types/src/scheme/mod.rs
+index 3d5fd30..77300f7 100644
+--- a/crates/x402-types/src/scheme/mod.rs
++++ b/crates/x402-types/src/scheme/mod.rs
+@@ -143,6 +143,16 @@ pub enum X402SchemeFacilitatorError {
+     /// On-chain operation failed.
+     #[error("Onchain error: {0}")]
+     OnchainFailure(String),
++    /// A settlement transaction was broadcast, but its confirmation could not be established
++    /// (for example, the receipt did not arrive in time). It may still be mined; `transaction`
++    /// is its hash, for the caller to reconcile on chain (x402 v2 §9 `settlement_pending`).
++    #[error("Settlement pending: {details}")]
++    SettlementPending {
++        /// Hash of the broadcast transaction.
++        transaction: String,
++        /// Human-readable explanation.
++        details: String,
++    },
+ }
+ 
+ impl AsPaymentProblem for X402SchemeFacilitatorError {
+@@ -152,6 +162,9 @@ impl AsPaymentProblem for X402SchemeFacilitatorError {
+             X402SchemeFacilitatorError::OnchainFailure(e) => {
+                 PaymentProblem::new(ErrorReason::UnexpectedError, e.to_string())
+             }
++            X402SchemeFacilitatorError::SettlementPending { details, .. } => {
++                PaymentProblem::new(ErrorReason::SettlementPending, details.clone())
++            }
+         }
+     }
+ }

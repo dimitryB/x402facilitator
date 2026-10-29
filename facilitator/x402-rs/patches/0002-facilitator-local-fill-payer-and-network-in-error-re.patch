@@ -1,7 +1,7 @@
 From 116f7e816e0106b0ebe2b1d6ae0cc01d4d98a479 Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 22:50:11 -0400
-Subject: [PATCH 2/5] facilitator-local: fill payer and network in error
+Subject: [PATCH 2/7] facilitator-local: fill payer and network in error
  responses, use spec codes
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

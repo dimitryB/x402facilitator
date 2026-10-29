@@ -423,13 +423,38 @@ Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return 
 
 The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
 
-No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus five patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.1`. Each patch is small, unit-tested and written to go upstream. None changes what is settled or to whom; they change which error is returned, with which fields, and when. `facilitator/x402-rs/README.md` has the per-patch detail and draft upstream texts. Nothing has been published.
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.2`. Each patch is small, unit-tested and written to go upstream. None changes what is settled or to whom. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
+
+| Patch | Change |
+|------|------|
+| 0001 | §9 error codes added to `ErrorReason` |
+| 0002 | Error bodies carry `payer` and `network`, plus `invalidMessage`; `unexpected_error` becomes `unexpected_verify_error` or `unexpected_settle_error` |
+| 0003 | The payer's signature is checked first. A signature that does not recover to `from`, from an address with no code, returns `invalid_exact_evm_payload_signature` |
+| 0004 | Permit2: allowance before balance; both re-checked on settle |
+| 0005 | A replayed authorization or Permit2 nonce returns `invalid_transaction_state` |
+| 0006 | A broadcast tx whose receipt does not arrive in time returns HTTP 200 `settlement_pending` with the tx hash. The nonce is no longer reset after a broadcast |
+| 0007 | An unsupported network returns `invalid_network` |
+
+hemi.1 had patches 0001 to 0005. A fresh-context critic then found three more gaps:
+
+- **Signature order:** a bad signature from an unfunded payer was reported as a balance or allowance failure, not a signature failure.
+- **Lost hash:** a receipt timeout returned 500 with an empty `transaction` while the tx was still in the mempool. The buyer would be charged with no hash returned.
+- **Wrong network:** an unsupported network returned `unsupported_scheme`.
+
+hemi.2 fixes all three.
 
 - **Replay code:** a replay is reported as `invalid_transaction_state`. §9 has no replay code, and its definition ("Blockchain transaction failed or was rejected") fits. The TS reference facilitator also uses it as its default for failed settlements.
-- **Build:** the builder and runtime base images are pinned by digest. Each patch is applied with `git apply --check`, so upstream drift fails the build.
-- **Build time:** a no-cache build took 112 s on the workstation (Colima, 4 CPUs). The image is 170 MB.
+- **`settlement_pending` is HTTP 200:** the TS reference facilitator returns it the same way, and x402-rs's own client reads the body only on 200, 400 and 412.
+- **Nonce trade-off:** a tx that is later dropped from every mempool leaves a nonce gap until restart. Before, the nonce could be reused while the earlier tx might still mine.
+- **Kept on purpose:** `invalidReasonDetails` stays next to `invalidMessage` for clients of stock x402-rs.
+- **Not yet renamed:** x402-rs's own names for cases the DoD does not cover, such as `invalid_payment_expired`. They are listed in `facilitator/x402-rs/README.md`.
+- **Build:** base images are pinned by digest, and each patch is applied with `git apply --check`, so upstream drift fails the build. A no-cache build takes about 115 s on the workstation (Colima, 4 CPUs). The image is 170 MB.
 
-Verified on 2026-10-29: the e2e suite passes 43 of 43 against this image, with dead primary RPCs and no expected-failure markers. `buyer/demo-fork.sh` settles all four asset and network pairs, and the seller logs a `/verify` before each `/settle`.
+Verified on 2026-10-29 against a no-cache hemi.2 build:
+
+- **e2e suite:** 7 files, 55 tests passed, with dead primary RPCs and no expected-failure markers.
+- **Rust checks:** `cargo fmt`, `clippy -D warnings` and the unit tests pass at each patch commit.
+- **Demo:** `buyer/demo-fork.sh` settles all four asset and network pairs, and the seller logs a `/verify` before each `/settle`.
 
 The alternative was the stock image with the deviations documented. It was rejected because it fails a Definition-of-done item. The TypeScript facilitator fallback in the brief is for cases where the Rust config cannot express what Hemi needs. This gap is not Hemi-specific, and a patch keeps the Rust facilitator the brief chose.
 

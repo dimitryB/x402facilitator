@@ -7,12 +7,15 @@
  *            errorMessage (optional), payer (optional, "Address of the payer's wallet"),
  *            transaction (required, "empty string if no transaction was broadcast"),
  *            network (required, "Blockchain network identifier in CAIP-2 format").
+ *            Also amount and extensions (optional).
  *     §5.4.2 VerifyResponse fields: isValid (required), invalidReason (optional, omitted if valid),
- *            invalidMessage (optional), payer (optional, "Address of the payer's wallet").
+ *            invalidMessage (optional), payer (optional, "Address of the payer's wallet"),
+ *            extensions and extra (optional).
  *     §7.1   /verify error response example: { isValid: false, invalidReason: "insufficient_funds", payer: "0x857b…" }
  *     §7.2   /settle error response example: { success: false, errorReason: "insufficient_funds",
  *            payer: "0x857b…", transaction: "", network: "eip155:84532" }
  *     §9     Error codes (list below). "clients MUST use the corresponding invalidReason or errorReason code".
+ *            settlement_pending: "MUST carry a non-empty transaction (the broadcast hash) and network".
  *   specs/schemes/exact/scheme_exact_evm.md
  *     EIP-3009 Phase 2 step 1 / Permit2 Phase 3 step 1: the signature must recover to `from`.
  *     Permit2 Phase 3 step 2: allowance < amount and no sponsoring extension ->
@@ -43,6 +46,10 @@ export type SpecErrorCode = (typeof SPEC_ERROR_CODES)[number];
 
 /** §9: "Payment authorization signature is invalid or improperly signed". */
 export const SPEC_INVALID_SIGNATURE: SpecErrorCode = "invalid_exact_evm_payload_signature";
+/** §9: "Specified blockchain network is not supported". */
+export const SPEC_INVALID_NETWORK: SpecErrorCode = "invalid_network";
+/** §9: broadcast, but its confirmation could not be established; non-terminal, carries the hash. */
+export const SPEC_SETTLEMENT_PENDING: SpecErrorCode = "settlement_pending";
 /** §9: "Client does not have enough tokens to complete the payment". */
 export const SPEC_INSUFFICIENT_FUNDS: SpecErrorCode = "insufficient_funds";
 /**
@@ -55,29 +62,57 @@ export const SPEC_PERMIT2_ALLOWANCE_REQUIRED = "PERMIT2_ALLOWANCE_REQUIRED";
 
 type Body = Record<string, unknown>;
 
-function payerViolation(body: Body, payer: Address, section: string): string[] {
-  if (!("payer" in body)) return [];
-  const value = body.payer;
-  if (typeof value === "string" && isAddress(value) && getAddress(value) === payer) return [];
-  return [`payer is ${JSON.stringify(value)}; ${section} payer is the payer's wallet address (${payer}) or omitted`];
+/** §5.4.2 VerifyResponse fields. */
+const VERIFY_FIELDS = ["isValid", "invalidReason", "invalidMessage", "payer", "extensions", "extra"];
+/** §5.3.2 SettleResponse fields. */
+const SETTLE_FIELDS = ["success", "errorReason", "errorMessage", "payer", "transaction", "network", "amount", "extensions"];
+/**
+ * The one field outside §5.4.2 that the facilitator is allowed to send: x402-rs's own name for the
+ * human-readable message, kept next to `invalidMessage` (same text) for clients of stock x402-rs.
+ * See facilitator/x402-rs/README.md. Any other unknown field is a violation.
+ */
+export const TOLERATED_VERIFY_EXTRA_FIELDS = ["invalidReasonDetails"];
+
+function unknownFields(body: Body, known: string[], section: string): string[] {
+  return Object.keys(body)
+    .filter(k => !known.includes(k))
+    .map(k => `field ${JSON.stringify(k)} is not in ${section}`);
 }
 
-/** Every way `body` departs from a spec /verify failure for this case (§5.4.2, §7.1, §9). Empty = conforms. */
-export function verifyFailureViolations(body: Body, expected: { reason: SpecErrorCode; payer: Address }): string[] {
+function payerViolation(body: Body, payer: Address | undefined, section: string): string[] {
+  if (!("payer" in body)) return [];
+  const value = body.payer;
+  const ok = typeof value === "string" && isAddress(value) && (payer === undefined || getAddress(value) === payer);
+  if (ok) return [];
+  return [`payer is ${JSON.stringify(value)}; ${section} payer is the payer's wallet address (${payer ?? "any"}) or omitted`];
+}
+
+/**
+ * Every way `body` departs from a spec /verify failure for this case (§5.4.2, §7.1, §9). Empty = conforms.
+ * `payer` undefined means the facilitator cannot know it (it may omit the field).
+ */
+export function verifyFailureViolations(body: Body, expected: { reason: SpecErrorCode; payer?: Address }): string[] {
   const v: string[] = [];
   if (body.isValid !== false) v.push(`isValid is ${JSON.stringify(body.isValid)}; spec requires false`);
   if (body.invalidReason !== expected.reason) {
     v.push(`invalidReason is ${JSON.stringify(body.invalidReason)}; the spec §9 code for this case is "${expected.reason}"`);
   }
   if ("invalidMessage" in body && typeof body.invalidMessage !== "string") v.push("invalidMessage is not a string");
+  if ("invalidReasonDetails" in body && body.invalidReasonDetails !== body.invalidMessage) {
+    v.push("invalidReasonDetails (tolerated compatibility field) differs from invalidMessage");
+  }
   v.push(...payerViolation(body, expected.payer, "§5.4.2"));
+  v.push(...unknownFields(body, [...VERIFY_FIELDS, ...TOLERATED_VERIFY_EXTRA_FIELDS], "§5.4.2"));
   return v;
 }
 
-/** Every way `body` departs from a spec /settle failure for this case (§5.3.2, §7.2, §9). Empty = conforms. */
+/**
+ * Every way `body` departs from a spec /settle failure for this case (§5.3.2, §7.2, §9). Empty = conforms.
+ * `broadcast`: whether a transaction went out, so `transaction` must be its hash rather than "".
+ */
 export function settleFailureViolations(
   body: Body,
-  expected: { reasons: readonly SpecErrorCode[]; payer: Address; network: string; broadcast: boolean },
+  expected: { reasons: readonly SpecErrorCode[]; payer?: Address; network: string; broadcast: boolean },
 ): string[] {
   const v: string[] = [];
   if (body.success !== false) v.push(`success is ${JSON.stringify(body.success)}; spec requires false`);
@@ -93,10 +128,13 @@ export function settleFailureViolations(
     v.push(`transaction is ${JSON.stringify(body.transaction)}; §5.3.2 requires a string`);
   } else if (!expected.broadcast && body.transaction !== "") {
     v.push(`transaction is ${JSON.stringify(body.transaction)}; nothing was broadcast, so §5.3.2 requires ""`);
+  } else if (expected.broadcast && !/^0x[0-9a-fA-F]{64}$/.test(body.transaction)) {
+    v.push(`transaction is ${JSON.stringify(body.transaction)}; a transaction was broadcast, so §5.3.2/§9 require its hash`);
   }
   if (body.network !== expected.network) {
     v.push(`network is ${JSON.stringify(body.network)}; §5.3.2 requires the CAIP-2 network ("${expected.network}")`);
   }
   v.push(...payerViolation(body, expected.payer, "§5.3.2"));
+  v.push(...unknownFields(body, SETTLE_FIELDS, "§5.3.2"));
   return v;
 }

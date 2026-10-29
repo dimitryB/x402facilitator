@@ -1,0 +1,187 @@
+From fd13be890b60e32302f0486ef607d90a95e9a8c6 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 23:37:51 -0400
+Subject: [PATCH 7/7] facilitator-local: report a request for an unsupported
+ network as invalid_network
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A /verify or /settle request for a network no handler serves (for example
+eip155:1 on a facilitator configured for other chains) was answered with
+unsupported_scheme. x402 v2 §9 has a code for that case, invalid_network:
+"Specified blockchain network is not supported".
+
+- SchemeRegistry::supports_chain tells whether any handler serves a chain.
+- When no handler matches, FacilitatorLocal reports UnsupportedChain if the
+  request's network is not served at all, and UnsupportedScheme otherwise (a
+  served network without the requested scheme or version, or a request that
+  names no network).
+- PaymentVerificationError::UnsupportedChain, which scheme handlers already use
+  for networks they cannot serve, now maps to the new ErrorReason::InvalidNetwork
+  (invalid_network) instead of the non-spec unsupported_chain.
+---
+ crates/x402-facilitator-local/Cargo.toml      |  3 +
+ .../src/facilitator_local.rs                  | 60 ++++++++++++++++++-
+ crates/x402-types/src/proto/mod.rs            | 10 +++-
+ crates/x402-types/src/scheme/mod.rs           |  5 ++
+ 4 files changed, 75 insertions(+), 3 deletions(-)
+
+diff --git a/crates/x402-facilitator-local/Cargo.toml b/crates/x402-facilitator-local/Cargo.toml
+index deeca44..29b0e4c 100644
+--- a/crates/x402-facilitator-local/Cargo.toml
++++ b/crates/x402-facilitator-local/Cargo.toml
+@@ -50,3 +50,6 @@ opentelemetry-semantic-conventions = { version = "0.32", features = ["semconv_ex
+ tracing-opentelemetry = { version = "0.33", optional = true }
+ opentelemetry-otlp = { version = "0.32", features = ["metrics", "grpc-tonic"], optional = true }
+ opentelemetry-stdout = { version = "0.32", features = ["trace", "metrics"], optional = true }
++
++[dev-dependencies]
++tokio = { workspace = true, features = ["macros", "rt"] }
+diff --git a/crates/x402-facilitator-local/src/facilitator_local.rs b/crates/x402-facilitator-local/src/facilitator_local.rs
+index 19992b1..d6a9322 100644
+--- a/crates/x402-facilitator-local/src/facilitator_local.rs
++++ b/crates/x402-facilitator-local/src/facilitator_local.rs
+@@ -98,7 +98,7 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
+             .and_then(|slug| self.handlers.by_slug(&slug))
+             .ok_or_else(|| {
+                 FacilitatorLocalError::Verification(
+-                    PaymentVerificationError::UnsupportedScheme.into(),
++                    no_handler_error(&self.handlers, request).into(),
+                     context.clone(),
+                 )
+             })?;
+@@ -118,7 +118,7 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
+             .and_then(|slug| self.handlers.by_slug(&slug))
+             .ok_or_else(|| {
+                 FacilitatorLocalError::Settlement(
+-                    PaymentVerificationError::UnsupportedScheme.into(),
++                    no_handler_error(&self.handlers, request).into(),
+                     context.clone(),
+                 )
+             })?;
+@@ -150,6 +150,21 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
+     }
+ }
+ 
++/// Why no handler serves `request`: a network no handler serves is `invalid_network`
++/// ("Specified blockchain network is not supported", x402 v2 §9); a served network without the
++/// requested scheme or protocol version, or a request naming neither, is `unsupported_scheme`.
++fn no_handler_error(
++    handlers: &SchemeRegistry,
++    request: &proto::VerifyRequest,
++) -> PaymentVerificationError {
++    match request.scheme_handler_slug() {
++        Some(slug) if !handlers.supports_chain(&slug.chain_id) => {
++            PaymentVerificationError::UnsupportedChain
++        }
++        _ => PaymentVerificationError::UnsupportedScheme,
++    }
++}
++
+ /// Errors that can occur during local facilitator operations.
+ ///
+ /// These errors wrap the underlying scheme handler errors and distinguish between
+@@ -195,3 +210,44 @@ impl ErrorContext {
+         Self { payer, ..self }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use x402_types::proto::{AsPaymentProblem, ErrorReason};
++
++    fn request(network: &str) -> proto::VerifyRequest {
++        serde_json::from_str(&format!(
++            r#"{{"x402Version":2,"paymentPayload":{{"x402Version":2,"accepted":{{"scheme":"exact","network":"{network}"}},"payload":{{}}}},"paymentRequirements":{{}}}}"#
++        ))
++        .unwrap()
++    }
++
++    fn reason(error: FacilitatorLocalError) -> (ErrorReason, ErrorContext) {
++        match error {
++            FacilitatorLocalError::Verification(e, context)
++            | FacilitatorLocalError::Settlement(e, context) => {
++                (e.as_payment_problem().reason(), context)
++            }
++        }
++    }
++
++    #[tokio::test]
++    async fn unknown_network_is_invalid_network() {
++        let facilitator = FacilitatorLocal::new(SchemeRegistry::default());
++        let request = request("eip155:1");
++        let (verify, context) = reason(facilitator.verify(&request).await.unwrap_err());
++        assert_eq!(verify, ErrorReason::InvalidNetwork);
++        assert_eq!(context.network.as_deref(), Some("eip155:1"));
++        let (settle, _) = reason(facilitator.settle(&request).await.unwrap_err());
++        assert_eq!(settle, ErrorReason::InvalidNetwork);
++    }
++
++    #[tokio::test]
++    async fn request_without_a_network_is_unsupported_scheme() {
++        let facilitator = FacilitatorLocal::new(SchemeRegistry::default());
++        let request: proto::VerifyRequest = serde_json::from_str(r#"{"x402Version":2}"#).unwrap();
++        let (verify, _) = reason(facilitator.verify(&request).await.unwrap_err());
++        assert_eq!(verify, ErrorReason::UnsupportedScheme);
++    }
++}
+diff --git a/crates/x402-types/src/proto/mod.rs b/crates/x402-types/src/proto/mod.rs
+index 09df5c9..49f026b 100644
+--- a/crates/x402-types/src/proto/mod.rs
++++ b/crates/x402-types/src/proto/mod.rs
+@@ -331,7 +331,7 @@ impl AsPaymentProblem for PaymentVerificationError {
+             PaymentVerificationError::TransactionSimulation(_) => {
+                 ErrorReason::TransactionSimulation
+             }
+-            PaymentVerificationError::UnsupportedChain => ErrorReason::UnsupportedChain,
++            PaymentVerificationError::UnsupportedChain => ErrorReason::InvalidNetwork,
+             PaymentVerificationError::UnsupportedScheme => ErrorReason::UnsupportedScheme,
+             PaymentVerificationError::AcceptedRequirementsMismatch => {
+                 ErrorReason::AcceptedRequirementsMismatch
+@@ -401,6 +401,8 @@ pub enum ErrorReason {
+     /// x402 v2 §9: the settlement transaction was broadcast, but its confirmation could not be
+     /// established. Non-terminal: the transaction may still be mined.
+     SettlementPending,
++    /// x402 v2 §9: "Specified blockchain network is not supported".
++    InvalidNetwork,
+ }
+ 
+ /// Trait for converting errors into structured payment problems.
+@@ -478,6 +480,7 @@ mod tests {
+                 "unexpected_settle_error",
+             ),
+             (ErrorReason::SettlementPending, "settlement_pending"),
++            (ErrorReason::InvalidNetwork, "invalid_network"),
+             (ErrorReason::InsufficientFunds, "insufficient_funds"),
+         ];
+         for (reason, code) in cases {
+@@ -500,6 +503,11 @@ mod tests {
+             ErrorReason::InvalidExactEvmPayloadSignature
+         );
+         assert_eq!(signature.as_payment_problem().details(), "bad");
++        let network = PaymentVerificationError::UnsupportedChain;
++        assert_eq!(
++            network.as_payment_problem().reason(),
++            ErrorReason::InvalidNetwork
++        );
+         let used = PaymentVerificationError::AuthorizationAlreadyUsed;
+         assert_eq!(
+             used.as_payment_problem().reason(),
+diff --git a/crates/x402-types/src/scheme/mod.rs b/crates/x402-types/src/scheme/mod.rs
+index 77300f7..d06d28d 100644
+--- a/crates/x402-types/src/scheme/mod.rs
++++ b/crates/x402-types/src/scheme/mod.rs
+@@ -335,6 +335,11 @@ impl SchemeRegistry {
+     pub fn values(&self) -> impl Iterator<Item = &dyn X402SchemeFacilitator> {
+         self.0.values().map(|v| v.deref())
+     }
++
++    /// Whether any handler serves `chain_id`, whatever its scheme or protocol version.
++    pub fn supports_chain(&self, chain_id: &ChainId) -> bool {
++        self.0.keys().any(|slug| &slug.chain_id == chain_id)
++    }
+ }
+ 
+ /// Configuration for a specific scheme.

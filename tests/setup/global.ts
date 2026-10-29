@@ -8,8 +8,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { createConnection } from "node:net";
 import { join } from "node:path";
 import { MAINNET, TESTNET } from "@hemi-x402/shared";
+import { compose, run, waitForSupported } from "../lib/compose";
 import {
-  COMPOSE_ARGS,
   COMPOSE_ENV_FILE,
   COMPOSE_VARS,
   FACILITATOR_PORT,
@@ -24,23 +24,6 @@ import {
 
 const FORK_SH = join(REPO_ROOT, "scripts", "fork.sh");
 const log = (msg: string) => console.log(`[e2e setup] ${msg}`);
-
-function run(cmd: string, args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): void {
-  const res = spawnSync(cmd, args, { cwd: REPO_ROOT, env, stdio: "inherit", timeout: timeoutMs });
-  if (res.status !== 0) {
-    throw new Error(`${cmd} ${args.join(" ")} failed (status ${res.status}, signal ${res.signal}, ${res.error ?? ""})`);
-  }
-}
-
-function composeEnv(): NodeJS.ProcessEnv {
-  // The env file stops compose from reading the repo's .env; the process env wins over both,
-  // so set every variable there too in case the caller's shell exports one of them.
-  return { ...process.env, ...COMPOSE_VARS };
-}
-
-function compose(args: string[], timeoutMs = 120_000): void {
-  run("docker", [...COMPOSE_ARGS, ...args], composeEnv(), timeoutMs);
-}
 
 function portInUse(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -74,27 +57,6 @@ async function rpc(url: string, method: string, params: unknown[]): Promise<unkn
   const body = (await res.json()) as { result?: unknown; error?: unknown };
   if (body.error) throw new Error(`${method} on ${url}: ${JSON.stringify(body.error)}`);
   return body.result;
-}
-
-async function waitForSupported(timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let last = "";
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`${FACILITATOR_URL}/supported`);
-      last = await res.text();
-      const networks = (JSON.parse(last).kinds ?? []).map((k: { network: string }) => k.network);
-      if (res.ok && networks.includes(TESTNET) && networks.includes(MAINNET)) return;
-    } catch (e) {
-      last = String(e);
-    }
-    await new Promise(r => setTimeout(r, 1000));
-  }
-  spawnSync("docker", [...COMPOSE_ARGS, "logs", "--no-color", "--tail", "50"], {
-    env: composeEnv(),
-    stdio: "inherit",
-  });
-  throw new Error(`facilitator did not list both Hemi networks on /supported within ${timeoutMs} ms: ${last}`);
 }
 
 export default async function setup(): Promise<() => Promise<void>> {
@@ -153,9 +115,9 @@ export default async function setup(): Promise<() => Promise<void>> {
     // The patched x402-rs image (facilitator/Dockerfile). A no-op when the layer cache is current;
     // the first build compiles x402-rs and takes several minutes.
     log("building the facilitator image (docker compose build)");
-    compose(["build"], 3_600_000);
+    compose(["build"], { timeoutMs: 3_600_000 });
     log("starting facilitator (docker compose, dead primary RPCs)");
-    compose(["up", "-d", "--force-recreate", "--no-build"], 300_000);
+    compose(["up", "-d", "--force-recreate", "--no-build"], { timeoutMs: 300_000 });
     await waitForSupported(120_000);
     log(`facilitator ready on ${FACILITATOR_URL}`);
   } catch (e) {

@@ -5,9 +5,12 @@
  */
 import { describe, expect, it } from "vitest";
 import { getAddress } from "viem";
-import { MAINNET, TESTNET } from "@hemi-x402/shared";
-import { FACILITATOR_SIGNER } from "../lib/env";
-import { record, supported } from "../lib/facilitator";
+import { privateKeyToAccount } from "viem/accounts";
+import { MAINNET, TESTNET, usdcAsset } from "@hemi-x402/shared";
+import { BUYER_KEY, FACILITATOR_SIGNER } from "../lib/env";
+import { record, settle, supported, verify } from "../lib/facilitator";
+import { freshAddress, requirementsFor, signPayment } from "../lib/payments";
+import { SPEC_INVALID_NETWORK, settleFailureViolations, verifyFailureViolations } from "../lib/spec";
 
 describe("GET /supported", () => {
   it("lists exact/x402Version 2 on both Hemi networks, with a signer per network", async () => {
@@ -28,5 +31,30 @@ describe("GET /supported", () => {
     expect(res.body.extensions).toEqual([]);
     // Nothing but the two Hemi chains is configured.
     expect(new Set(res.body.kinds.map(k => k.network))).toEqual(new Set([MAINNET, TESTNET]));
+  });
+});
+
+/**
+ * §9 `invalid_network`: "Specified blockchain network is not supported" (facilitator/x402-rs/patches 0007;
+ * stock x402-rs answered `unsupported_scheme`). The payer is unknowable here, since no handler reads the
+ * payload, and §5.4.2/§5.3.2 let the facilitator omit it.
+ */
+describe("a network the facilitator does not support", () => {
+  it(`/verify and /settle answer "${SPEC_INVALID_NETWORK}" for eip155:1`, async () => {
+    const requirements = { ...requirementsFor(MAINNET, usdcAsset(MAINNET), freshAddress(), 1_000n), network: "eip155:1" as const };
+    const payment = await signPayment(privateKeyToAccount(BUYER_KEY), requirements);
+    expect(payment.accepted.network).toBe("eip155:1");
+
+    const v = await verify(payment, requirements);
+    record("verify unsupported network", v);
+    expect(verifyFailureViolations(v.body, { reason: SPEC_INVALID_NETWORK })).toEqual([]);
+    expect(v.status).toBe(400);
+
+    const s = await settle(payment, requirements);
+    record("settle unsupported network", s);
+    expect(
+      settleFailureViolations(s.body, { reasons: [SPEC_INVALID_NETWORK], network: "eip155:1", broadcast: false }),
+    ).toEqual([]);
+    expect(s.status).toBe(400);
   });
 });
