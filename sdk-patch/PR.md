@@ -69,7 +69,7 @@ $ cast call 0xD479…6443 "version()(string)" / "DOMAIN_SEPARATOR()(bytes32)" / 
 Error: server returned an error response: error code 3: execution reverted, data: "0x"   # all three
 ```
 
-The testnet token has no `version()`. Following the Igra entry, the table carries `name: "USDC.e"` (from `name()`) and `version: "1"`. The exact scheme doesn't send these values for a Permit2 entry without `supportsEip2612`, and the new testnet `parsePrice` test asserts that.
+The testnet token has no EIP-712 domain at all: no `version()`, no `DOMAIN_SEPARATOR()`. Following the Igra entry, the table carries `name: "USDC.e"` (from `name()`) and `version: "1"`. These are placeholders that satisfy the type, not a real domain, and nothing should sign with them. The exact scheme doesn't send these values for a Permit2 entry without `supportsEip2612`, and the new testnet `parsePrice` test asserts that.
 
 ### Caveat: Permit2 on Hemi needs contract deployments first
 

@@ -213,11 +213,18 @@ In order, it:
 3. pays once in USDC.e and once in hBTC;
 4. writes the settlement tx hashes, linked on testnet.explorer.hemi.xyz, plus the seller's verify-then-settle log, to `docs/testnet-run.md`.
 
+The script stops if either payment does not come back settled. That also tests D-015's claim that dRPC testnet's stale `eth_blockNumber` cannot delay receipts. If settlements come back `settlement_pending` instead, rerun with `HEMI_TESTNET_RPC_PRIMARY=https://testnet.rpc.hemi.network/rpc`.
+
 ## Mainnet deployment
 
 The mainnet facilitator needs two contracts that do not exist on Hemi mainnet yet: the x402 exact proxy and the EIP-6492 validator. Permit2 is already there. Deploying them is the only mainnet transaction this project needs. The estimated cost is under 0.00001 ETH in total; see D-005 for the breakdown.
 
-1. Simulate. This sends nothing:
+1. From a network that can reach explorer.hemi.xyz, cross-check the mainnet token addresses (Q-1 in DECISIONS.md) and record the output. The brief requires addresses checked on the explorer before use, and the spike machine could not reach it:
+   ```bash
+   curl -sS 'https://explorer.hemi.xyz/api/v2/tokens?q=USDC.e'
+   curl -sS 'https://explorer.hemi.xyz/api/v2/tokens?q=hemiBTC'
+   ```
+   Then simulate. This sends nothing:
    ```bash
    contracts/deploy.sh mainnet
    ```

@@ -243,7 +243,8 @@ $ curl -sS 'https://testnet.explorer.hemi.xyz/api/v2/tokens?q=hemiBTC' | jq -c '
 {"address":"0x9976CA2ADc211ac8f22c51d1fb5af7F50a411455","name":"Scenario hemiBTC","symbol":"shBTC","decimals":"8","holders":"1"}
 {"address":"0xb73579190FF698ac08134Ce811Ac7C03F48d7aAe","name":"Scenario hemiBTC","symbol":"shBTC","decimals":"8","holders":"1"}
 ```
- The testnet stand-in is the tunnel's BTC representation, hBTC `0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7`, as the brief allows. Both are 8-decimal, Permit2-only tokens (D-011).
+
+The testnet stand-in is the tunnel's BTC representation, hBTC `0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7`, as the brief allows. Both are 8-decimal, Permit2-only tokens (D-011).
 
 ## D-009. USDC.e and EIP-3009
 
