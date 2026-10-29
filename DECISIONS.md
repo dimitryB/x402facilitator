@@ -196,7 +196,9 @@ portal
 $ curl -sS https://raw.githubusercontent.com/hemilabs/ui-monorepo/605713de…/README.md | grep app.hemi
 - **portal**: Portal webapp living at [https://app.hemi.xyz](https://app.hemi.xyz).
 # the repo tree has portal/app/[locale]/tunnel
-``` The mainnet explorer is blocked locally (D-002); the testnet explorer agrees with the list.
+```
+
+The mainnet explorer is blocked locally (D-002); the testnet explorer agrees with the list.
 
 ```
 $ curl -sS https://raw.githubusercontent.com/hemilabs/token-list/7a326ac4…/src/hemi.tokenlist.json | jq -c '.tokens[] | select(.symbol=="USDC.e")'
@@ -335,6 +337,23 @@ The brief assumed this; it is now confirmed. Both tokens are small non-proxy ERC
 Source: `hemilabs/docs@61aced77175307475fea525d864496b95a21e913`, pages `building-bitcoin-apps/hemi-bitcoin-kit-hbk/hbk-smart-contract.md` and `building-bitcoin-apps/hemi-virtual-machine-hvm/feature-summary.md`.
 
 - hBK contract: mainnet `0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12`, testnet `0xeC9fa5daC1118963933e1A675a4EEA0009b7f215`.
+
+Read from the docs with:
+
+```
+$ curl -sS https://raw.githubusercontent.com/hemilabs/docs/61aced77175307475fea525d864496b95a21e913/building-bitcoin-apps/hemi-bitcoin-kit-hbk/hbk-smart-contract.md | grep -E 'Latest hBK release'
+* **Latest hBK release on Hemi:** [0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12](https://explorer.hemi.xyz/address/0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12)
+* **Latest hBK release on Hemi testnet:** [0xeC9fa5daC1118963933e1A675a4EEA0009b7f215](https://testnet.explorer.hemi.xyz/address/0xeC9fa5daC1118963933e1A675a4EEA0009b7f215)
+$ curl -sS https://raw.githubusercontent.com/hemilabs/docs/61aced77175307475fea525d864496b95a21e913/building-bitcoin-apps/hemi-virtual-machine-hvm/feature-summary.md | grep -o '<tr><td>[A-Za-z]*</td><td>0x4[0-9]</td>'
+<tr><td>BtcBalAddr</td><td>0x40</td>
+<tr><td>BtcUtxosAddrList</td><td>0x41</td>
+<tr><td>BtcTxByTxid</td><td>0x42</td>
+<tr><td>BtxTxConfirmations</td><td>0x43</td>
+<tr><td>BtcLastHeader</td><td>0x44</td>
+<tr><td>BtcHeaderN</td><td>0x45</td>
+<tr><td>BtcAddrToScript</td><td>0x46</td>
+```
+
 - Precompiles ("Phase 0"): `0x40` BtcBalAddr, `0x41` BtcUtxosAddrList, `0x42` BtcTxByTxid, `0x43` BtxTxConfirmations, `0x44` BtcLastHeader, `0x45` BtcHeaderN, `0x46` BtcAddrToScript.
 - ABI: the `IBitcoinKit` interface on the hBK page (`getBitcoinAddressBalance`, `getUTXOsForBitcoinAddress`, `getTransactionByTxId`, `getTransactionInputsByTxId`, `getTransactionOutputsByTxId`, `getTxConfirmations`, `getLastHeader`, `getHeaderN`).
 
@@ -500,13 +519,18 @@ hemi.3 (0008 to 0011) fixes these. A third critic pass on hemi.3 found that the 
 Check order, decided in hemi.5: the off-chain checks (recipient, validity window, exact amount, token, Permit2 spender) run before the allowance and balance reads. That matches the TS reference facilitator at `e4a0868`. It checks recipient, `validBefore`, `validAfter` and exact amount before simulating, and reads balance or allowance only to diagnose a failed simulation (`exact/facilitator/eip3009.ts` 245–331, `exact/facilitator/permit2.ts` 119–174 and 306–311, `shared/permit2.ts` 372–428). It is not the order written in `scheme_exact_evm.md`. The off-chain reason is chosen because it needs no RPC call, and because it is the one the payer can act on: an expired or mis-priced payment must be re-signed, which approving or topping up won't fix. Single-failure cases are unaffected. Two deliberate differences from the reference remain:
 
 - **Permit2 signature position:** the signature is checked right after the spender, as the spec's step 1 says.
-- **Allowance before balance:** when both are missing, allowance is checked first and returns 412 `permit2_allowance_required` (spec order, patch 0004). The reference diagnoses the balance first. The receipt timeout also dropped to 60 s, under the seller SDK's 90 s facilitator timeout, so a stock seller receives `settlement_pending` (D-013 config).
+- **Allowance before balance:** when both are missing, allowance is checked first and returns 412 `permit2_allowance_required` (spec order, patch 0004). The reference diagnoses the balance first.
+
+Separately, the receipt timeout dropped from 120 s to 60 s, under the seller SDK's 90 s facilitator timeout, so a stock seller receives `settlement_pending` (D-013 config).
+
+Other choices and known limits of the patch set:
 
 - **Replay code:** a replay is reported as `invalid_transaction_state`. §9 has no replay code, and its definition ("Blockchain transaction failed or was rejected") fits. The TS reference facilitator also uses it as its default for failed settlements.
 - **`settlement_pending` is HTTP 200:** the TS reference facilitator returns it the same way, and x402-rs's own client reads the body only on 200, 400 and 412.
 - **Nonce trade-off:** a tx that is later dropped from every mempool leaves a nonce gap until restart. Before, the nonce could be reused while the earlier tx might still mine.
 - **Kept on purpose:** `invalidReasonDetails` stays next to `invalidMessage` for clients of stock x402-rs.
-- **Limits of the pending record (0011):** it lives in memory in one process, so a restart forgets it. An unclaimed record blocks `/verify` of its authorization for up to 15 minutes; by then the authorization is spent anyway.
+- **One process per signer key:** the pending record (0011) and the nonce manager live in one process, so a restart forgets pending records. Two facilitator instances sharing a signer key collide on nonces; a critic saw `nonce too low` as HTTP 500, which recovered on the next request. Neither instance can see the other's pending settles. Run exactly one facilitator per signer key.
+- **Limits of the pending record (0011):** An unclaimed record blocks `/verify` of its authorization for up to 15 minutes; by then the authorization is spent anyway.
 - **Verify-then-settle race:** two requests that both pass `/verify` before either settles can both reach a seller's handler, and only one settle succeeds. This is inherent to the x402 flow.
 - **EIP-6492 deployment:** a counterfactual wallet deployed during settle is untested end to end, because the forks have no wallet factory.
 - **Build:** base images are pinned by digest, and each patch is applied with `git apply --check`, so upstream drift fails the build. A no-cache build takes about 115 s on the workstation (Colima, 4 CPUs). The image is 170 MB.

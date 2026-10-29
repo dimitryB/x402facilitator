@@ -36,25 +36,8 @@ struct BitcoinHeader {
   uint32 bits;                   // Bits
   uint32 nonce;                  // Nonce
 }
-```
 $ cast call 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12 'getLastHeader()((uint32,bytes32,uint32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://rpc.hemi.network/rpc
 (973644 [9.736e5], 0x00000000000000000001263978371155791d58c2e4ad51afcf737be312fcd87d, 584622080 [5.846e8], 0x00000000000000000001e71307152f2006b2cca991ac4b7badb640be94a54b97, 0xf07d1cbde858cf498f4115
 $ cast call 0xeC9fa5daC1118963933e1A675a4EEA0009b7f215 'getLastHeader()((uint32,bytes32,uint32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://testnet.rpc.hemi.network/rpc
 Error: server returned an error response: error code 3: execution reverted, data: "0x"
-# D-012 re-check with the documented BitcoinHeader struct (hemilabs/docs@61aced7 hbk-smart-contract.md)
-$ curl -sS https://raw.githubusercontent.com/hemilabs/docs/61aced77175307475fea525d864496b95a21e913/building-bitcoin-apps/hemi-bitcoin-kit-hbk/hbk-smart-contract.md | grep -A10 'struct BitcoinHeader'
-struct BitcoinHeader {
-  uint32 height;                 // Block height
-  bytes32 blockHash;             // Block hash
-  uint32 version;                // Version
-  bytes32 previousBlockHash;     // Previous block hash
-  bytes32 merkleRoot;            // Merkle root
-  uint32 timestamp;              // Timestamp
-  uint32 bits;                   // Bits
-  uint32 nonce;                  // Nonce
-}
-```
-$ cast call 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12 'getLastHeader()((uint32,bytes32,uint32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://rpc.hemi.network/rpc
-(973644 [9.736e5], 0x00000000000000000001263978371155791d58c2e4ad51afcf737be312fcd87d, 584622080 [5.846e8], 0x00000000000000000001e71307152f2006b2cca991ac4b7badb640be94a54b97, 0xf07d1cbde858cf498f4115
-$ cast call 0xeC9fa5daC1118963933e1A675a4EEA0009b7f215 'getLastHeader()((uint32,bytes32,uint32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://testnet.rpc.hemi.network/rpc
-Error: server returned an error response: error code 3: execution reverted, data: "0x"
+

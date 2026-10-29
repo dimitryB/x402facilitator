@@ -109,7 +109,7 @@ Stock x402-rs does not return the x402 v2 spec's error shapes. The patches fix t
 - **Receipt timeout:** a settlement whose receipt doesn't arrive in time returns `settlement_pending` with its tx hash, instead of dropping the hash.
 - **Wrong network:** an unsupported network returns `invalid_network`.
 - **Exact amount:** a signed amount must equal the price; over- and under-payment return `invalid_exact_evm_payload_authorization_value_mismatch`.
-- **Spec codes everywhere:** expired or early authorizations, recipient mismatch, wrong asset, malformed bodies and failed simulations return the spec's §9 codes.
+- **Spec codes:** expired or early authorizations, recipient mismatch, wrong asset, malformed bodies and failed simulations return the spec's §9 codes. The one exception is the 412 for a missing Permit2 allowance. Its code `permit2_allowance_required` comes from `scheme_exact_evm.md`, which spells it `PERMIT2_ALLOWANCE_REQUIRED`, not from §9. The TS reference SDK uses the same lowercase form.
 - **One settlement per authorization:** while a settle is pending, `/verify` of the same authorization is refused. A retry of the identical settle returns the same tx hash. The first retry after it is mined gets the success, and every later settle is a replay. One payment cannot pay for two requests.
 - **Protocol version:** a missing or unsupported `x402Version` returns `invalid_x402_version`.
 - **Permit2 spender:** a Permit2 payload whose spender is not the x402 exact proxy returns `invalid_payload`.
@@ -120,7 +120,7 @@ None of them changes where funds go. The exact-amount patch narrows what is acce
 
 - **Scheme:** `v2-eip155-exact` on each chain. It accepts both EIP-3009 and Permit2 payloads. `/supported` lists `exact` per network; which transfer method a payment uses is set per asset by the seller's `extra.assetTransferMethod`.
 - **RPCs:** dRPC first, the Hemi public RPC second, overridable with `HEMI_{TESTNET,MAINNET}_RPC_{PRIMARY,FALLBACK}`. x402-rs sends every read to all RPCs at once and takes the first answer, so a dead or stalled RPC costs nothing as long as one answers (D-015). The public RPC is throttled to 4 requests per second, under its ~300 per minute limit.
-- **Signers:** one key per chain, `FACILITATOR_TESTNET_PRIVATE_KEY` and `FACILITATOR_MAINNET_PRIVATE_KEY`. The signer only pays gas.
+- **Signers:** one key per chain, `FACILITATOR_TESTNET_PRIVATE_KEY` and `FACILITATOR_MAINNET_PRIVATE_KEY`. The signer only pays gas. Run exactly one facilitator process per signer key, and don't use the key elsewhere while it runs. The nonce manager and the pending-settlement records live in that one process.
 - **Receipt timeout:** 60 seconds. Hemi RPCs do stall (the brief's outage note), and if a broadcast tx has no receipt by then, `/settle` returns `settlement_pending` with the tx hash instead of losing it. The timeout must stay under the seller SDK's 90-second facilitator timeout, or a stock seller gives up first and never sees the hash.
 
 ### Why the facilitator never holds funds
@@ -194,7 +194,7 @@ Where the funds come from, all through the Hemi Portal tunnel in testnet mode (h
 | Asset | Path | Wait |
 |------|------|------|
 | Testnet ETH | Sepolia ETH, from any Sepolia faucet, tunneled Sepolia → Hemi testnet | minutes |
-| Testnet USDC.e `0xD479…6443` | A transfer from an existing Hemi-testnet holder; the explorer shows about 206k. Or tunnel Sepolia token `0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` (the token list's `bridgeInfo`) from Sepolia. Its `mint` is owner-only, so the Sepolia side also has to come from a holder | minutes |
+| Testnet USDC.e `0xD479…6443` | A transfer from an existing Hemi-testnet holder; the explorer shows about 206k holders. Or tunnel Sepolia token `0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` (the token list's `bridgeInfo`) from Sepolia. Its `mint` is owner-only, so the Sepolia side also has to come from a holder | minutes |
 | Testnet hBTC `0x36Ab…fAe7` | Bitcoin testnet coins (Hemi's docs point to a tBTC faucet) deposited through the Bitcoin tunnel | about 1 hour for 6 Bitcoin confirmations, sometimes plus a manual vault confirmation |
 
 hBTC has no Sepolia route. A Hemi-testnet transfer from an existing holder is the fast alternative.
