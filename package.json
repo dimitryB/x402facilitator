@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "workspaces": ["shared", "seller", "buyer", "tests"],
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=22.9" },
   "devDependencies": {
     "tsx": "4.23.15",
     "typescript": "6.0.3",

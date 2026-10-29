@@ -64,6 +64,13 @@ const transport = process.env.BUYER_RPC_URL
 const publicClient = createPublicClient({ chain: info.chain, transport });
 const walletClient = createWalletClient({ account, chain: info.chain, transport });
 
+// Transactions sent through a local RPC (an anvil fork) never reach the public explorer; say so.
+const localRpc = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|host\.docker\.internal)(:|\/|$)/.test(
+  process.env.BUYER_RPC_URL ?? "",
+);
+const explorerLink = (hash: string) =>
+  localRpc ? `${txUrl(network, hash)}  (local fork: not on the explorer)` : txUrl(network, hash);
+
 const fmt = (v: bigint) => `${formatUnits(v, asset.decimals)} ${asset.symbol}`;
 const balanceOf = (owner: Address) =>
   publicClient.readContract({ address: asset.address, abi: erc20Abi, functionName: "balanceOf", args: [owner] });
@@ -82,7 +89,7 @@ async function ensurePermit2Approval(req: PaymentRequirements): Promise<void> {
   const tx = createPermit2ApprovalTx(token);
   const hash = await walletClient.sendTransaction({ to: tx.to, data: tx.data });
   console.log(`[buyer] approve(Permit2, max) sent: ${hash}`);
-  console.log(`[buyer]   ${txUrl(network, hash)}`);
+  console.log(`[buyer]   ${explorerLink(hash)}`);
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   if (receipt.status !== "success") fail(`approval transaction reverted: ${hash}`);
 }
@@ -136,7 +143,7 @@ async function main(): Promise<void> {
   console.log(`[buyer] asset:    ${asset.symbol} ${asset.address} (${network})`);
   console.log(`[buyer] response: ${body}`);
   console.log(`[buyer] tx:       ${settlement.transaction}`);
-  console.log(`[buyer] explorer: ${txUrl(network, settlement.transaction)}`);
+  console.log(`[buyer] explorer: ${explorerLink(settlement.transaction)}`);
   if (chosen) {
     // Make sure this RPC has seen the settlement before reading balances after it.
     await publicClient.waitForTransactionReceipt({ hash: settlement.transaction as Hex, timeout: 60_000 });

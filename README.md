@@ -2,7 +2,7 @@
 
 An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hemi mainnet (`eip155:43111`) and Hemi testnet (`eip155:743111`) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint.
 
-It is the stock [x402-rs](https://github.com/x402-rs/x402-rs) facilitator image with a Hemi config. No fork of x402-rs or of the x402 SDKs is needed. Hemi only needed three standard contracts deployed at their canonical addresses (see [Contracts](#contracts-and-addresses)).
+It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and five small patches that make its error responses match the x402 v2 spec. The patches don't change what is settled or to whom (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
 **Status:** built and tested end to end on local forks of both Hemi chains. The live testnet run is scripted but waits for testnet funds. Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
 
@@ -62,7 +62,7 @@ Networks:
 
 ## Run it
 
-You need Docker (any engine with Compose v2), Foundry (`cast`, `anvil`, `forge`), `jq` and Node 22 or later. All Hemi values come from [`shared/hemi.json`](shared/hemi.json).
+You need Docker (any engine with Compose v2), Foundry (`cast`, `anvil`, `forge`), `jq` and Node 22.9 or later. The npm scripts use `--env-file-if-exists`, which Node added in 22.9. All Hemi values come from [`shared/hemi.json`](shared/hemi.json).
 
 ```bash
 cp .env.example .env    # then fill in the keys
@@ -81,17 +81,27 @@ This starts both forks, the facilitator (pointed at the forks) and the seller. I
 
 ### The facilitator
 
+x402-rs refuses to start if any configured chain lacks Permit2, the x402 exact proxy or the EIP-6492 validator. Pick the config that matches what is deployed. Today neither live network has all three (see [Contracts](#contracts-and-addresses)), so only the fork recipe works until a deployment runs.
+
 ```bash
-docker compose up                                          # both chains: needs the mainnet contracts
-FACILITATOR_CONFIG=config.testnet.json docker compose up   # testnet only
-curl -s localhost:8080/supported | jq
+# Local forks, works now. Primaries point at a dead port; fallbacks at the forks.
+scripts/fork.sh up
+docker compose -f docker-compose.yml -f docker-compose.fork.yml up
+curl -s localhost:8080/supported | jq      # lists eip155:743111 and eip155:43111, scheme exact
+
+# Live networks: needs the contracts on each configured chain.
+FACILITATOR_CONFIG=config.testnet.json docker compose up   # testnet only: after the testnet deployment
+FACILITATOR_CONFIG=config.mainnet.json docker compose up   # mainnet only: after the mainnet deployment
+docker compose up                                          # both chains (config.json): after both
 ```
+
+If a contract or key is missing, the container exits with the reason. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently.
 
 The image is x402-rs at commit `e75adda` plus five small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it, which takes about 2 minutes; add `--build` after changing a patch.
 
 The patches make the facilitator return the x402 v2 spec's error shapes, which stock x402-rs does not. For example, a bad signature becomes `invalid_exact_evm_payload_signature` instead of HTTP 500 `unexpected_error`, and error bodies carry the real `payer` and `network`. They change nothing about what is settled or to whom. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) and D-016 explain each one. The unpatched stock image is kept, by digest, in a comment in `docker-compose.yml`.
 
-[`facilitator/config.json`](facilitator/config.json) holds both chains. [`facilitator/config.testnet.json`](facilitator/config.testnet.json) holds testnet only, for use until the mainnet contracts exist; x402-rs refuses to start a chain whose contracts are missing. Settings, all explained in D-013:
+[`facilitator/config.json`](facilitator/config.json) holds both chains, and [`config.testnet.json`](facilitator/config.testnet.json) and [`config.mainnet.json`](facilitator/config.mainnet.json) hold one each. Settings, all explained in D-013:
 
 - **Scheme:** `v2-eip155-exact` on each chain. It accepts both EIP-3009 and Permit2 payloads. `/supported` lists `exact` per network; which transfer method a payment uses is set per asset by the seller's `extra.assetTransferMethod`.
 - **RPCs:** dRPC first, the Hemi public RPC second, overridable with `HEMI_{TESTNET,MAINNET}_RPC_{PRIMARY,FALLBACK}`. x402-rs sends every read to all RPCs at once and takes the first answer, so a dead or stalled RPC costs nothing as long as one answers (D-015). The public RPC is throttled to 4 requests per second, under its ~300 per minute limit.
@@ -111,7 +121,7 @@ Read the two settlement paths and the config; neither path routes tokens through
   PERMIT2.permitWitnessTransferFrom(permit, transferDetails, owner, witnessHash, witnessTypeString, signature);
   ```
 
-  `to` is the witness the payer signed, and Permit2 pays exactly that address. The proxy has no owner, no withdraw function and no other entry point that moves tokens ([`x402ExactPermit2Proxy.sol`](contracts/src/x402/x402ExactPermit2Proxy.sol)).
+  `to` is the witness the payer signed, and Permit2 pays exactly that address. The proxy has two entry points, `settle` and `settleWithPermit`. Both go through this `_settle`; `settleWithPermit` first submits the payer's own EIP-2612 permit to Permit2. The proxy has no owner and no withdraw function ([`x402ExactPermit2Proxy.sol`](contracts/src/x402/x402ExactPermit2Proxy.sol)).
 - **Config.** The facilitator's only key is a gas signer per chain ([`facilitator/config.json`](facilitator/config.json)). Nothing in it, or in the x402-rs settle code, sets a recipient.
 
 The tests check this on every settle. The receipt's only `Transfer` log goes payer to payTo, and the signer and the proxy hold zero tokens before and after.
@@ -183,20 +193,24 @@ The mainnet facilitator needs two contracts that do not exist on Hemi mainnet ye
    ```bash
    contracts/deploy.sh mainnet
    ```
-2. Deploy, with a funded mainnet key that is not the testnet key:
+2. Put a funded mainnet key in `.env` as `DEPLOYER_PRIVATE_KEY`, not on the command line. The script reads `.env` itself and refuses if that key equals `FACILITATOR_TESTNET_PRIVATE_KEY`. Then deploy:
    ```bash
-   CONFIRM_MAINNET_DEPLOY=yes DEPLOYER_PRIVATE_KEY=0x... contracts/deploy.sh mainnet --broadcast
+   CONFIRM_MAINNET_DEPLOY=yes contracts/deploy.sh mainnet --broadcast
    ```
    The script checks each contract's CREATE2 address, deployed codehash, `PERMIT2()` and the Permit2 domain separator.
 3. Verify on the explorer (best effort; [`contracts/README.md`](contracts/README.md) explains what Blockscout can match):
    ```bash
    contracts/verify.sh mainnet
    ```
-4. Set `FACILITATOR_MAINNET_PRIVATE_KEY` in `.env` to a gas-only key with a little ETH, then start both chains:
+4. Set `FACILITATOR_MAINNET_PRIVATE_KEY` in `.env` to a gas-only key with a little ETH. Then start the facilitator. Use the mainnet-only config, or plain `docker compose up` once the testnet contracts are also deployed:
    ```bash
-   docker compose up
+   FACILITATOR_CONFIG=config.mainnet.json docker compose up -d
    ```
-5. Pay on mainnet. This spends real funds:
+5. Start a seller that offers mainnet. It reads `SELLER_PAY_TO` from `.env`:
+   ```bash
+   SELLER_NETWORKS=eip155:43111 npm run start -w seller
+   ```
+6. Pay on mainnet. This spends real funds: 0.001 USDC.e, or 1 sat plus a one-time approval for hemiBTC.
    ```bash
    ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet
    ```
@@ -232,7 +246,7 @@ Latest results (2026-10-29), against a no-cache build of the image:
 
 | Item | Status | Evidence |
 |------|------|------|
-| `docker compose up` starts the facilitator; `/supported` lists both networks with `exact` | Met on forks. Live testnet start needs the testnet contracts; mainnet needs the mainnet contracts | `tests/e2e/01-supported.test.ts`, D-013, D-016 |
+| `docker compose up` starts the facilitator; `/supported` lists both networks with `exact` | Met on forks (`docker-compose.fork.yml`). Blocked live until the contracts are deployed: the testnet run deploys them on testnet; mainnet needs the go | `tests/e2e/01-supported.test.ts`, D-013, D-016 |
 | One `/verify` then `/settle` on testnet in USDC.e, tx linked on the explorer | **Open:** waits for testnet funds. On a testnet fork it passes | `scripts/testnet-run.sh`, `tests/e2e/02-settle.test.ts` |
 | One settle on testnet in hemiBTC (hBTC, per D-008) | **Open:** waits for testnet funds. On a testnet fork it passes | as above |
 | Failed signature and insufficient balance return the spec's error shapes, with tests | Met | `tests/e2e/03-bad-signature.test.ts`, `04-insufficient-balance.test.ts`, D-016 |

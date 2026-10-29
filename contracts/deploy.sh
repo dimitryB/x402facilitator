@@ -15,10 +15,19 @@
 #   HEMI_MAINNET_RPC_URL              default https://rpc.hemi.network/rpc
 #   CONFIRM_MAINNET_DEPLOY=yes        required for --broadcast on mainnet
 #
-# The key is handed to forge through the environment (HEMI_DEPLOY_PRIVATE_KEY), never on a
-# command line, and is never printed.
+# Keys are read from the repo's .env (variables already set in the shell win), so they never
+# need to appear on a command line or in shell history. The key is handed to forge through the
+# environment (HEMI_DEPLOY_PRIVATE_KEY) and is never printed.
 set -euo pipefail
 cd "$(dirname "$0")"
+if [ -f ../.env ]; then
+  while IFS='=' read -r k v; do
+    case $k in
+      DEPLOYER_PRIVATE_KEY|FACILITATOR_TESTNET_PRIVATE_KEY|HEMI_TESTNET_RPC_URL|HEMI_MAINNET_RPC_URL)
+        [ -z "${!k:-}" ] && [ -n "$v" ] && export "$k=$v" ;;
+    esac
+  done < <(grep -E '^[A-Z_]+=' ../.env)
+fi
 # Only this script decides which key reaches forge.
 unset HEMI_DEPLOY_PRIVATE_KEY
 

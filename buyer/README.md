@@ -54,8 +54,10 @@ The settlement receipt comes back base64-encoded in the `PAYMENT-RESPONSE` heade
 
 ```sh
 buyer/demo-fork.sh
-# if the public Hemi RPCs rate-limit the forks:
-FORK_TESTNET_UPSTREAM=https://hemi-testnet.drpc.org FORK_MAINNET_UPSTREAM=https://hemi.drpc.org buyer/demo-fork.sh
 ```
+
+The forks are pinned to the same blocks as the e2e tests (`FORK_BLOCK_TESTNET`, `FORK_BLOCK_MAINNET`). That makes runs reproducible. It also lets `scripts/fork.sh` retry on dRPC if the public Hemi RPC rate-limits a fork at startup. Don't point an unpinned testnet fork at dRPC: its `eth_blockNumber` lags about 2.9M blocks (DECISIONS.md D-015).
+
+Transactions in this demo exist only on the local forks. The buyer prints their explorer links marked "(local fork: not on the explorer)".
 
 Ports and names can be overridden: `FORK_TESTNET_PORT` (28545), `FORK_MAINNET_PORT` (28546), `FACILITATOR_PORT` (28080), `SELLER_PORT` (24021), `DEMO_PROJECT` (compose project, `hemi-x402-demo`), `FORK_STATE_DIR` (`.scratch/fork-demo`), `DEMO_PAY_TO`.

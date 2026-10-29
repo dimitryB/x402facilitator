@@ -1,0 +1,14 @@
+# Override for local forks: `scripts/fork.sh up` first, then
+#   docker compose -f docker-compose.yml -f docker-compose.fork.yml up
+# Both primary RPCs point at a dead port and the fallbacks at the forks, so this also exercises
+# failover. The signer keys are anvil's public dev accounts #1 and #2; they only exist on the forks.
+services:
+  facilitator:
+    restart: "no"
+    environment:
+      FACILITATOR_TESTNET_PRIVATE_KEY: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+      FACILITATOR_MAINNET_PRIVATE_KEY: "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
+      HEMI_TESTNET_RPC_PRIMARY: "http://127.0.0.1:1"
+      HEMI_TESTNET_RPC_FALLBACK: "http://host.docker.internal:${FORK_TESTNET_PORT:-8545}"
+      HEMI_MAINNET_RPC_PRIMARY: "http://127.0.0.1:1"
+      HEMI_MAINNET_RPC_FALLBACK: "http://host.docker.internal:${FORK_MAINNET_PORT:-8546}"

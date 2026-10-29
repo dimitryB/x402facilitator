@@ -3,13 +3,15 @@
 #
 #   buyer/demo-fork.sh
 #
-# Starts both forks (scripts/fork.sh), the stock facilitator (docker compose) pointed at them,
+# Starts both forks (scripts/fork.sh), the facilitator (docker compose; patched x402-rs) pointed at them,
 # and the seller; then pays GET /echo four times (testnet and mainnet fork, USDC.e and the BTC
 # asset), prints payTo's balances, and tears everything down on exit.
 #
 # Environment (all optional):
 #   FORK_TESTNET_PORT (28545)  FORK_MAINNET_PORT (28546)  FORK_STATE_DIR (.scratch/fork-demo)
-#   FORK_TESTNET_UPSTREAM / FORK_MAINNET_UPSTREAM   passed to scripts/fork.sh (e.g. dRPC if rate-limited)
+#   FORK_BLOCK_TESTNET (7094000)  FORK_BLOCK_MAINNET (5614300)   pinned fork blocks, as in tests/lib/env.ts;
+#                                 pinned forks also let scripts/fork.sh retry on dRPC if the public RPC rate-limits
+#   FORK_TESTNET_UPSTREAM / FORK_MAINNET_UPSTREAM   passed to scripts/fork.sh
 #   FACILITATOR_PORT (28080)  SELLER_PORT (24021)  DEMO_PROJECT (hemi-x402-demo, the compose project)
 #   DEMO_PAY_TO (anvil account #4)
 set -euo pipefail
@@ -19,6 +21,8 @@ ROOT=$PWD
 export FORK_TESTNET_PORT=${FORK_TESTNET_PORT:-28545}
 export FORK_MAINNET_PORT=${FORK_MAINNET_PORT:-28546}
 export FORK_STATE_DIR=${FORK_STATE_DIR:-$ROOT/.scratch/fork-demo}
+export FORK_BLOCK_TESTNET=${FORK_BLOCK_TESTNET:-7094000}
+export FORK_BLOCK_MAINNET=${FORK_BLOCK_MAINNET:-5614300}
 FACILITATOR_PORT=${FACILITATOR_PORT:-28080}
 SELLER_PORT=${SELLER_PORT:-24021}
 PROJECT=${DEMO_PROJECT:-hemi-x402-demo}

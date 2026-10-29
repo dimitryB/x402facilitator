@@ -1,8 +1,13 @@
 # Hemi x402 facilitator: x402-rs plus a small patch set for the x402 v2 spec's error shapes,
-# configured for Hemi. The image is built locally from facilitator/Dockerfile (first build: a few minutes).
+# configured for Hemi. The image is built locally from facilitator/Dockerfile (first build: about 2 minutes).
 #
-#   docker compose up --build                           both chains (needs the mainnet contracts, see README)
-#   FACILITATOR_CONFIG=config.testnet.json docker compose up --build    testnet only
+# x402-rs refuses to start if any configured chain lacks Permit2, the x402 exact proxy or the
+# EIP-6492 validator, so pick the config that matches what is deployed (README "Run it"):
+#
+#   FACILITATOR_CONFIG=config.testnet.json docker compose up    testnet only
+#   FACILITATOR_CONFIG=config.mainnet.json docker compose up    mainnet only
+#   docker compose up                                           both chains (config.json)
+#   docker compose -f docker-compose.yml -f docker-compose.fork.yml up   both chains on local forks (scripts/fork.sh up)
 #
 # Secrets come from .env (copy .env.example). RPC defaults: dRPC primary, Hemi public RPC fallback.
 services:
@@ -14,7 +19,9 @@ services:
     image: hemi-x402-facilitator:e75adda-hemi.1
     build:
       context: ./facilitator
-    restart: unless-stopped
+    # Bounded, so a missing-contract or missing-key startup error stops instead of crash-looping
+    # silently under `up -d`; `docker compose logs facilitator` shows why.
+    restart: on-failure:5
     ports:
       - "${FACILITATOR_PORT:-8080}:8080"
     volumes:

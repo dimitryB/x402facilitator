@@ -216,7 +216,23 @@ $ cast call 0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7 name/symbol/decimals --rp
 "HemiBitcoin"  "hBTC"  8
 ```
 
-hemiBTC has no testnet deployment in the token list. A testnet explorer search for "hemiBTC" returns eight look-alike contracts with 2 to 5 holders each; none is canonical. The testnet stand-in is the tunnel's BTC representation, hBTC `0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7`, as the brief allows. Both are 8-decimal, Permit2-only tokens (D-011).
+hemiBTC has no testnet deployment in the token list. A testnet explorer search for "hemiBTC" returns eleven look-alike contracts with 1 to 5 holders each. None of them is in the token list, so none is canonical.
+
+```
+$ curl -sS 'https://testnet.explorer.hemi.xyz/api/v2/tokens?q=hemiBTC' | jq -c '.items[] | {address: (.address_hash // .address), name, symbol, decimals, holders: (.holders_count // .holders)}'
+{"address":"0x05710e96a48AF222b564e6A222fF2f3d56725c32","name":"Hemi Bitcoin","symbol":"hemiBTC","decimals":"8","holders":"5"}
+{"address":"0x3C864cac3F3E8489a0Ab948b59c40e840C396a8b","name":"hemiBTC","symbol":"hemiBTC","decimals":"8","holders":"5"}
+{"address":"0xacB7A69A8Daaa7545309Ee773AB2195eFAd5878A","name":"Scenario hemiBTC","symbol":"shBTC","decimals":"8","holders":"5"}
+{"address":"0x01cEF96874Af21d5455333f4eDaBD8dA959dfA97","name":"hemiBTC","symbol":"hemiBTC","decimals":"8","holders":"2"}
+{"address":"0x4D3401068FDa7FC81FF6980BA304A33a3b5EeD20","name":"HEMIBTC","symbol":"HTC","decimals":"18","holders":"2"}
+{"address":"0x447F5D3b49877EF6E5666cb34310fC64135B109a","name":"Scenario hemiBTC","symbol":"shBTC","decimals":"8","holders":"2"}
+{"address":"0xAcB51012600D3BF53A40264923a197FDf84be557","name":"Scenario hemiBTC","symbol":"shBTC","decimals":"8","holders":"2"}
+{"address":"0xc16f7D158AB115dA238b7e1662225cAc7e91C3ff","name":"Scenario hemiBTC","symbol":"shBTC","decimals":"8","holders":"2"}
+{"address":"0x5C148C1a11abe9740Cae7c6FfdE72EeD6ABe4097","name":"Scenario hemiBTC","symbol":"shBTC","decimals":"8","holders":"1"}
+{"address":"0x9976CA2ADc211ac8f22c51d1fb5af7F50a411455","name":"Scenario hemiBTC","symbol":"shBTC","decimals":"8","holders":"1"}
+{"address":"0xb73579190FF698ac08134Ce811Ac7C03F48d7aAe","name":"Scenario hemiBTC","symbol":"shBTC","decimals":"8","holders":"1"}
+```
+ The testnet stand-in is the tunnel's BTC representation, hBTC `0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7`, as the brief allows. Both are 8-decimal, Permit2-only tokens (D-011).
 
 ## D-009. USDC.e and EIP-3009
 
@@ -301,7 +317,18 @@ $ cast code 0x0000000000000000000000000000000000000044 --rpc-url <either>
 0x
 ```
 
-On mainnet, hBK returns a current Bitcoin height (973622) and a block hash. The tuple shape used here is a guess from the docs, so only the first two fields are meaningful. On testnet the same call reverts. Precompiles show empty `cast code`, as precompiles always do. This is not investigated further, since phase 2 is out of scope; it is an open question below.
+On mainnet, hBK returns a current Bitcoin height (973622) and a block hash. The tuple shape used here is a guess from the docs, so only the first two fields are meaningful. On testnet the same call reverts.
+
+`cast code` proves nothing for a precompile, because a precompile always has empty code. Calling the `BtcLastHeader` precompile (`0x44`) directly does answer on both networks:
+
+```
+$ cast call 0x0000000000000000000000000000000000000044 0x --rpc-url https://rpc.hemi.network/rpc
+0x000edb40…   # first 4 bytes: height 0x0edb40 = 973632, followed by header data
+$ cast call 0x0000000000000000000000000000000000000044 0x --rpc-url https://testnet.rpc.hemi.network/rpc
+0x004fb0b4…   # height 0x4fb0b4 = 5222580 (Bitcoin testnet)
+```
+
+Full output is in `docs/spike/hbk.log`. hVM therefore serves Bitcoin headers on both networks. The testnet failure lies in the hBK contract at `0xeC9f…f215`, or in the tuple ABI used here, not in the precompile. Phase 2 is out of scope, so this was not pursued further.
 
 ## D-013. Facilitator: stock x402-rs image, Hemi config, fork-based tests
 
@@ -330,12 +357,17 @@ Choices in `facilitator/config.json`:
 Local fork verification, before any live transaction: `scripts/fork.sh up` forks both chains with anvil and replays the three deployments from `contracts/deploy-data/`. The fork deployments land at the canonical addresses, and Permit2 is skipped on mainnet because it already exists. The stock image then starts against the forks with both primary RPCs pointed at a dead port:
 
 ```
-$ HEMI_TESTNET_RPC_PRIMARY=http://127.0.0.1:1 HEMI_TESTNET_RPC_FALLBACK=http://host.docker.internal:18545 \
-  HEMI_MAINNET_RPC_PRIMARY=http://127.0.0.1:1 HEMI_MAINNET_RPC_FALLBACK=http://host.docker.internal:18546 … docker compose up -d
+$ FORK_TESTNET_PORT=18545 FORK_MAINNET_PORT=18546 scripts/fork.sh up
+$ FACILITATOR_PORT=18080 FACILITATOR_TESTNET_PRIVATE_KEY=<anvil #1> FACILITATOR_MAINNET_PRIVATE_KEY=<anvil #2> \
+  HEMI_TESTNET_RPC_PRIMARY=http://127.0.0.1:1 HEMI_TESTNET_RPC_FALLBACK=http://host.docker.internal:18545 \
+  HEMI_MAINNET_RPC_PRIMARY=http://127.0.0.1:1 HEMI_MAINNET_RPC_FALLBACK=http://host.docker.internal:18546 \
+  docker compose -p hemi-x402-probe up -d          # compose then used the stock image (D-016 replaced it)
 $ curl -sS localhost:18080/supported | jq -c '.kinds[] | {network,scheme}'
 {"network":"eip155:43111","scheme":"exact"}
 {"network":"eip155:743111","scheme":"exact"}
 ```
+
+The same check is now a single committed recipe: `scripts/fork.sh up` followed by `docker compose -f docker-compose.yml -f docker-compose.fork.yml up`. The override sets dead primaries, fork fallbacks on ports 8545 and 8546, and anvil signer keys. It was re-run on 2026-10-29 with the patched image (D-016), and `/supported` listed both networks. `facilitator/config.mainnet.json` gives the mainnet-only counterpart of `config.testnet.json`.
 
 Fork funding writes balances into each token's `balanceOf` mapping. The slots were found by probing: 0 for testnet USDC.e, hBTC and mainnet hemiBTC, and 9 for mainnet USDC.e (FiatToken's `balanceAndBlacklistStates`). `anvil_dealERC20` could not locate these slots.
 
@@ -403,8 +435,8 @@ The alternative was the stock image with the deviations documented. It was rejec
 
 ### Open questions
 
-- Q-1. Cross-check the mainnet token addresses on `explorer.hemi.xyz` from a network that isn't blocked (D-002). They currently rest on Hemi's token list and on-chain `name`/`symbol` reads.
-- Q-2. Why the testnet hBK `getLastHeader()` reverts (D-012). Phase 2.
+- Q-1. Cross-check the mainnet token addresses on `explorer.hemi.xyz` from a network that isn't blocked (D-002). They currently rest on Hemi's token list and on-chain `name`/`symbol`/`decimals` reads. On 2026-10-29 a retry from this workstation still hit the TLS block, and no alternative mainnet explorer host resolved (`hemi.blockscout.com` and `hemi.explorer.caldera.xyz` return 404; `explorer.hemi.network` does not resolve). Needs someone on another network: `curl -sS 'https://explorer.hemi.xyz/api/v2/tokens?q=USDC.e'` and `?q=hemiBTC`.
+- Q-2. Why the testnet hBK contract's `getLastHeader()` reverts while precompile `0x44` answers (D-012): likely a different hBK release or ABI on testnet. Phase 2.
 
 
 ## Pre-spike context: what the reference code requires
