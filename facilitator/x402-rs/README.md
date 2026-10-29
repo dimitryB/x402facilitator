@@ -24,6 +24,9 @@ how a payment is settled. What they change:
 - the HTTP status codes: a rejected payment is answered with 200, as the TS reference facilitator does,
   400 is kept for a request that cannot be read, and 500 for an unexpected failure (0018; see
   [HTTP status codes](#http-status-codes)).
+- the fees a settlement pays: on an EIP-1559 chain the tip is at least the node's suggested priority fee,
+  so a settlement sent after a run of tip-less blocks is still mined on an OP Stack chain such as Hemi
+  (0019). This is the one patch about liveness rather than error shapes.
 
 Spec references are to `x402-foundation/x402` at `e4a0868`:
 
@@ -51,6 +54,7 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0016](patches/0016-eip155-keep-a-success-whose-caller-left-for-that-cal.patch) | a settlement that succeeds after its client left discards the success: the retry gets a replay error, and the buyer is charged and not served | §5.3.2, §9 `invalid_transaction_state` |
 | [0017](patches/0017-facilitator-local-report-an-x402Version-the-payload-.patch) | a top-level `x402Version` that `paymentPayload.x402Version` contradicts is reported as `invalid_payload` | §9 `invalid_x402_version` |
 | [0018](patches/0018-facilitator-local-answer-a-rejected-payment-with-200.patch) | a rejected payment is answered with 400 (412 for a missing allowance), so a stock TS seller throws and reports `"<code>: <message>"`, and never answers 412 | TS reference facilitator; scheme_exact_evm.md Permit2 step 2 |
+| [0019](patches/0019-eip155-tip-at-least-the-node-s-suggested-priority-fe.patch) | after ten blocks without tips, a settlement tips 1 wei; Hemi's sequencer never mines it, and it holds the signer's nonce and every later settlement | none: liveness (§9 `settlement_pending` is what the buyer sees) |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -228,7 +232,7 @@ payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an a
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.7` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.8` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -244,7 +248,7 @@ silicon), with the base images already pulled:
   patches.
 - `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
   113 s for hemi.3; 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches); 113 s for hemi.5
-  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s).
+  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8.
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -1054,6 +1058,41 @@ e2e: every rejection test now expects 200 (`tests/lib/spec.ts` `STATUS_VERDICT`)
 > **Title:** Answer rejected payments with 200 like the TS reference facilitator; a 400 makes a stock TS seller report "<code>: <message>"
 >
 > x402-rs answers a rejected `/verify` or `/settle` with 400, and a missing Permit2 allowance with 412. The TS reference facilitator (`examples/typescript/facilitator/basic/index.ts`) sends whatever `verify`/`settle` returns with `res.json` (200), and 400 only for a body it cannot read. The TS `HTTPFacilitatorClient` turns any non-2xx answer into a `VerifyError`/`SettleError` whose message is `"<code>: <message>"`, which `x402HTTPResourceServer` then puts into its 402 instead of the bare x402 v2 §9 code; and since it only answers 412 when that error is exactly `permit2_allowance_required`, a missing allowance reaches the buyer as 402. This PR answers every verdict on a readable payment with 200, keeps 400 for `InvalidFormat` and an unreadable `x402Version`, and 500 for `OnchainFailure`. A Permit2 spender mismatch gets its own variant (`InvalidPermit2Spender`, still `invalid_payload`) so that it is a verdict. `x402-axum` reads the bodies of 200, 400 and 412 alike, so it is unaffected; a unit test parses a 200 rejection as it does.
+</details>
+
+### 0019 eip155: tip at least the node's suggested priority fee
+
+**Problem.** On an EIP-1559 chain, `send_transaction` left the fees to alloy's `GasFiller`. alloy's
+default estimate takes the median of the non-zero 20th-percentile tips of the last ten blocks and falls
+back to a 1-wei tip when there are none (`EIP1559_MIN_PRIORITY_FEE`, alloy-provider 2.0.5
+`utils.rs`). Hemi's blocks are often empty apart from the L1-info deposit, whose tip is 0, so the
+fallback is common. Hemi's sequencer does not mine a transaction tipping below 0.001 gwei (1,000,000
+wei, op-geth's default minimum). Such a settlement is broadcast, its receipt times out, the buyer gets
+`settlement_pending`, and since 0006 keeps the nonce, every later settlement queues behind it.
+
+Seen live on Hemi testnet with the same estimator, through `cast send` (DECISIONS D-018): a 1-wei-tip
+transaction stayed pending while empty blocks were produced, and the same transaction with a 1,000,000
+wei tip was mined in the next block. The forks never showed it, because anvil mines any tip.
+
+**Change.** On EIP-1559 chains `send_transaction` now sets both fees itself. It reads alloy's estimate
+and `eth_maxPriorityFeePerGas`. The tip is the larger of the two, and the max fee is the estimate's
+base-fee headroom (twice the base fee) plus that tip. A node that does not answer
+`eth_maxPriorityFeePerGas` keeps alloy's estimate. Legacy chains are unchanged. The cost is one more RPC
+read per settlement.
+
+**Tests.** Unit tests for `fees_with_tip_floor`. e2e `07-priority-fee.test.ts` mines twelve empty blocks
+on each fork, checks that the fee history has no tips and that anvil suggests 1 gwei, then settles and
+reads the transaction: its tip must be at least the suggestion. Against hemi.7 it fails with a 1-wei tip
+on both forks.
+
+**Live.** The first live Hemi testnet settlement, `0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5`, tipped exactly 1,000,000 wei. That was the
+floor, so alloy's own estimate was lower at that moment.
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** Settlements on quiet OP Stack chains tip 1 wei and are never mined; use eth_maxPriorityFeePerGas as a floor
+>
+> On EIP-1559 chains the facilitator relies on alloy's default fee estimate. When the last ten blocks carry no non-zero tips, which is common on quiet L2s where most blocks only hold the L1-info deposit, alloy falls back to a 1-wei tip. OP Stack sequencers do not include transactions below their minimum tip (op-geth defaults to 0.001 gwei), so the settlement is never mined, the receipt times out, and the signer's nonce is stuck. This PR reads `eth_maxPriorityFeePerGas` alongside the estimate and uses it as a floor for the tip, keeping the estimate's base-fee headroom in the max fee. Nodes without the method keep the old behaviour. Observed on Hemi (chain 43111 and testnet 743111, both answering `eth_maxPriorityFeePerGas` with 1000000).
 </details>
 
 ## What these patches do not change

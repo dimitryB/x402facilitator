@@ -4,6 +4,9 @@
 #
 #   scripts/testnet-run.sh            check balances and print what is missing (sends nothing)
 #   scripts/testnet-run.sh --go       do the run
+#   ASSETS=usdc scripts/testnet-run.sh --go    pay in one asset only (default: "usdc btc")
+#
+# Each run appends a section to docs/testnet-run.md, so runs for different assets accumulate.
 #
 # Reads .env: FACILITATOR_TESTNET_PRIVATE_KEY (deploys contracts and pays settlement gas),
 # BUYER_PRIVATE_KEY, SELLER_PAY_TO. Testnet only; this script never touches mainnet.
@@ -21,6 +24,9 @@ SPORT=${SELLER_PORT:-4021}
 OUT=$ROOT/docs/testnet-run.md
 LOGDIR=$ROOT/.scratch/testnet-run
 mkdir -p "$LOGDIR"
+ASSETS=${ASSETS:-usdc btc}
+for a in $ASSETS; do case $a in usdc|btc) ;; *) printf 'testnet-run: unknown asset %s (usdc, btc)\n' "$a" >&2; exit 1 ;; esac; done
+wants() { [[ " $ASSETS " == *" $1 "* ]]; }
 
 die() { printf 'testnet-run: %s\n' "$*" >&2; exit 1; }
 for v in FACILITATOR_TESTNET_PRIVATE_KEY BUYER_PRIVATE_KEY SELLER_PAY_TO; do
@@ -46,9 +52,9 @@ echo "seller payTo         $SELLER_PAY_TO"
 missing=0
 [ "$fac_eth" -ge $NEED_FAC_WEI ] || { echo "MISSING: send >= 0.001 testnet ETH to $FAC"; missing=1; }
 [ "$buyer_eth" -ge $NEED_BUYER_WEI ] || { echo "MISSING: send >= 0.0001 testnet ETH to $BUYER (for the one-time approve(Permit2) per token)"; missing=1; }
-[ "$buyer_usdc" -ge $NEED_USDC ] || { echo "MISSING: send >= 0.001 testnet USDC.e ($USDC) to $BUYER (scripts/testnet-fund-usdc.sh mints and tunnels it)"; missing=1; }
-[ "$buyer_hbtc" -ge $NEED_HBTC ] || { echo "MISSING: send >= 1 sat of testnet hBTC ($HBTC) to $BUYER (Bitcoin testnet3 via the Bitcoin tunnel; see README)"; missing=1; }
-[ "${1:-}" = --go ] || { [ $missing = 0 ] && echo "Balances OK. Re-run with --go."; exit $missing; }
+! wants usdc || [ "$buyer_usdc" -ge $NEED_USDC ] || { echo "MISSING: send >= 0.001 testnet USDC.e ($USDC) to $BUYER (scripts/testnet-fund-usdc.sh mints and tunnels it)"; missing=1; }
+! wants btc || [ "$buyer_hbtc" -ge $NEED_HBTC ] || { echo "MISSING: send >= 1 sat of testnet hBTC ($HBTC) to $BUYER (Bitcoin testnet3 via the Bitcoin tunnel; see README)"; missing=1; }
+[ "${1:-}" = --go ] || { [ $missing = 0 ] && echo "Balances OK for: $ASSETS. Re-run with --go."; exit $missing; }
 [ $missing = 0 ] || die "fund the addresses above first"
 
 cleanup() {
@@ -80,25 +86,36 @@ pay() { # asset
   SELLER_URL="http://localhost:$SPORT/echo?run=testnet&asset=$1" BUYER_RPC_URL="$RPC" \
     npm run pay -w buyer -- --asset "$1" --network testnet 2>&1 | tee "$LOGDIR/pay-$1.log"
 }
-pay usdc; pay btc
-USDC_TX=$(grep -o 'tx: *0x[0-9a-fA-F]\{64\}' "$LOGDIR/pay-usdc.log" | grep -o '0x.*')
-BTC_TX=$(grep -o 'tx: *0x[0-9a-fA-F]\{64\}' "$LOGDIR/pay-btc.log" | grep -o '0x.*')
-[ -n "$USDC_TX" ] && [ -n "$BTC_TX" ] || die "a payment did not settle; see $LOGDIR"
+txof() { cat "$LOGDIR/tx-$1"; }   # bash 3.2 (macOS) has no associative arrays
+for a in $ASSETS; do
+  rm -f "$LOGDIR/tx-$a"
+  pay "$a"
+  grep -o 'tx: *0x[0-9a-fA-F]\{64\}' "$LOGDIR/pay-$a.log" | grep -o '0x.*' | head -1 > "$LOGDIR/tx-$a" || true
+  [ -s "$LOGDIR/tx-$a" ] || die "the $a payment did not settle; see $LOGDIR"
+done
 
 receipt_line() { # tx
   local r; r=$(cast receipt "$1" --rpc-url "$RPC" --json | jq '.data // .')
   echo "status=$(echo "$r" | jq -r .status) block=$(( $(echo "$r" | jq -r .blockNumber) )) from=$(echo "$r" | jq -r .from) to=$(echo "$r" | jq -r .to)"
 }
+tip_line() { # tx
+  echo "tip $(( $(cast tx "$1" maxPriorityFeePerGas --rpc-url "$RPC") )) wei"
+}
 
+[ -f "$OUT" ] || printf '# Live testnet runs\n\nEach section is one run of `scripts/testnet-run.sh --go` against Hemi testnet (`eip155:743111`).\n' > "$OUT"
 {
-  echo "# Live testnet run"
   echo
-  echo "Run on $(date -u +%FT%TZ) by \`scripts/testnet-run.sh --go\` against Hemi testnet (\`eip155:743111\`)."
+  echo "## Run on $(date -u +%FT%TZ): $ASSETS"
+  echo
+  echo "Facilitator image \`$(docker compose config --images facilitator 2>/dev/null | head -1)\`."
   echo
   echo "| Payment | Settlement tx | Receipt |"
   echo "|------|------|------|"
-  echo "| USDC.e \`$USDC\` (Permit2) | [\`$USDC_TX\`]($EXPLORER/tx/$USDC_TX) | $(receipt_line "$USDC_TX") |"
-  echo "| hBTC \`$HBTC\` (Permit2) | [\`$BTC_TX\`]($EXPLORER/tx/$BTC_TX) | $(receipt_line "$BTC_TX") |"
+  for a in $ASSETS; do
+    case $a in usdc) label="USDC.e \`$USDC\` (Permit2)" ;; btc) label="hBTC \`$HBTC\` (Permit2)" ;; esac
+    tx=$(txof "$a")
+    echo "| $label | [\`$tx\`]($EXPLORER/tx/$tx) | $(receipt_line "$tx"), $(tip_line "$tx") |"
+  done
   echo
   echo "The facilitator signer is \`$FAC\`; the buyer is \`$BUYER\`; payTo is \`$SELLER_PAY_TO\`."
   echo
@@ -111,7 +128,7 @@ receipt_line() { # tx
   echo "Buyer output:"
   echo
   echo '```'
-  grep '^\[buyer\]' "$LOGDIR/pay-usdc.log" "$LOGDIR/pay-btc.log" | sed 's#^.*/pay-#pay-#'
+  for a in $ASSETS; do grep '^\[buyer\]' "$LOGDIR/pay-$a.log" | sed "s#^#pay-$a: #"; done
   echo '```'
-} > "$OUT"
+} >> "$OUT"
 echo "== recorded in $OUT"

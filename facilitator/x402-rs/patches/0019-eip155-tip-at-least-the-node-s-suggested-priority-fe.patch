@@ -1,0 +1,138 @@
+From 77050f249671b0a48eb07420793966dd812fa1d5 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 15:06:57 -0400
+Subject: [PATCH] eip155: tip at least the node's suggested priority fee
+
+alloy's default EIP-1559 estimate takes the median of recent non-zero
+tips and falls back to a 1-wei tip when the last ten blocks carry none,
+which is common on quiet chains. An OP Stack sequencer skips a
+transaction tipping below its minimum (op-geth's 0.001 gwei by
+default), so a settlement sent then is never mined: it returns
+settlement_pending, holds its nonce, and every later settlement queues
+behind it.
+
+Seen on Hemi testnet (OP Stack): a 1-wei-tip transaction stayed pending
+while empty blocks were produced; the same transaction with a 0.001 gwei
+tip was mined in the next block. Both Hemi chains answer
+eth_maxPriorityFeePerGas with 1000000.
+
+On EIP-1559 chains, send_transaction now sets the fees itself: the tip
+is the larger of alloy's estimate and eth_maxPriorityFeePerGas, and the
+max fee keeps the estimate's base-fee headroom plus that tip. A node
+without eth_maxPriorityFeePerGas keeps alloy's estimate. Legacy chains
+are unchanged.
+
+fees_with_tip_floor holds the arithmetic and has unit tests. The hemi
+e2e suite checks a settlement sent after ten tip-less blocks.
+---
+ .../x402-chain-eip155/src/chain/provider.rs   | 79 ++++++++++++++++++-
+ 1 file changed, 78 insertions(+), 1 deletion(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/chain/provider.rs b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+index 88b2d82..7466604 100644
+--- a/crates/chains/x402-chain-eip155/src/chain/provider.rs
++++ b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+@@ -239,7 +239,10 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+     ///
+     /// # Gas Pricing Strategy
+     ///
+-    /// - **EIP-1559 networks**: Uses automatic gas pricing via the provider's fillers.
++    /// - **EIP-1559 networks**: Uses the provider's fee estimate, with the node's suggested priority
++    ///   fee (`eth_maxPriorityFeePerGas`) as a floor for the tip. The estimate alone falls back to a
++    ///   1-wei tip when recent blocks carry no tips. An OP Stack sequencer skips a transaction tipping
++    ///   below its minimum, and that transaction would hold its nonce and every later settlement.
+     /// - **Legacy networks**: Fetches the current gas price using `get_gas_price()` and sets it explicitly.
+     ///
+     /// # Timeout Configuration
+@@ -283,6 +286,27 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+             #[cfg(not(feature = "telemetry"))]
+             let gas: u128 = gas_fut.await?;
+             txr.set_gas_price(gas);
++        } else {
++            let provider = &self.inner;
++            let fees_fut = async {
++                let fees = provider.estimate_eip1559_fees().await;
++                (fees, provider.get_max_priority_fee_per_gas().await)
++            };
++            #[cfg(feature = "telemetry")]
++            let (fees, suggested_tip) = fees_fut
++                .instrument(tracing::info_span!("estimate_eip1559_fees"))
++                .await;
++            #[cfg(not(feature = "telemetry"))]
++            let (fees, suggested_tip) = fees_fut.await;
++            let fees = fees?;
++            // A node without eth_maxPriorityFeePerGas leaves the estimate as it was.
++            let (max_fee, tip) = fees_with_tip_floor(
++                fees.max_fee_per_gas,
++                fees.max_priority_fee_per_gas,
++                suggested_tip.ok(),
++            );
++            txr.set_max_priority_fee_per_gas(tip);
++            txr.set_max_fee_per_gas(max_fee);
+         }
+ 
+         // Estimate gas if not provided
+@@ -460,6 +484,23 @@ impl<T: Eip155MetaTransactionProvider> Eip155MetaTransactionProvider for Arc<T>
+     }
+ }
+ 
++/// EIP-1559 fees from an estimate, with the node's suggested tip as a floor for the tip.
++///
++/// Returns `(max_fee_per_gas, max_priority_fee_per_gas)`. The estimate's max fee is its base-fee
++/// headroom plus its tip; the headroom is kept and the raised tip added. Without a suggestion, the
++/// estimate is returned unchanged.
++fn fees_with_tip_floor(
++    estimated_max_fee: u128,
++    estimated_tip: u128,
++    suggested_tip: Option<u128>,
++) -> (u128, u128) {
++    let tip = suggested_tip.map_or(estimated_tip, |suggested| suggested.max(estimated_tip));
++    let max_fee = estimated_max_fee
++        .saturating_sub(estimated_tip)
++        .saturating_add(tip);
++    (max_fee, tip)
++}
++
+ pub async fn assert_contracts_exists<P: Provider>(
+     provider: &P,
+ ) -> Result<(), Box<dyn std::error::Error>> {
+@@ -474,3 +515,39 @@ pub async fn assert_contracts_exists<P: Provider>(
+ 
+     Ok(())
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::fees_with_tip_floor;
++
++    // Hemi testnet on 2026-10-29: base fee 252 wei, no tips in the last ten blocks, so alloy's
++    // estimate is a 1-wei tip and a max fee of 2 * 252 + 1; eth_maxPriorityFeePerGas is 1_000_000.
++    #[test]
++    fn raises_a_tip_below_the_suggestion_and_keeps_the_base_fee_headroom() {
++        assert_eq!(
++            fees_with_tip_floor(505, 1, Some(1_000_000)),
++            (1_000_504, 1_000_000)
++        );
++    }
++
++    #[test]
++    fn keeps_an_estimated_tip_above_the_suggestion() {
++        assert_eq!(
++            fees_with_tip_floor(2_000_504, 1_500_000, Some(1_000_000)),
++            (2_000_504, 1_500_000)
++        );
++    }
++
++    #[test]
++    fn keeps_the_estimate_without_a_suggestion() {
++        assert_eq!(fees_with_tip_floor(505, 1, None), (505, 1));
++    }
++
++    #[test]
++    fn does_not_overflow() {
++        assert_eq!(
++            fees_with_tip_floor(u128::MAX, 1, Some(u128::MAX)),
++            (u128::MAX, u128::MAX)
++        );
++    }
++}

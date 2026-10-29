@@ -2,9 +2,9 @@
 
 An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hemi mainnet (`eip155:43111`) and Hemi testnet (`eip155:743111`) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint.
 
-It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and eighteen small patches that make its error responses match the x402 v2 spec. The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
+It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and nineteen small patches. Eighteen make its error responses match the x402 v2 spec, and one keeps its settlements from being underpriced on Hemi (D-018). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
-**Status:** built and tested end to end on local forks of both Hemi chains. The live testnet run is scripted but waits for testnet funds. Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
+**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and a live USDC.e payment settled ([docs/testnet-run.md](docs/testnet-run.md)); the hBTC payment waits for Bitcoin-testnet funds. Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
 
 | Path | What it is |
 |------|------|
@@ -40,9 +40,9 @@ The same addresses on both networks. Each contract is replayed from its original
 | Contract | Address | Mainnet | Testnet |
 |------|------|------|------|
 | Deterministic deployer | `0x4e59b44847b379578588920cA78FbF26c0B4956C` | present | present |
-| Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | present (genuine, D-004) | not yet deployed: `scripts/testnet-run.sh --go` deploys it |
-| x402 exact Permit2 proxy | `0x402085c248EeA27D92E8b30b2C58ed07f9E20001` | not yet deployed: needs the mainnet go | not yet deployed: `scripts/testnet-run.sh --go` deploys it |
-| EIP-6492 validator | `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` | not yet deployed: needs the mainnet go | not yet deployed: `scripts/testnet-run.sh --go` deploys it |
+| Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | present (genuine, D-004) | deployed 2026-10-29, [tx](https://testnet.explorer.hemi.xyz/tx/0xa50c7ded891f840ba67b6fd92c74a5acba7d630d166cd8da18004e64c876c638) |
+| x402 exact Permit2 proxy | `0x402085c248EeA27D92E8b30b2C58ed07f9E20001` | not yet deployed: needs the mainnet go | deployed 2026-10-29, [tx](https://testnet.explorer.hemi.xyz/tx/0x0b2c46fa31d97c43588f9a78fb3eec469f664033495d342979408253481ec863) |
+| EIP-6492 validator | `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` | not yet deployed: needs the mainnet go | deployed 2026-10-29, [tx](https://testnet.explorer.hemi.xyz/tx/0xec5e69e3ee1a477a54df8b549d5191b8ecb0761bf43b2d7df0db8055929c740e) |
 | Multicall3 | `0xcA11bde05977b3631167028862bE2a173976CA11` | present | present |
 
 Assets (source: Hemi's token list, which feeds the tunnel UI, plus on-chain reads; D-007, D-008):
@@ -98,9 +98,9 @@ docker compose up                                          # both chains (config
 
 If a contract or key is missing, the container exits with the reason. A missing contract shows as `Contract at address … does not exist`. An empty `FACILITATOR_*_PRIVATE_KEY` shows as `Invalid evm private key: invalid string length`. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently.
 
-The image, `hemi-x402-facilitator:e75adda-hemi.7`, is x402-rs at commit `e75adda` plus eighteen small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it. The build fetches x402-rs from GitHub, the crates from crates.io and the pinned `rust:1.93-trixie` image (about 2.2 GB), then compiles for about 2 minutes on a 4-CPU machine. Add `--build` after changing a patch. Forks also need the Hemi public RPCs to be reachable.
+The image, `hemi-x402-facilitator:e75adda-hemi.8`, is x402-rs at commit `e75adda` plus nineteen small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it. The build fetches x402-rs from GitHub, the crates from crates.io and the pinned `rust:1.93-trixie` image (about 2.2 GB), then compiles for about 2 minutes on a 4-CPU machine. Add `--build` after changing a patch. Forks also need the Hemi public RPCs to be reachable.
 
-Stock x402-rs does not return the x402 v2 spec's error shapes. The patches fix that:
+Stock x402-rs does not return the x402 v2 spec's error shapes, and on a quiet Hemi it can send a settlement that is never mined. The patches fix both:
 
 - **Signature first:** the payer's signature is checked before balance or allowance. A bad signature returns `invalid_exact_evm_payload_signature`; stock x402-rs gives HTTP 500 `unexpected_error`. This holds for plain wallets and for contract wallets. An EIP-1271 wallet is asked `isValidSignature`, and an EIP-6492 signature is checked with the EIP-6492 validator before anything is sent.
 - **Error bodies:** they carry the real `payer` and `network`.
@@ -114,6 +114,7 @@ Stock x402-rs does not return the x402 v2 spec's error shapes. The patches fix t
 - **Protocol version:** a missing or unsupported `x402Version` returns `invalid_x402_version`.
 - **Permit2 spender:** a Permit2 payload whose spender is not the x402 exact proxy returns `invalid_payload`.
 - **Client disconnects:** a settlement finishes even if the client hangs up, and its tx hash is logged once the node accepts the transaction. The record is kept, and an identical `/settle` retry gets `settlement_pending` with the hash while the tx is unmined. The first retry after it mines gets the success; later retries are replays. A stock seller always verifies before settling, and `/verify` refuses an authorization with a record. So only a client that calls `/settle` directly can claim a kept success. For a stock seller, see "Charged but not served" under [Limits](#limits-and-open-items).
+- **Settlement tips:** a settlement tips at least the node's suggested priority fee, 0.001 gwei on both Hemi chains. After ten blocks without tips, stock x402-rs tips 1 wei. Hemi's sequencer never mines that, and the stuck nonce would block every later settlement (D-018).
 - **HTTP status codes as the reference facilitator uses them:** 200 for every verdict on a readable request, `isValid: false`, `success: false` and `settlement_pending` included. 400 is only for a request that cannot be read; 500 for unexpected failures. A stock TS seller then receives the bare §9 code.
 
 None of them changes where funds go. The exact-amount patch narrows what is accepted. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) and D-016 explain each one. The unpatched stock image is kept, by digest, in a comment in `docker-compose.yml`.
@@ -181,7 +182,7 @@ The buyer prints the settlement tx hash and its explorer link. [`buyer/README.md
 
 ## Testnet run
 
-Not run yet: both wallets now hold Hemi testnet ETH, but the buyer still needs USDC.e and hBTC. Everything else is scripted. With no flag, the script only checks balances and prints what to fund; it sends nothing:
+Run on 2026-10-29 for USDC.e: the contracts were deployed and one payment settled, in [tx `0x0bca64a7…b6c5`](https://testnet.explorer.hemi.xyz/tx/0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5). [docs/testnet-run.md](docs/testnet-run.md) has the receipt, the seller's verify-then-settle log and the buyer's output. The hBTC payment waits for Bitcoin-testnet funds. With no flag, the script only checks balances and prints what to fund; it sends nothing:
 
 ```bash
 scripts/testnet-run.sh
@@ -197,7 +198,7 @@ Where the funds come from (D-017):
 | Asset | Path | Wait |
 |------|------|------|
 | Testnet ETH | Ethereum Sepolia ETH from any Sepolia faucet, tunneled to Hemi testnet in the [Hemi Portal](https://app.hemi.xyz/en/tunnel/?networkType=testnet) | minutes |
-| Testnet USDC.e `0xD479…6443` | Aave's Sepolia test USDC `0x94a9…E4C8`, which Aave's open faucet mints, tunneled to Hemi testnet. `scripts/testnet-fund-usdc.sh --go` does both from the buyer and needs about 0.001 Ethereum Sepolia ETH there. By hand: app.aave.com/faucet in testnet mode, then the Portal. Circle's Sepolia USDC is a different token and does not work | minutes |
+| Testnet USDC.e `0xD479…6443` | Aave's Sepolia test USDC `0x94a9…E4C8`, which Aave's open faucet mints, tunneled to Hemi testnet. `scripts/testnet-fund-usdc.sh --go` does both from the buyer and needs about 0.001 Ethereum Sepolia ETH there. By hand: app.aave.com/faucet in testnet mode, then the Portal. Circle's Sepolia USDC is a different token and does not work. Or swap a little Hemi testnet ETH on Hemi testnet's Uniswap V3 WETH/USDC.e pool, which is how this buyer was funded (D-017) | minutes |
 | Testnet hBTC `0x36Ab…fAe7` | Bitcoin **testnet3** coins, deposited through the Portal's Bitcoin tunnel with UniSat set to "Bitcoin Testnet", then claimed | over an hour |
 
 For USDC.e, the funding script sends nothing without `--go`. Without a flag it checks the route on-chain and prints what is missing:
@@ -206,7 +207,7 @@ For USDC.e, the funding script sends nothing without `--go`. Without a flag it c
 scripts/testnet-fund-usdc.sh
 ```
 
-The Sepolia transactions need Ethereum Sepolia ETH; Hemi testnet ETH cannot pay for them. If none is at hand, Hemi testnet's Uniswap V3 WETH/USDC.e pools are a fallback (D-017).
+The Sepolia transactions need Ethereum Sepolia ETH; Hemi testnet ETH cannot pay for them. Without Sepolia ETH, use the swap; D-017 has the exact commands.
 
 hBTC needs more care:
 
@@ -222,6 +223,8 @@ Then run:
 ```bash
 scripts/testnet-run.sh --go
 ```
+
+`ASSETS=usdc` or `ASSETS=btc` pays in one asset only. Each run appends its own section to `docs/testnet-run.md`.
 
 In order, it:
 
@@ -291,12 +294,13 @@ The end-to-end suite starts both forks and the facilitator image from this repo.
 - the stock TS seller engine against this facilitator: a buyer with a bad signature, no tokens or no allowance gets a 402 or 412 with the bare §9 code
 - that the facilitator and the proxy never hold tokens
 - that the dead primary really is dead inside the container
+- that a settlement sent after ten tip-less blocks tips at least the node's suggested priority fee
 
 Latest results (2026-10-29), against a no-cache build of the image:
 
 | Suite | Result |
 |------|------|
-| `npm test -w tests` | 9 files, 101 tests passed, 0 failed (124 s) |
+| `npm test -w tests` | 10 files, 103 tests passed, 0 failed (136 s), on hemi.8 |
 | `forge test` | 17 passed, 0 failed |
 | `buyer/demo-fork.sh` | all four payments settled; payTo received exactly the price each time |
 
@@ -304,9 +308,9 @@ Latest results (2026-10-29), against a no-cache build of the image:
 
 | Item | Status | Evidence |
 |------|------|------|
-| `docker compose up` starts the facilitator; `/supported` lists both networks with `exact` | Met on forks (`docker-compose.fork.yml`). Blocked live until the contracts are deployed: the testnet run deploys them on testnet; mainnet needs the go | `tests/e2e/01-supported.test.ts`, D-013, D-016 |
-| One `/verify` then `/settle` on testnet in USDC.e, tx linked on the explorer | **Open:** waits for testnet funds. On a testnet fork it passes | `scripts/testnet-run.sh`, `tests/e2e/02-settle.test.ts` |
-| One settle on testnet in hemiBTC (hBTC, per D-008) | **Open:** waits for testnet funds. On a testnet fork it passes | as above |
+| `docker compose up` starts the facilitator; `/supported` lists both networks with `exact` | Met on forks (`docker-compose.fork.yml`). Live on testnet with the testnet config, which lists `eip155:743111`. Both networks live need the mainnet contracts, which need the go | `tests/e2e/01-supported.test.ts`, D-013, D-016 |
+| One `/verify` then `/settle` on testnet in USDC.e, tx linked on the explorer | Met: [`0x0bca64a7…b6c5`](https://testnet.explorer.hemi.xyz/tx/0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5) | [docs/testnet-run.md](docs/testnet-run.md), `tests/e2e/02-settle.test.ts` |
+| One settle on testnet in hemiBTC (hBTC, per D-008) | **Open:** the buyer has no hBTC yet; it needs Bitcoin testnet3 coins through the Bitcoin tunnel (D-017). On a testnet fork it passes | `scripts/testnet-run.sh`, `tests/e2e/02-settle.test.ts` |
 | Failed signature and insufficient balance return the spec's error shapes, with tests | Met | `tests/e2e/03-bad-signature.test.ts`, `04-insufficient-balance.test.ts`, D-016 |
 | Facilitator never holds funds, shown by reading the proxy and config | Met | [Why the facilitator never holds funds](#why-the-facilitator-never-holds-funds); balance and log checks in `02-settle.test.ts` |
 | RPC failover: tests pass with the primary RPC on a dead port | Met | every e2e test runs that way; `tests/e2e/05-rpc-failover.test.ts`, D-015 |

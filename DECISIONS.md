@@ -483,7 +483,7 @@ Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return 
 
 The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
 
-No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.7`. Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.8` (hemi.7 until patch 0019, D-018). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
 
 | Patch | Change |
 |------|------|
@@ -505,6 +505,7 @@ No config setting changes any of this, so the facilitator is now built from `fac
 | 0016 | A settlement that succeeds after its client left keeps its record with the hash; the first identical retry claims the success |
 | 0017 | A missing top-level `x402Version`, or a `paymentPayload.x402Version` that contradicts it, returns `invalid_x402_version` |
 | 0018 | HTTP status codes follow the TS reference facilitator: 200 for every verdict on a readable request, 400 only for an unreadable one, 500 for unexpected failures |
+| 0019 | On EIP-1559 chains a settlement tips at least the node's `eth_maxPriorityFeePerGas`, so it is mined after tip-less blocks (hemi.8, D-018) |
 
 hemi.1 had patches 0001 to 0005. A fresh-context critic then found three more gaps:
 
@@ -549,6 +550,8 @@ Other choices and known limits of the patch set:
   None of these allows a double charge, because the payer's on-chain nonce still guards the payment. Each is listed in README "Limits and open items".
 - **Build:** base images are pinned by digest, and each patch is applied with `git apply --check`, so upstream drift fails the build. A no-cache build takes about 115 s on the workstation (Colima, 4 CPUs). The image is 170 MB.
 
+hemi.8 adds patch 0019 (D-018). On 2026-10-29 its no-cache build took 119 s, and the e2e suite passed: 10 files, 103 tests.
+
 Verified on 2026-10-29 against a no-cache hemi.7 build (113 s):
 
 - **e2e suite:** 9 files, 101 tests passed, with dead primary RPCs and no expected-failure markers.
@@ -585,7 +588,22 @@ $ cast call 0xC959…f42D 'mint(address,address,uint256)(uint256)' 0x94a9…E4C8
 
 `scripts/testnet-fund-usdc.sh --go` does the mint, the approval and `depositERC20To` from the buyer, then waits for the balance on Hemi testnet. It reads the route from chain state and refuses if any link above no longer holds. On an anvil fork of Sepolia, all three transactions succeeded, the bridge's USDC balance rose by the deposited 10 USDC, and the portal `0xB6f9…2516` emitted `TransactionDeposited`.
 
-Hemi testnet also has Uniswap V3 WETH/USDC.e pools with liquidity, for example `0xA2Ecdf4bdb501cde058608F02fB8c4FC111fDF5C` (1% fee, 18.4 WETH and 12.4M USDC.e) and `0x2f53025Ac91D2843018495014F95f0CB956e3719` (0.3%). Swaps go through an unverified router, `0xA18019E62f266C2E17e33398448e4105324e0d0F`, which is called with `execute`. This route needs no Sepolia ETH and is the fallback.
+Hemi testnet also has Uniswap V3 WETH/USDC.e pools with liquidity, for example `0xA2Ecdf4bdb501cde058608F02fB8c4FC111fDF5C` (1% fee, 18.4 WETH and 12.4M USDC.e) and `0x2f53025Ac91D2843018495014F95f0CB956e3719` (0.3%). Their WETH is the token list's `0x0C8aFD1b58aa2A5bAd2414B861D8A7fF898eDC3A`. Swaps go through an unverified router, `0xA18019E62f266C2E17e33398448e4105324e0d0F`, which is called with `execute`; its selectors are Uniswap's Universal Router's. This route needs no Sepolia ETH.
+
+The buyer was funded this way. The swap was first rehearsed on an anvil fork of Hemi testnet, then sent live with a minimum output of half the rehearsed amount:
+
+```
+$ PATH_=$(cast concat-hex 0x0C8aFD1b…dC3A 0x000bb8 0xD47971C7…6443)                  # WETH, 0.3% fee, USDC.e
+$ IN1=$(cast abi-encode 'f(address,uint256)' 0x…02 10000000000000)                       # WRAP_ETH into the router
+$ IN2=$(cast abi-encode 'f(address,uint256,uint256,bytes,bool)' 0x…01 10000000000000 11281039 $PATH_ false)   # V3_SWAP_EXACT_IN to the sender
+$ cast send 0xA18019E6…0d0F 'execute(bytes,bytes[],uint256)' 0x0b00 "[$IN1,$IN2]" <deadline> --value 10000000000000 \
+    --priority-gas-price 1000000 --gas-price 3000000 --private-key $BUYER_PRIVATE_KEY --rpc-url https://testnet.rpc.hemi.network/rpc
+0xef3d65e09632d360b5623a4550a29aa6405c3ccb4250df72c0073b3272bfecd9    # block 7099151
+$ cast call 0xD47971C7…6443 'balanceOf(address)(uint256)' 0x35C8182E886382D1133a3Daf980470D3646D3786
+22562078 [2.256e7]                                                                       # 22.56 USDC.e for 0.00001 ETH
+```
+
+The first attempt had no explicit tip and was never mined; D-018 explains why.
 
 **hBTC** has no bridge link. Only the Bitcoin tunnel's vault manager mints it:
 
@@ -607,6 +625,61 @@ $ curl -s https://mempool.space/testnet/api/tx/6d1e2ea41e126bbeb6077feec0c6eb417
 - **Activity:** the vault manager's history shows two confirmed deposits in 2026, both from that one address. The tunnel works, but it is barely used.
 
 So hBTC needs Bitcoin testnet3 coins, a UniSat wallet on "Bitcoin Testnet", a Portal deposit and a claim transaction. There is no faster on-chain source: the top hBTC holders are wallets, not pools.
+
+## D-018. Settlement tips: Hemi's sequencer minimum and patch 0019
+
+Found on 2026-10-29 while funding the testnet buyer (D-017). Hemi's sequencer does not mine a transaction whose tip is below 0.001 gwei (1,000,000 wei). alloy's default fee estimate, which Foundry and the facilitator both use, tips 1 wei whenever the last ten blocks carry no tips. On Hemi that is common, because most blocks hold only the L1-info deposit.
+
+The live evidence is a swap from the buyer on Hemi testnet, sent twice with the same nonce:
+
+```
+$ curl -sS https://testnet.explorer.hemi.xyz/api/v2/transactions/0x82202337644fd19e57c19925a3f0b625e74883b44bec40aac837d90f182c08a5 | jq -c '{result, nonce, max_fee_per_gas, max_priority_fee_per_gas}'
+{"result":"pending","nonce":0,"max_fee_per_gas":"507","max_priority_fee_per_gas":"1"}     # cast's estimate; pending for minutes while blocks were produced every 12 s
+$ cast tx 0x82202337… --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: tx not found          # the public RPC did not even keep it
+$ cast send … --nonce 0 --priority-gas-price 1000000 --gas-price 3000000
+0xef3d65e09632d360b5623a4550a29aa6405c3ccb4250df72c0073b3272bfecd9   # mined in block 7099151, the next block
+$ curl -sS 'https://testnet.explorer.hemi.xyz/api/v2/transactions?filter=validated' | jq -r '.items[] | select(.type==2) | .max_priority_fee_per_gas' | sort -n | head -1
+1000000                      # no recently mined transaction tips less
+```
+
+Both chains suggest exactly that minimum, and both have tip-less fee histories:
+
+```
+$ cast rpc eth_maxPriorityFeePerGas --rpc-url https://testnet.rpc.hemi.network/rpc    → "0xf4240" (1000000)
+$ cast rpc eth_maxPriorityFeePerGas --rpc-url https://rpc.hemi.network/rpc            → "0xf4240" (1000000)
+$ cast rpc eth_feeHistory 10 latest '[20]' --rpc-url https://testnet.rpc.hemi.network/rpc | jq -c '[.reward[][0]]'
+["0x0","0x0","0x0","0x0","0xf4240","0xf4240","0x0","0x0","0x0","0x0"]
+$ cast rpc eth_feeHistory 10 latest '[20]' --rpc-url https://rpc.hemi.network/rpc | jq -c '[.reward[][0]]'
+["0x0","0x0","0x0","0x0","0x0","0x0","0x0","0x1a602d","0x0","0x0"]
+$ curl -sS https://raw.githubusercontent.com/alloy-rs/alloy/v2.0.5/crates/provider/src/utils.rs | grep -n 'EIP1559_MIN_PRIORITY_FEE: u128\|is_empty()'
+26:pub const EIP1559_MIN_PRIORITY_FEE: u128 = 1;
+96:    if rewards.is_empty() {
+```
+
+alloy takes the median of the non-zero rewards and falls back to 1 wei when there are none. The facilitator (x402-rs on alloy-provider 2.0.5, `eip1559: true`) leaves its fees to that estimate, so a settlement sent after two quiet minutes would never be mined. Since patch 0006 keeps the nonce of an unconfirmed transaction, every later settlement from that signer would queue behind it. The forks never showed this, because anvil mines any tip.
+
+What else sends transactions:
+
+- **Contract deployment:** `contracts/deploy.sh` already passes `eth_maxPriorityFeePerGas` to forge as the tip.
+- **Buyer approvals:** viem reads `eth_maxPriorityFeePerGas` itself.
+- **Funding scripts:** `scripts/testnet-fund-usdc.sh` sends only on Ethereum Sepolia, where blocks carry tips.
+
+Patch 0019 (image hemi.8) makes the facilitator read both alloy's estimate and `eth_maxPriorityFeePerGas`. It tips the larger of the two and sets the max fee to the estimate's base-fee headroom plus that tip. The e2e test `07-priority-fee.test.ts` mines twelve empty blocks on each fork, then settles. Against hemi.7 it failed on both forks:
+
+```
+AssertionError: expected 1 to be greater than or equal to 1000000000
+ ❯ e2e/07-priority-fee.test.ts:47:37
+```
+
+Live, the first Hemi testnet settlement through hemi.8 tipped exactly the floor, so alloy's estimate alone was below it:
+
+```
+$ cast tx 0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5 --rpc-url https://testnet.rpc.hemi.network/rpc --json | jq -c '{type, maxPriorityFeePerGas, maxFeePerGas}'
+{"type":"0x2","maxPriorityFeePerGas":"0xf4240","maxFeePerGas":"0xf443a"}       # tip 1000000; max fee 1000506 = 2 * 253 + tip
+```
+
+The alternative was `eip1559: false`, which needs no image change, since `eth_gasPrice` is the base fee plus 1,000,000. It was rejected for two reasons. A legacy transaction priced at exactly the base fee plus the minimum falls below the minimum as soon as the base fee rises by 1 wei. And a config change would not fix x402-rs for other OP Stack chains.
 
 ### Open questions
 
