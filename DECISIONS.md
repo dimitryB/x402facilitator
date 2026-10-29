@@ -8,7 +8,7 @@ All spike entries ran on 2026-10-29 (UTC) from the local workstation with Foundr
 
 | Item | Mainnet (eip155:43111) | Testnet (eip155:743111) | Entry |
 |------|------|------|------|
-| RPCs answer with the right chain id | yes, all four | yes | D-002 |
+| RPCs answer with the right chain id | yes, both | yes, both | D-002 |
 | Deterministic deployer `0x4e59…956C` | present | present | D-003 |
 | Permit2 at canonical `0x0000…8BA3` | present, genuine | **absent** | D-004 |
 | x402 exact proxy at `0x4020…0001` | **absent** | **absent** | D-005 |
@@ -501,7 +501,7 @@ No config setting changes any of this, so the facilitator is now built from `fac
 | 0012 | EIP-6492 signatures are validated with the validator's `isValidSigWithSideEffects` (`eth_call`) before balance, allowance or any send. A wrapper around the payer's own EOA signature is ignored, so no factory call is made |
 | 0013 | A missing or unsupported top-level `x402Version` returns `invalid_x402_version` |
 | 0014 | A Permit2 spender other than the exact proxy returns `invalid_payload`, checked before the signature |
-| 0015 | `/settle` runs the settlement in a detached task, so a client disconnect cannot cancel it after broadcast. Every broadcast hash is logged at info |
+| 0015 | `/settle` runs the settlement in a detached task, so a client disconnect cannot cancel it after broadcast. The hash of every broadcast the node accepts is logged at info |
 | 0016 | A settlement that succeeds after its client left keeps its record with the hash; the first identical retry claims the success |
 | 0017 | A missing top-level `x402Version`, or a `paymentPayload.x402Version` that contradicts it, returns `invalid_x402_version` |
 | 0018 | HTTP status codes follow the TS reference facilitator: 200 for every verdict on a readable request, 400 only for an unreadable one, 500 for unexpected failures |
@@ -541,6 +541,12 @@ Other choices and known limits of the patch set:
 - **Verify-then-settle race:** two requests that both pass `/verify` before either settles can both reach a seller's handler, and only one settle succeeds. This is inherent to the x402 flow.
 - **EIP-6492 deployment:** a counterfactual wallet deployed during settle is untested end to end, because the forks have no wallet factory.
 - **After a disconnect:** until the original settlement's receipt wait ends (at most 60 s), retries get `invalid_transaction_state` ("in progress") without the hash. After that, the first identical retry claims the hash (0016). Two narrow gaps remain. A client that disconnects in the instant between the settlement's "is the caller still waiting" check and the response being written loses that success. A shutdown ends a detached settlement. The broadcast log line survives both.
+- **Known gaps found by the seventh critic and left as limits:**
+  - **Ambiguous send:** if the node accepts a send but its response is lost, the hash goes unlogged and the nonce is reset.
+  - **Eviction:** the 10,000-record cap evicts the oldest records first, including real pending ones.
+  - **Stock-seller claims:** a kept success can be claimed only by a direct `/settle` caller, never by a stock seller, which always verifies first.
+
+  None of these allows a double charge, because the payer's on-chain nonce still guards the payment. Each is listed in README "Limits and open items".
 - **Build:** base images are pinned by digest, and each patch is applied with `git apply --check`, so upstream drift fails the build. A no-cache build takes about 115 s on the workstation (Colima, 4 CPUs). The image is 170 MB.
 
 Verified on 2026-10-29 against a no-cache hemi.7 build (113 s):

@@ -19,7 +19,7 @@ It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned 
 
 ## Spike result
 
-Each asset's transfer method was decided by read-only on-chain checks on both networks. [DECISIONS.md](DECISIONS.md) entries D-001 to D-012 hold every command and its output.
+Each asset's transfer method was decided by read-only on-chain checks on both networks. [DECISIONS.md](DECISIONS.md) entries D-002 to D-012 hold the decisive commands and outputs; D-001 summarises them. The full, unshortened transcripts are in [`docs/spike/`](docs/spike/).
 
 | Asset | Network | Transfer method | Buyer needs ETH on Hemi? |
 |------|------|------|------|
@@ -62,7 +62,7 @@ Networks:
 
 ## Run it
 
-You need Docker (any engine with Compose v2), Foundry (`cast`, `anvil`, `forge`), `jq` and Node 22.9 or later. The npm scripts use `--env-file-if-exists`, which Node added in 22.9. All Hemi values come from [`shared/hemi.json`](shared/hemi.json).
+You need Docker (any engine with Compose v2), Foundry (`cast`, `anvil`, `forge`), `jq` and Node 22.9 or later. The npm scripts use `--env-file-if-exists`, which Node added in 22.9. The seller, buyer and tests take their Hemi values from [`shared/hemi.json`](shared/hemi.json). The facilitator configs and compose defaults repeat the chain ids and RPC URLs.
 
 ```bash
 cp -n .env.example .env    # only if you have no .env yet; then fill in the keys
@@ -113,7 +113,7 @@ Stock x402-rs does not return the x402 v2 spec's error shapes. The patches fix t
 - **One settlement per authorization:** while a settle is pending, `/verify` of the same authorization is refused. A retry of the identical settle returns the same tx hash. The first retry after it is mined gets the success, and every later settle is a replay. One payment cannot pay for two requests.
 - **Protocol version:** a missing or unsupported `x402Version` returns `invalid_x402_version`.
 - **Permit2 spender:** a Permit2 payload whose spender is not the x402 exact proxy returns `invalid_payload`.
-- **Client disconnects:** a settlement finishes even if the client hangs up. If it succeeds or stays pending, the first identical retry gets its tx hash and the success. Later retries are replays, and every broadcast tx hash is logged.
+- **Client disconnects:** a settlement finishes even if the client hangs up, and its tx hash is logged once the node accepts the transaction. The record is kept, and an identical `/settle` retry gets `settlement_pending` with the hash while the tx is unmined. The first retry after it mines gets the success; later retries are replays. A stock seller always verifies before settling, and `/verify` refuses an authorization with a record. So only a client that calls `/settle` directly can claim a kept success. For a stock seller, see "Charged but not served" under [Limits](#limits-and-open-items).
 - **HTTP status codes as the reference facilitator uses them:** 200 for every verdict on a readable request, `isValid: false`, `success: false` and `settlement_pending` included. 400 is only for a request that cannot be read; 500 for unexpected failures. A stock TS seller then receives the bare §9 code.
 
 None of them changes where funds go. The exact-amount patch narrows what is accepted. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) and D-016 explain each one. The unpatched stock image is kept, by digest, in a comment in `docker-compose.yml`.
@@ -139,6 +139,7 @@ Read the two settlement paths and the config; neither path routes tokens through
   ```
 
   `to` is the witness the payer signed, and Permit2 pays exactly that address. The proxy has two entry points, `settle` and `settleWithPermit`. Both go through this `_settle`; `settleWithPermit` first submits the payer's own EIP-2612 permit to Permit2. The proxy has no owner and no withdraw function ([`x402ExactPermit2Proxy.sol`](contracts/src/x402/x402ExactPermit2Proxy.sol)).
+- **Counterfactual wallets (EIP-6492).** The same transfer or `settle` call is sent inside `Multicall3.aggregate3`, after the payer-supplied wallet factory call. That happens only once the EIP-6492 validator accepts the signature. The factory call runs as Multicall3, carries no value, and sets no recipient.
 - **Config.** The facilitator's only key is a gas signer per chain ([`facilitator/config.json`](facilitator/config.json)). Nothing in it, or in the x402-rs settle code, sets a recipient.
 
 The settle tests in `tests/e2e/02-settle.test.ts` check this for each of the four assets. The receipt's only `Transfer` log goes payer to payTo, and the signer and the proxy hold zero tokens before and after.
@@ -214,7 +215,7 @@ In order, it:
 3. pays once in USDC.e and once in hBTC;
 4. writes the settlement tx hashes, linked on testnet.explorer.hemi.xyz, plus the seller's verify-then-settle log, to `docs/testnet-run.md`.
 
-The script stops if either payment does not come back settled. That also tests D-015's claim that dRPC testnet's stale `eth_blockNumber` cannot delay receipts. If settlements come back `settlement_pending` instead, rerun with `HEMI_TESTNET_RPC_PRIMARY=https://testnet.rpc.hemi.network/rpc`.
+The script stops if either payment does not come back settled. That also tests D-015's claim that dRPC testnet's stale `eth_blockNumber` cannot delay receipts. If settlements come back `settlement_pending` instead, first check the earlier hash on the explorer; that payment may still mine. Then rerun with `HEMI_TESTNET_RPC_PRIMARY=https://testnet.rpc.hemi.network/rpc`. A rerun makes new payments, so fund the buyer for two.
 
 ## Mainnet deployment
 
@@ -246,7 +247,7 @@ The mainnet facilitator needs two contracts that do not exist on Hemi mainnet ye
    ```bash
    SELLER_NETWORKS=eip155:43111 npm run start -w seller
    ```
-6. Pay on mainnet. This spends real funds: 0.001 USDC.e, or 1 sat plus a one-time approval for hemiBTC.
+6. Pay on mainnet. This spends real funds: 0.001 USDC.e, or 1 sat plus a one-time approval for hemiBTC. `BUYER_PRIVATE_KEY` must hold mainnet USDC.e; for `--asset btc` it must hold hemiBTC and a little ETH for the approval.
    ```bash
    ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet
    ```
@@ -304,8 +305,11 @@ Latest results (2026-10-29), against a no-cache build of the image:
 - **Mainnet explorer:** blocked from the machine that ran the spike. Mainnet token addresses rest on Hemi's token list and on-chain reads (D-002, Q-1).
 - **Combined failures:** when one payload fails several checks, the code reported follows the TS reference facilitator, not the order written in `scheme_exact_evm.md`. Checks that need no RPC (recipient, validity window, exact amount, token, Permit2 spender) run before the allowance and balance reads. So an expired payment from an unfunded payer gets `…_valid_before`, not `insufficient_funds`. Single-failure cases, which the Definition of done covers, return the spec's code. `tests/e2e/04b-payload-checks.test.ts` ("combined failures") pins the behaviour. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) ("Check order") cites the reference line by line and lists the two places this facilitator differs from it.
 - **Nonce gap after a timeout:** after `settlement_pending`, the facilitator keeps that tx's nonce, so a tx that may still mine is never replaced. If the tx is later dropped from every mempool, later settles on that chain queue behind the gap. To recover, restart the facilitator, which re-reads the nonce from the chain.
-- **Charged but not served:** if a settle goes `settlement_pending` and the stock seller's single automatic retry is also still pending, the seller refuses the request. The payment can still mine later, so the buyer is charged without being served. To reconcile, look up the `transaction` hash from the `settlement_pending` answer; the seller logs it. The same payment header is then refused as a replay.
-- **Timeouts in front of `/settle`:** a proxy or client timeout on `/settle` should exceed the 60-second receipt timeout, or the hash won't come back in the response. The facilitator logs every broadcast hash. After a client hangs up, the settlement keeps running. A retry while it is still waiting for the receipt gets `invalid_transaction_state` ("in progress"). Once it ends, the first identical retry gets the hash.
+- **Charged but not served:** this happens in two ways. A settle can go `settlement_pending` while the stock seller's single automatic retry is also still pending. Or the seller times out or disconnects from `/settle` after the tx was broadcast. Either way the seller refuses the request, the payment can still mine, and the buyer is charged without being served. Resending the same payment header gets a 402 while the facilitator holds the record, up to 15 minutes, and a replay error after that. To reconcile, use the tx hash from the seller's log (`settlement_pending` answers) or the facilitator's log (every accepted broadcast).
+- **Missing Permit2 allowance is HTTP 200:** `scheme_exact_evm.md` Permit2 step 2 says the verifier returns `412 Precondition Failed`. This facilitator answers 200 with `permit2_allowance_required`, as the TS reference facilitator does. The stock seller SDK then answers the buyer 412. This is a deliberate deviation from the scheme text (D-016, 0018).
+- **Ambiguous broadcast:** if the node accepts a transaction but its response is lost, the facilitator treats the send as failed. It resets the nonce, answers `unexpected_settle_error` with no hash, and logs no hash, yet the tx can still mine. The payer's nonce still prevents a double charge.
+- **Record eviction under load:** pending records are capped at 10,000. A flood of parseable `/settle` requests could evict the oldest, which are the real pending ones. That drops the `/verify` block and any kept success. The on-chain nonce still prevents a double charge.
+- **Timeouts in front of `/settle`:** a proxy or client timeout on `/settle` should exceed the 60-second receipt timeout, or the hash won't come back in the response. The facilitator logs the hash of every broadcast the node accepts. After a client hangs up, the settlement keeps running. A retry while it is still waiting for the receipt gets `invalid_transaction_state` ("in progress"). Once it ends, the first identical retry gets the hash.
 - **Facilitator memory:** pending-settlement records live in memory. A facilitator restart forgets them, after which a pending authorization is judged by the chain alone.
 - **Verify-then-settle race:** two requests carrying the same payment header that both pass `/verify` before either settles can both reach the seller's handler; only one settle succeeds. This is inherent to the x402 verify, handler, settle flow, not specific to this facilitator.
 - **EIP-6492 deployment path:** a counterfactual wallet that is deployed during settle is untested end to end. The forks have no wallet factory, so only rejection and the plain-wallet shortcut are tested.
