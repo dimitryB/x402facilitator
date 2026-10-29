@@ -1,5 +1,249 @@
 # hemi-x402-facilitator
 
-An x402 v2 facilitator that verifies and settles payments on Hemi (`eip155:43111` mainnet, `eip155:743111` testnet) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint.
+An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hemi mainnet (`eip155:43111`) and Hemi testnet (`eip155:743111`) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint.
 
-**Status:** pre-spike. The on-chain checks that decide the transfer method have not run yet; see [DECISIONS.md](DECISIONS.md). MVP work happens on `feat/facilitator-mvp`.
+It is the stock [x402-rs](https://github.com/x402-rs/x402-rs) facilitator image with a Hemi config. No fork of x402-rs or of the x402 SDKs is needed. Hemi only needed three standard contracts deployed at their canonical addresses (see [Contracts](#contracts-and-addresses)).
+
+**Status:** built and tested end to end on local forks of both Hemi chains. The live testnet run is scripted but waits for testnet funds. Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
+
+| Path | What it is |
+|------|------|
+| [`docker-compose.yml`](docker-compose.yml), [`facilitator/`](facilitator/) | The facilitator: pinned x402-rs image and its Hemi config |
+| [`contracts/`](contracts/) | Foundry project that deploys Permit2, the EIP-6492 validator and the x402 exact proxy to their canonical addresses |
+| [`seller/`](seller/) | Demo paid endpoint `GET /echo` ($0.001), accepting USDC.e and hemiBTC |
+| [`buyer/`](buyer/) | Demo buyer using `@x402/fetch`; pays the seller and prints the settlement tx |
+| [`tests/`](tests/) | End-to-end tests of `/verify` and `/settle` on local forks of both Hemi chains |
+| [`sdk-patch/`](sdk-patch/) | Draft upstream patch adding Hemi to the x402 TypeScript SDK's default assets |
+| [`shared/hemi.json`](shared/hemi.json) | Every Hemi address used here, in one file |
+| [`DECISIONS.md`](DECISIONS.md) | The spike and every decision, with commands and outputs |
+
+## Spike result
+
+Each asset's transfer method was decided by read-only on-chain checks on both networks. [DECISIONS.md](DECISIONS.md) entries D-001 to D-012 hold every command and its output.
+
+| Asset | Network | Transfer method | Buyer needs ETH on Hemi? |
+|------|------|------|------|
+| USDC.e | mainnet | EIP-3009 `transferWithAuthorization` | No, the payment is one signature |
+| hemiBTC | mainnet | Permit2, through the x402 exact proxy | Once, for `approve(Permit2)` |
+| USDC.e | testnet | Permit2 | Once |
+| hBTC | testnet | Permit2 | Once |
+
+- **Mainnet USDC.e** is Circle's FiatToken v2.2. It implements EIP-3009 and EIP-2612, and its EIP-712 domain is name `Bridged USDC (Stargate)`, version `2` (D-009, D-010).
+- **Testnet USDC.e** is a different contract, a plain tunnel-bridged ERC-20 with neither standard. The testnet cannot exercise the mainnet USDC.e path, so that path is tested on a local fork of mainnet.
+- **hemiBTC and hBTC** implement neither standard (D-011). hemiBTC has no testnet deployment, so testnet uses hBTC, the tunnel's BTC representation (D-008).
+- **Contracts required by x402-rs** must exist before it will start a chain: canonical Permit2, the x402 exact proxy and the EIP-6492 validator. Permit2 already exists on mainnet. Everything else is missing and is deployed by `contracts/` (D-001, D-004 to D-006).
+
+## Contracts and addresses
+
+The same addresses on both networks. Each contract is replayed from its original bytes through the deterministic deployer, so it lands at the address every stock x402 client and x402-rs expects.
+
+| Contract | Address | Mainnet | Testnet |
+|------|------|------|------|
+| Deterministic deployer | `0x4e59b44847b379578588920cA78FbF26c0B4956C` | present | present |
+| Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | present (genuine, D-004) | not yet deployed: `scripts/testnet-run.sh --go` deploys it |
+| x402 exact Permit2 proxy | `0x402085c248EeA27D92E8b30b2C58ed07f9E20001` | not yet deployed: needs the mainnet go | not yet deployed: `scripts/testnet-run.sh --go` deploys it |
+| EIP-6492 validator | `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` | not yet deployed: needs the mainnet go | not yet deployed: `scripts/testnet-run.sh --go` deploys it |
+| Multicall3 | `0xcA11bde05977b3631167028862bE2a173976CA11` | present | present |
+
+Assets (source: Hemi's token list, which feeds the tunnel UI, plus on-chain reads; D-007, D-008):
+
+| Asset | Mainnet `eip155:43111` | Testnet `eip155:743111` |
+|------|------|------|
+| USDC.e (6 decimals) | `0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA` | `0xD47971C7F5B1067d25cd45d30b2c9eb60de96443` |
+| hemiBTC (8 decimals) | `0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28` | none; use hBTC `0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7` |
+
+Networks:
+
+| | Mainnet | Testnet |
+|------|------|------|
+| Chain ID | 43111 | 743111 |
+| RPC (primary, then fallback) | `https://hemi.drpc.org`, `https://rpc.hemi.network/rpc` | `https://hemi-testnet.drpc.org`, `https://testnet.rpc.hemi.network/rpc` |
+| Explorer | https://explorer.hemi.xyz | https://testnet.explorer.hemi.xyz |
+
+## Run it
+
+You need Docker (any engine with Compose v2), Foundry (`cast`, `anvil`, `forge`), `jq` and Node 22 or later. All Hemi values come from [`shared/hemi.json`](shared/hemi.json).
+
+```bash
+cp .env.example .env    # then fill in the keys
+npm install
+```
+
+### Without funds: everything on local forks
+
+`scripts/fork.sh` forks both Hemi chains with anvil and replays the three contract deployments onto the forks. Nothing is sent to a live network.
+
+```bash
+buyer/demo-fork.sh
+```
+
+This starts both forks, the facilitator (pointed at the forks) and the seller. It then pays once in each asset on each network: testnet USDC.e, testnet hBTC, mainnet USDC.e and mainnet hemiBTC. For each payment it prints the settlement tx and payTo's balance.
+
+### The facilitator
+
+```bash
+docker compose up                                          # both chains: needs the mainnet contracts
+FACILITATOR_CONFIG=config.testnet.json docker compose up   # testnet only
+curl -s localhost:8080/supported | jq
+```
+
+The image is x402-rs at commit `e75adda` plus five small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it, which takes about 2 minutes; add `--build` after changing a patch.
+
+The patches make the facilitator return the x402 v2 spec's error shapes, which stock x402-rs does not. For example, a bad signature becomes `invalid_exact_evm_payload_signature` instead of HTTP 500 `unexpected_error`, and error bodies carry the real `payer` and `network`. They change nothing about what is settled or to whom. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) and D-016 explain each one. The unpatched stock image is kept, by digest, in a comment in `docker-compose.yml`.
+
+[`facilitator/config.json`](facilitator/config.json) holds both chains. [`facilitator/config.testnet.json`](facilitator/config.testnet.json) holds testnet only, for use until the mainnet contracts exist; x402-rs refuses to start a chain whose contracts are missing. Settings, all explained in D-013:
+
+- **Scheme:** `v2-eip155-exact` on each chain. It accepts both EIP-3009 and Permit2 payloads. `/supported` lists `exact` per network; which transfer method a payment uses is set per asset by the seller's `extra.assetTransferMethod`.
+- **RPCs:** dRPC first, the Hemi public RPC second, overridable with `HEMI_{TESTNET,MAINNET}_RPC_{PRIMARY,FALLBACK}`. x402-rs sends every read to all RPCs at once and takes the first answer, so a dead or stalled RPC costs nothing as long as one answers (D-015). The public RPC is throttled to 4 requests per second, under its ~300 per minute limit.
+- **Signers:** one key per chain, `FACILITATOR_TESTNET_PRIVATE_KEY` and `FACILITATOR_MAINNET_PRIVATE_KEY`. The signer only pays gas.
+- **Receipt timeout:** 120 seconds, because Hemi RPCs do stall (the brief's outage note).
+
+### Why the facilitator never holds funds
+
+Read the two settlement paths and the config; neither path routes tokens through the facilitator.
+
+- **EIP-3009 (mainnet USDC.e).** The facilitator submits `transferWithAuthorization(from, to, value, validAfter, validBefore, nonce, signature)` to the token. The payer signed all of those fields over the token's EIP-712 domain, so the token itself moves `value` from `from` to `to`. Any change to `to` breaks the signature.
+- **Permit2 (every other asset).** The facilitator calls `settle` on the x402 exact proxy. The proxy's whole transfer step is in [`contracts/src/x402/x402BasePermit2Proxy.sol`](contracts/src/x402/x402BasePermit2Proxy.sol), vendored byte-for-byte from the x402 reference:
+
+  ```solidity
+  ISignatureTransfer.SignatureTransferDetails memory transferDetails =
+      ISignatureTransfer.SignatureTransferDetails({to: to, requestedAmount: settlementAmount});
+  PERMIT2.permitWitnessTransferFrom(permit, transferDetails, owner, witnessHash, witnessTypeString, signature);
+  ```
+
+  `to` is the witness the payer signed, and Permit2 pays exactly that address. The proxy has no owner, no withdraw function and no other entry point that moves tokens ([`x402ExactPermit2Proxy.sol`](contracts/src/x402/x402ExactPermit2Proxy.sol)).
+- **Config.** The facilitator's only key is a gas signer per chain ([`facilitator/config.json`](facilitator/config.json)). Nothing in it, or in the x402-rs settle code, sets a recipient.
+
+The tests check this on every settle. The receipt's only `Transfer` log goes payer to payTo, and the signer and the proxy hold zero tokens before and after.
+
+## For sellers: point your server at this facilitator
+
+Use the x402 server SDK with an HTTP facilitator client at this facilitator's URL. [`seller/server.ts`](seller/server.ts) is a complete Express example, and [`seller/README.md`](seller/README.md) covers it.
+
+```ts
+const server = new x402ResourceServer(new HTTPFacilitatorClient({ url: "http://localhost:8080" }));
+server.register("eip155:743111", new ExactEvmScheme());
+```
+
+Until Hemi is in the SDK's default assets ([`sdk-patch/`](sdk-patch/)), price with an explicit asset rather than a `"$0.001"` string. Set `extra` per asset:
+
+| Asset | `extra` |
+|------|------|
+| Mainnet USDC.e | `{"assetTransferMethod": "eip3009", "name": "Bridged USDC (Stargate)", "version": "2"}` |
+| hemiBTC, testnet USDC.e, hBTC | `{"assetTransferMethod": "permit2"}` |
+
+The seller SDK checks the facilitator's `/supported` at startup and refuses to serve a network the facilitator does not list.
+
+## For buyers: approving Permit2 (or not)
+
+- **Mainnet USDC.e:** no approval and no ETH. The payment is one EIP-3009 signature, and the facilitator pays the gas.
+- **hemiBTC, testnet USDC.e and hBTC:** once per token, the buyer sends `approve(Permit2, max)`, which needs a little ETH on Hemi. After that every payment is a signature only.
+  - These tokens lack EIP-2612, so the approval can't be a signature (D-011). x402-rs does not implement the ERC-20 approval gas-sponsoring extension (D-001).
+  - With `@x402/evm`, use `getPermit2AllowanceReadParams` to check the allowance and `createPermit2ApprovalTx` to build the approval. [`buyer/pay.ts`](buyer/pay.ts) does both automatically.
+- **Spend controls:** a stock `x402Client` rejects assets it does not recognise. Allow-list the Hemi asset with `setSpendControls({ allowedAssets: [{ network, asset, maxAmountPerPayment }] })` (D-014).
+
+```bash
+npm run pay -w buyer -- --asset usdc --network testnet
+npm run pay -w buyer -- --asset btc  --network testnet
+```
+
+The buyer prints the settlement tx hash and its explorer link. [`buyer/README.md`](buyer/README.md) lists every option.
+
+## Testnet run
+
+Not run yet: the testnet wallets in `.env` are unfunded. Everything else is scripted. With no flag, the script only checks balances and prints what to fund; it sends nothing:
+
+```bash
+scripts/testnet-run.sh
+```
+
+It needs two funded wallets:
+
+- **Facilitator/deployer:** about 0.001 testnet ETH. It deploys the three contracts (about 0.000005 ETH, D-005) and pays settlement gas.
+- **Buyer:** about 0.0001 ETH for its two one-time approvals, at least 0.001 USDC.e and at least 1 sat of hBTC. Testnet USDC.e and hBTC come through the [Hemi tunnel](https://app.hemi.xyz/en/tunnel/?networkType=testnet).
+
+Then run:
+
+```bash
+scripts/testnet-run.sh --go
+```
+
+In order, it:
+
+1. deploys the three contracts on testnet and attempts explorer verification;
+2. starts the facilitator with the testnet config and the seller;
+3. pays once in USDC.e and once in hBTC;
+4. writes the settlement tx hashes, linked on testnet.explorer.hemi.xyz, plus the seller's verify-then-settle log, to `docs/testnet-run.md`.
+
+## Mainnet deployment
+
+The mainnet facilitator needs two contracts that do not exist on Hemi mainnet yet: the x402 exact proxy and the EIP-6492 validator. Permit2 is already there. Deploying them is the only mainnet transaction this project needs. The estimated cost is under 0.00001 ETH in total; see D-005 for the breakdown.
+
+1. Simulate. This sends nothing:
+   ```bash
+   contracts/deploy.sh mainnet
+   ```
+2. Deploy, with a funded mainnet key that is not the testnet key:
+   ```bash
+   CONFIRM_MAINNET_DEPLOY=yes DEPLOYER_PRIVATE_KEY=0x... contracts/deploy.sh mainnet --broadcast
+   ```
+   The script checks each contract's CREATE2 address, deployed codehash, `PERMIT2()` and the Permit2 domain separator.
+3. Verify on the explorer (best effort; [`contracts/README.md`](contracts/README.md) explains what Blockscout can match):
+   ```bash
+   contracts/verify.sh mainnet
+   ```
+4. Set `FACILITATOR_MAINNET_PRIVATE_KEY` in `.env` to a gas-only key with a little ETH, then start both chains:
+   ```bash
+   docker compose up
+   ```
+5. Pay on mainnet. This spends real funds:
+   ```bash
+   ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet
+   ```
+
+**Mainnet transactions run so far: none.** No mainnet tx hash exists yet. This section will carry the deployment and payment hashes once they run.
+
+## Tests
+
+```bash
+npm test -w tests              # end-to-end on local forks, with dead primary RPCs
+(cd contracts && forge test)   # deployment, codehash and settle-path tests on forks
+```
+
+The end-to-end suite starts both forks and the facilitator image from this repo. Both primary RPCs point at a dead port, so every test also exercises RPC failover. Every payload is built with the stock `@x402/evm` client. The suite covers:
+
+- `/supported`
+- verify and settle in all four assets, with exact balance checks
+- bad signatures and insufficient balance under both transfer methods, checked against the spec's error shapes
+- missing Permit2 allowance
+- replay
+- that the facilitator and the proxy never hold tokens
+- that the dead primary really is dead inside the container
+
+Latest results (2026-10-29), against a no-cache build of the image:
+
+| Suite | Result |
+|------|------|
+| `npm test -w tests` | 5 files, 43 tests passed, 0 failed (44 s) |
+| `forge test` | 17 passed, 0 failed |
+| `buyer/demo-fork.sh` | all four payments settled; payTo received exactly the price each time |
+
+## Definition of done
+
+| Item | Status | Evidence |
+|------|------|------|
+| `docker compose up` starts the facilitator; `/supported` lists both networks with `exact` | Met on forks. Live testnet start needs the testnet contracts; mainnet needs the mainnet contracts | `tests/e2e/01-supported.test.ts`, D-013, D-016 |
+| One `/verify` then `/settle` on testnet in USDC.e, tx linked on the explorer | **Open:** waits for testnet funds. On a testnet fork it passes | `scripts/testnet-run.sh`, `tests/e2e/02-settle.test.ts` |
+| One settle on testnet in hemiBTC (hBTC, per D-008) | **Open:** waits for testnet funds. On a testnet fork it passes | as above |
+| Failed signature and insufficient balance return the spec's error shapes, with tests | Met | `tests/e2e/03-bad-signature.test.ts`, `04-insufficient-balance.test.ts`, D-016 |
+| Facilitator never holds funds, shown by reading the proxy and config | Met | [Why the facilitator never holds funds](#why-the-facilitator-never-holds-funds); balance and log checks in `02-settle.test.ts` |
+| RPC failover: tests pass with the primary RPC on a dead port | Met | every e2e test runs that way; `tests/e2e/05-rpc-failover.test.ts`, D-015 |
+| README covers spike, addresses, Permit2 approval, seller setup, mainnet steps and mainnet tx hash | Met; the mainnet hash is "none yet" | this file |
+| DECISIONS.md has an entry, with command and output, for every verify item | Met | D-002 to D-012 |
+
+## Limits and open items
+
+- **Mainnet USDC.e and EIP-3009:** the testnet has no EIP-3009 token, so that path is proven only on a local fork of mainnet until a mainnet payment runs.
+- **Explorer verification:** expected to be a partial match at best for the proxy, because its original build embedded metadata (`contracts/README.md`).
+- **Mainnet explorer:** blocked from the machine that ran the spike. Mainnet token addresses rest on Hemi's token list and on-chain reads (D-002, Q-1).
+- **Phase 2:** paying in Bitcoin L1 and verifying through hBK is not started (D-012).
