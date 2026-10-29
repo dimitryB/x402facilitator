@@ -1,0 +1,12 @@
+{
+  "name": "hemi-x402-facilitator",
+  "private": true,
+  "type": "module",
+  "workspaces": ["shared", "seller", "buyer", "tests"],
+  "engines": { "node": ">=22" },
+  "devDependencies": {
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "@types/node": "22.20.5"
+  }
+}

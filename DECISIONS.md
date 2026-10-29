@@ -303,6 +303,44 @@ $ cast code 0x0000000000000000000000000000000000000044 --rpc-url <either>
 
 On mainnet, hBK returns a current Bitcoin height (973622) and a block hash. The tuple shape used here is a guess from the docs, so only the first two fields are meaningful. On testnet the same call reverts. Precompiles show empty `cast code`, as precompiles always do. This is not investigated further, since phase 2 is out of scope; it is an open question below.
 
+## D-013. Facilitator: stock x402-rs image, Hemi config, fork-based tests
+
+Facilitator image: `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d824bf6a5f342add8ae22eb44a2c56894ad22e7d3f5b83ba38023226b9`. That digest is tag `2.0.2` and also `latest`. Its labels name revision `0b14f39`.
+
+```
+$ git diff --stat 0b14f39 e75adda -- crates/chains/x402-chain-eip155 facilitator crates/x402-types crates/x402-facilitator-local
+(no output: the EVM code is identical to the e75adda tree read for P-1)
+```
+
+The config schema at this version differs from the x402-rs README. Each `schemes` entry is `{"id": "v2-eip155-exact", "chains": "<pattern>"}`, with `id` and a single pattern string, not `{"scheme": …, "chains": [...]}`:
+
+```
+$ docker run … (schemes written as in the README)
+Failed to parse config file: invalid type: sequence, expected a string at line 4 column 56
+```
+
+Choices in `facilitator/config.json`:
+
+- Only `v2-eip155-exact` is enabled; v1 and upto are out of scope. It accepts both EIP-3009 and Permit2 payloads. `/supported` lists `scheme: exact` per network with `extra: {}`, because x402-rs has no field for transfer methods. Which method a payment uses is set per asset by the seller's `extra.assetTransferMethod` (D-001).
+- `eip1559: true`, since Hemi has a base fee (D-005). `receipt_timeout_secs: 120`, because the brief expects stalled RPCs and the default of 30 is tight for Hemi's roughly 12-second blocks.
+- RPCs are dRPC first and the Hemi public RPC second. Both are fanned out, not tried in order (P-2), so the public RPC is throttled to 4 requests per second to stay under ~300 per minute.
+- EIP-2612 gas sponsoring stays off. No MVP asset settles through Permit2 with EIP-2612 (D-001).
+- Keys are separate per chain, `FACILITATOR_TESTNET_PRIVATE_KEY` and `FACILITATOR_MAINNET_PRIVATE_KEY`, so a testnet key never signs on mainnet. `facilitator/config.testnet.json` runs testnet alone until the mainnet contracts exist (D-001).
+
+Local fork verification, before any live transaction: `scripts/fork.sh up` forks both chains with anvil and replays the three deployments from `contracts/deploy-data/`. The fork deployments land at the canonical addresses, and Permit2 is skipped on mainnet because it already exists. The stock image then starts against the forks with both primary RPCs pointed at a dead port:
+
+```
+$ HEMI_TESTNET_RPC_PRIMARY=http://127.0.0.1:1 HEMI_TESTNET_RPC_FALLBACK=http://host.docker.internal:18545 \
+  HEMI_MAINNET_RPC_PRIMARY=http://127.0.0.1:1 HEMI_MAINNET_RPC_FALLBACK=http://host.docker.internal:18546 … docker compose up -d
+$ curl -sS localhost:18080/supported | jq -c '.kinds[] | {network,scheme}'
+{"network":"eip155:43111","scheme":"exact"}
+{"network":"eip155:743111","scheme":"exact"}
+```
+
+Fork funding writes balances into each token's `balanceOf` mapping. The slots were found by probing: 0 for testnet USDC.e, hBTC and mainnet hemiBTC, and 9 for mainnet USDC.e (FiatToken's `balanceAndBlacklistStates`). `anvil_dealERC20` could not locate these slots.
+
+Workstation setup recorded for reproducibility: Foundry 1.8.6, plus Colima, the Docker CLI and Compose, all from Homebrew. Colima shares only `$HOME` with containers, so files mounted into containers must live under the repo, not `/tmp`. The project `.npmrc` pins the public npm registry, because the user-level npm config points at a private registry.
+
 ### Open questions
 
 - Q-1. Cross-check the mainnet token addresses on `explorer.hemi.xyz` from a network that isn't blocked (D-002). They currently rest on Hemi's token list and on-chain `name`/`symbol` reads.
