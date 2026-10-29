@@ -64,8 +64,8 @@ const resourceServer = new x402ResourceServer(new HTTPFacilitatorClient({ url: f
       console.warn(`[seller] verify rejected (${requirements.network} ${requirements.asset}): ${result.invalidReason} ${result.invalidMessage ?? ""}`);
     }
   })
-  // This facilitator answers a rejected /verify with HTTP 400, which the SDK raises as a
-  // VerifyError; it reaches onVerifyFailure, not onAfterVerify (README "For sellers").
+  // A rejection answered with 200 (this facilitator, the TS reference) reaches onAfterVerify above.
+  // A facilitator that answers non-2xx, or one that cannot be reached, lands here instead.
   .onVerifyFailure(async ({ error, requirements }) => {
     console.warn(`[seller] verify rejected (${requirements.network} ${requirements.asset}): ${error.message}`);
   })

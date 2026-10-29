@@ -1,7 +1,7 @@
 From 279d710278774ee7113dfcb4c02d7f39b111307e Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 22:51:21 -0400
-Subject: [PATCH 03/15] eip155: check the payer's signature first, and reject
+Subject: [PATCH 03/18] eip155: check the payer's signature first, and reject
  one an EOA cannot have made
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

@@ -10,7 +10,7 @@
  * Stock x402-rs answered with "payer": "" and "network": "", and settled Permit2 without re-checking the
  * balance (HTTP 500 "unexpected_error"); facilitator/x402-rs/patches 0002 and 0004 fix that.
  *
- * Permit2 checks allowance (Phase 3 step 2, 412 PERMIT2_ALLOWANCE_REQUIRED) before balance (step 3), so
+ * Permit2 checks allowance (Phase 3 step 2, PERMIT2_ALLOWANCE_REQUIRED) before balance (step 3), so
  * the insufficient-balance account first approves Permit2, as a real buyer would. The no-allowance
  * cases are covered separately below.
  */
@@ -25,6 +25,7 @@ import { snapshot, type Snapshot } from "../lib/snapshot";
 import {
   SPEC_INSUFFICIENT_FUNDS,
   SPEC_PERMIT2_ALLOWANCE_REQUIRED,
+  STATUS_VERDICT,
   settleFailureViolations,
   verifyFailureViolations,
 } from "../lib/spec";
@@ -74,7 +75,7 @@ for (const m of METHODS) for (const b of BALANCES) {
       record(`verify insufficient balance (${b.label}): ${m.method}`, res);
       expect(verifyFailureViolations(res.body, { reason: SPEC_INSUFFICIENT_FUNDS, payer: poor.address })).toEqual([]);
       expect(res.body.payer).toBe(poor.address);
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(STATUS_VERDICT);
     });
 
     it(`/settle answers success false, "${SPEC_INSUFFICIENT_FUNDS}", in the spec's §7.2 shape; nothing moves`, async () => {
@@ -89,7 +90,7 @@ for (const m of METHODS) for (const b of BALANCES) {
         }),
       ).toEqual([]);
       expect(res.body.payer).toBe(poor.address);
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(STATUS_VERDICT);
       expect(await snapshot(m.network, m.asset, poor.address, payTo)).toEqual(before);
     });
   });
@@ -99,6 +100,11 @@ for (const m of METHODS) for (const b of BALANCES) {
  * scheme_exact_evm.md Permit2 Phase 3 step 2: "Return 412 Precondition Failed (Error Code:
  * PERMIT2_ALLOWANCE_REQUIRED)", checked before the balance (step 3). The spec writes the code in capitals;
  * the TS reference SDK and x402-rs both send "permit2_allowance_required", so the comparison ignores case.
+ *
+ * The 412 is the resource server's answer to the buyer. The TS reference facilitator reports the code as
+ * an ordinary verify answer (200), and the TS resource server turns it into 412 only when it reads the bare
+ * code (x402HTTPResourceServer.ts 1351–1353), which it does from a 2xx answer only. Stock x402-rs, and this
+ * facilitator up to hemi.6, answered 412 itself; the seller then answered 402. See 04c-stock-seller.test.ts.
  */
 describe("Permit2 without an allowance", () => {
   const network = TESTNET;
@@ -106,12 +112,12 @@ describe("Permit2 without an allowance", () => {
   const amount = 1_000n;
 
   function expectAllowanceRequired(res: HttpResult, payer: string, field: "invalidReason" | "errorReason") {
-    expect(res.status).toBe(412);
+    expect(res.status).toBe(STATUS_VERDICT);
     expect(String(res.body[field]).toUpperCase()).toBe(SPEC_PERMIT2_ALLOWANCE_REQUIRED);
     expect(res.body.payer).toBe(payer);
   }
 
-  it(`funded but never approved: /verify and /settle answer 412 ${SPEC_PERMIT2_ALLOWANCE_REQUIRED}`, async () => {
+  it(`funded but never approved: /verify and /settle answer ${SPEC_PERMIT2_ALLOWANCE_REQUIRED}`, async () => {
     const buyer = freshAccount();
     await fundToken(network, asset, buyer.address, 1_000_000n);
     const payTo = freshAddress();
@@ -131,9 +137,9 @@ describe("Permit2 without an allowance", () => {
     expect(await snapshot(network, asset, buyer.address, payTo)).toEqual(before);
   });
 
-  it(`neither allowance nor balance: always 412 ${SPEC_PERMIT2_ALLOWANCE_REQUIRED}, the allowance being checked first`, async () => {
-    // Stock x402-rs raced the two reads (tokio::try_join!) and answered 400 insufficient_funds or
-    // 412 permit2_allowance_required at random for the same payload; patch 0004 fixes the order.
+  it(`neither allowance nor balance: always ${SPEC_PERMIT2_ALLOWANCE_REQUIRED}, the allowance being checked first`, async () => {
+    // Stock x402-rs raced the two reads (tokio::try_join!) and answered insufficient_funds or
+    // permit2_allowance_required at random for the same payload; patch 0004 fixes the order.
     const buyer = freshAccount();
     const requirements = requirementsFor(network, asset, freshAddress(), amount);
     const payment = await signPayment(buyer, requirements);

@@ -10,7 +10,7 @@ import { MAINNET, TESTNET, usdcAsset } from "@hemi-x402/shared";
 import { BUYER_KEY, FACILITATOR_SIGNER } from "../lib/env";
 import { record, settle, supported, verify } from "../lib/facilitator";
 import { freshAddress, requirementsFor, signPayment } from "../lib/payments";
-import { SPEC_INVALID_NETWORK, settleFailureViolations, verifyFailureViolations } from "../lib/spec";
+import { SPEC_INVALID_NETWORK, STATUS_VERDICT, settleFailureViolations, verifyFailureViolations } from "../lib/spec";
 
 describe("GET /supported", () => {
   it("lists exact/x402Version 2 on both Hemi networks, with a signer per network", async () => {
@@ -48,13 +48,13 @@ describe("a network the facilitator does not support", () => {
     const v = await verify(payment, requirements);
     record("verify unsupported network", v);
     expect(verifyFailureViolations(v.body, { reason: SPEC_INVALID_NETWORK })).toEqual([]);
-    expect(v.status).toBe(400);
+    expect(v.status).toBe(STATUS_VERDICT);
 
     const s = await settle(payment, requirements);
     record("settle unsupported network", s);
     expect(
       settleFailureViolations(s.body, { reasons: [SPEC_INVALID_NETWORK], network: "eip155:1", broadcast: false }),
     ).toEqual([]);
-    expect(s.status).toBe(400);
+    expect(s.status).toBe(STATUS_VERDICT);
   });
 });

@@ -16,14 +16,14 @@ how a payment is settled. What they change:
 - transaction handling in three places: after a broadcast transaction's receipt times out, the signer's
   nonce is kept instead of reset (0006); each payment authorization is settled at most once at a time,
   with a retry of a pending settle answered from its transaction rather than sending another (0011); and
-  a settlement runs to its end even if the client disconnects, with every broadcast hash logged (0015);
+  a settlement runs to its end even if the client disconnects, with every broadcast hash logged (0015),
+  and a success nobody received is kept for the client's retry (0016);
 - what is sent at all: an EIP-6492 wallet deployment through Multicall3 is only sent after the EIP-6492
   validator accepted the signature, and a wrapper around the payer's own signature is never sent (0012).
 
-HTTP status codes follow x402-rs's existing mapping: 400 for a rejected payment, 412 for a missing Permit2
-allowance, 500 for an unexpected failure (an RPC that cannot be reached). Additions: `settlement_pending` is
-answered with 200 (0006); a mined settlement that reverted gets 400 `invalid_transaction_state` with its
-hash (0011); a body that is not JSON keeps axum's status (400) but gets a JSON `invalid_payload` body (0009).
+- the HTTP status codes: a rejected payment is answered with 200, as the TS reference facilitator does,
+  400 is kept for a request that cannot be read, and 500 for an unexpected failure (0018; see
+  [HTTP status codes](#http-status-codes)).
 
 Spec references are to `x402-foundation/x402` at `e4a0868`:
 
@@ -48,6 +48,9 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0013](patches/0013-facilitator-local-report-a-missing-or-unserved-x402-.patch) | a missing or unserved `x402Version` is reported as `invalid_network` | §9 `invalid_x402_version` |
 | [0014](patches/0014-eip155-report-a-Permit2-spender-other-than-the-exact.patch) | a Permit2 spender other than the exact proxy is reported as a recipient mismatch (or an invalid signature) | §9 `invalid_payload` |
 | [0015](patches/0015-facilitator-local-finish-a-settlement-whose-client-d.patch) | a client that disconnects after the broadcast cancels the settlement: the transaction is still mined, but its record and hash are lost | §5.3.2, §9 `settlement_pending` |
+| [0016](patches/0016-eip155-keep-a-success-whose-caller-left-for-that-cal.patch) | a settlement that succeeds after its client left discards the success: the retry gets a replay error, and the buyer is charged and not served | §5.3.2, §9 `invalid_transaction_state` |
+| [0017](patches/0017-facilitator-local-report-an-x402Version-the-payload-.patch) | a top-level `x402Version` that `paymentPayload.x402Version` contradicts is reported as `invalid_payload` | §9 `invalid_x402_version` |
+| [0018](patches/0018-facilitator-local-answer-a-rejected-payment-with-200.patch) | a rejected payment is answered with 400 (412 for a missing allowance), so a stock TS seller throws and reports `"<code>: <message>"`, and never answers 412 | TS reference facilitator; scheme_exact_evm.md Permit2 step 2 |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -66,7 +69,7 @@ validAfter, token/network, simulation (Phase 3). The patched facilitator, on bot
 | 1 | `accepted` equals the requirements; network | spender is the x402 exact proxy (`invalid_payload`) |
 | 2 | **signature** | **signature** |
 | 2b | | `accepted` equals the requirements; recipient; deadline and validAfter; exact amount; token |
-| 3 | recipient; validity window; exact amount | **allowance** (412 `permit2_allowance_required`) |
+| 3 | recipient; validity window; exact amount | **allowance** (`permit2_allowance_required`) |
 | 4 | **balance** (`insufficient_funds`) | **balance** (`insufficient_funds`) |
 | 5 | simulation (verify) or send (settle) | simulation (verify) or send (settle) |
 
@@ -139,7 +142,7 @@ unapproved gets the off-chain code:
 - *Allowance before balance.* When both are missing, the reference's failure diagnosis reads the balance
   first (`shared/permit2.ts` 410–415, before the allowance at 417–422) and answers
   `permit2_insufficient_balance`. Here the allowance
-  comes first (412 `permit2_allowance_required`), as the spec orders steps 2 and 3. That was an explicit
+  comes first (`permit2_allowance_required`), as the spec orders steps 2 and 3. That was an explicit
   decision for 0004.
 
 ## Error codes after the patches
@@ -156,25 +159,76 @@ exact handler, where §9 has a scheme-specific code.
 | `InvalidPaymentAmount` (now any difference) | `invalid_exact_evm_payload_authorization_value_mismatch` | §9: "does not exactly match the required amount" (exact EVM) |
 | `RecipientMismatch` | `invalid_exact_evm_payload_recipient_mismatch` | §9: "Recipient address does not match payment requirements" (exact EVM) |
 | `InsufficientFunds` | `insufficient_funds` | unchanged |
-| `InsufficientAllowance` | `permit2_allowance_required` (412) | scheme_exact_evm.md Permit2 step 2; same spelling as the TS reference |
+| `InsufficientAllowance` | `permit2_allowance_required` | scheme_exact_evm.md Permit2 step 2; same spelling as the TS reference. The spec's 412 is the resource server's answer to the buyer (see [HTTP status codes](#http-status-codes)) |
 | `AuthorizationAlreadyUsed` | `invalid_transaction_state` | the chain rejects the transfer because the nonce is spent (0005) |
 | `AuthorizationInFlight`: `/verify` (or another settle request) of an authorization whose settle is running or pending | `invalid_transaction_state` | the authorization is committed to a transaction and can't pay for anything else (0011; see below) |
 | `TransactionSimulation`, other simulation reverts | `invalid_transaction_state` | §9: "Blockchain transaction failed or was rejected": the transfer fails on chain (generic) |
 | a mined settlement that reverted | `invalid_transaction_state`, with its hash | same, and §5.3.2: a broadcast transaction is reported (0011) |
 | `AssetMismatch` | `invalid_payload` | the payload authorizes another token than the requirements ask for: "contains invalid data" (generic) |
-| Permit2 spender other than the x402 exact proxy | `invalid_payload` | the spender never receives funds, so it is not a recipient mismatch; the payload is unusable (0014) |
+| `InvalidPermit2Spender`: a Permit2 spender other than the x402 exact proxy | `invalid_payload` | the spender never receives funds, so it is not a recipient mismatch; the payload is unusable (0014, 0018) |
 | `InvalidFormat`, a body that is not JSON, a v2 request naming no network | `invalid_payload` | §9: "malformed or contains invalid data" (generic) |
 | `AcceptedRequirementsMismatch` | `invalid_payment_requirements` | the requirements sent are not the ones the payload accepted; §9: "requirements object is invalid" (generic) |
 | `ChainIdMismatch`, `UnsupportedChain` | `invalid_network` | §9: "network is not supported" (generic) |
 | `UnsupportedScheme` | `unsupported_scheme` | unchanged |
-| `UnsupportedX402Version`: no top-level `x402Version`, or one no handler serves (here: anything but 2) | `invalid_x402_version` | §9: "Protocol version is not supported" (0013) |
-| receipt not confirmed in time | `settlement_pending` (200, with the hash) | §9 (0006, 0011) |
-| an RPC that cannot be reached | `unexpected_verify_error` / `unexpected_settle_error` (500) | §9; the only case left as "unexpected" |
+| `UnsupportedX402Version`: an `x402Version` no handler serves (here: anything but 2) | `invalid_x402_version` | §9: "Protocol version is not supported" (0013) |
+| `InvalidX402Version`: no top-level `x402Version`, or one that `paymentPayload.x402Version` contradicts | `invalid_x402_version` | same; the request disagrees with itself about its version, which is not a malformed payload (0013, 0017) |
+| receipt not confirmed in time | `settlement_pending`, with the hash | §9 (0006, 0011) |
+| an RPC that cannot be reached | `unexpected_verify_error` / `unexpected_settle_error` | §9; the only case left as "unexpected" |
+
+## HTTP status codes
+
+Patch 0018 answers as the x402 TS reference facilitator does. References are to `x402-foundation/x402` at
+`e4a0868`; `index.ts` is `examples/typescript/facilitator/basic/index.ts`.
+
+| Answer | Status | The reference |
+|------|------|------|
+| a valid payment; a settled one | 200 | `index.ts` 208 (`/verify`) and 290 (`/settle`): `res.json(response)` |
+| a verdict on a payment that could be read: `isValid: false` or `success: false` with any §9 code, including `permit2_allowance_required`, `invalid_network`, `unsupported_scheme`, an unserved `x402Version`, `settlement_pending` and a reverted settlement | 200 | the same lines send whatever `verify` or `settle` returns, valid or not. The EVM scheme returns a missing allowance as `isValid: false` (`mechanisms/evm/src/shared/permit2.ts` 129, 156). An unsupported scheme, network or version is answered with `res.json` too (`index.ts` 182, 261) |
+| a request that cannot be read: `invalid_payload` for a body that is not JSON, a payload that does not parse or a request that names no network; `invalid_x402_version` for a version that cannot be read (no top-level `x402Version`, or one `paymentPayload.x402Version` contradicts) | 400 (axum's own status for a body that is not JSON) | `index.ts` 157, 168, 194 and 236, 247, 275: 400 for a body without `paymentPayload` or `paymentRequirements`, a payload that is not an object, or an exact EVM payload with neither `authorization` nor `permit2Authorization` |
+| an unexpected failure (an RPC that cannot be reached) | 500 | `index.ts` 211, 307: 500 when `verify` or `settle` throws |
+
+Up to hemi.6 the image used x402-rs's mapping: 400 for every rejected payment, 412 for a missing Permit2
+allowance, 400 for a mined revert, 200 only for `settlement_pending` (0006).
+
+**Why it matters to a stock TS seller** (`typescript/packages/core/src`):
+
+- `http/httpFacilitatorClient.ts` 423–435 (`verify`) and 481–493 (`settle`): a non-2xx answer whose body
+  has `isValid` or `success` becomes a thrown `VerifyError` or `SettleError`. `types/facilitator.ts` 71
+  and 100 make its message `"<code>: <message>"`.
+- `http/x402HTTPResourceServer.ts` 692–696: a returned `isValid: false` puts the bare code into the
+  seller's 402 (`error`, in the body and in the `PAYMENT-REQUIRED` header). 762–769: a thrown error puts
+  its message there instead, so the buyer read `"invalid_exact_evm_payload_signature: Signature was not
+  made by …"`.
+- `x402HTTPResourceServer.ts` 1353: the seller answers 412 instead of 402 only when that error is exactly
+  `permit2_allowance_required`. That is the 412 of `scheme_exact_evm.md` Permit2 step 2 ("Return 412
+  Precondition Failed"): the resource server's answer to the client, not the facilitator's. With the
+  facilitator answering 412 itself, the buyer got 402.
+- Settle failures were less affected: the seller takes `SettleError.errorReason` (894–895), the bare
+  code. The 200 there is for consistency with the reference.
+
+**One difference from the reference.** It reports an unsupported scheme, network or version as
+`unsupported_scheme` (`index.ts` 182, 261), and reads only `paymentPayload.x402Version`. This facilitator
+uses the §9 codes `unsupported_scheme`, `invalid_network` and `invalid_x402_version`, with the same 200,
+and answers 400 when the request has no top-level `x402Version` or contradicts itself (0017).
+
+**x402-rs's own client still reads every answer.** `x402-axum`'s `FacilitatorClient::post_json`
+(`crates/x402-axum/src/facilitator_client.rs` 398–400) deserializes the body of a 200, 400 or 412 alike.
+`paygate.rs` then decides by the fields: `validate_verify_response` (378–394) by `isValid`, answering the
+buyer 412 for `permit2_allowance_required` read from the body, and `validate_settlement_success` by
+`success`. A unit test (`a_rejection_reads_as_one_for_the_x402_axum_client`) parses a 200 rejection the way
+x402-axum does. 4xx answers that x402-axum would not read (415, 422 from axum for a body that is not JSON)
+are unchanged.
+
+e2e: `04c-stock-seller.test.ts` runs the SDK's `x402HTTPResourceServer` with the stock
+`HTTPFacilitatorClient` against this facilitator. A tampered signature gives the buyer 402 with
+`"error": "invalid_exact_evm_payload_signature"`, and `verifyPayment` returns it rather than throwing. A
+payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an allowance gets 412
+`permit2_allowance_required`.
 
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.6` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.7` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -190,7 +244,7 @@ silicon), with the base images already pulled:
   patches.
 - `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
   113 s for hemi.3; 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches); 113 s for hemi.5
-  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s).
+  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s).
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -213,7 +267,7 @@ cargo test -p x402-types -p x402-facilitator-local -p x402-chain-eip155 \
 ```
 
 Every patch was checked one by one: `cargo fmt --check`, `cargo clippy --tests -D warnings`, and the
-tests, with 38 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
+tests, with 41 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
 the built image on anvil forks.
 
 ## The one non-spec field: `invalidReasonDetails`
@@ -228,7 +282,9 @@ checks that it equals `invalidMessage`. Dropping it would be a one-line change i
 
 The "before" and "after" bodies come from the end-to-end suite: the stock image, then this image, on the
 same forks. Long revert data is cut to `0x08c379a0…`. Keys are reordered here for reading; the patched
-facilitator emits them in alphabetical order.
+facilitator emits them in alphabetical order. The HTTP status in an "After" line is the one that patch
+gave. Since 0018 every rejection of a readable payment is answered with 200 (see
+[HTTP status codes](#http-status-codes)).
 
 ### 0001 types: add x402 v2 §9 error codes to `ErrorReason`
 
@@ -680,9 +736,9 @@ Under-payment gets the same code.
 What the e2e suite checks (`06-settlement-pending.test.ts`, automine off, 5 s receipt timeout):
 
 1. `/verify` P → valid. `/settle` P → `settlement_pending` H (200).
-2. `/verify` P → 400 `invalid_transaction_state`, naming H. A retry → `settlement_pending` H at once, and
+2. `/verify` P → `invalid_transaction_state`, naming H. A retry → `settlement_pending` H at once, and
    no new transaction is sent.
-3. One block is mined. A retry → `{"success":true,"transaction":H,…}`. The next settle → 400
+3. One block is mined. A retry → `{"success":true,"transaction":H,…}`. The next settle →
    `invalid_transaction_state`, and so does `/verify`.
 4. `payTo` was paid exactly once.
 5. Two concurrent retries after mining give exactly one success.
@@ -787,7 +843,8 @@ After (HTTP 400): `{"isValid":false,"invalidReason":"invalid_x402_version","inva
   (`permit2.ts` 119–128), with its own code `invalid_permit2_spender`. §9 has no spender code, so this
   facilitator uses `invalid_payload`.
 
-e2e: a permit re-signed with a random spender gets 400 `invalid_payload` from `/verify` and `/settle`.
+e2e: a permit re-signed with a random spender gets `invalid_payload` from `/verify` and `/settle` (400 in
+this patch; a verdict, 200, since 0018).
 
 <details><summary>Upstream issue / PR draft</summary>
 
@@ -824,7 +881,8 @@ e2e: a permit re-signed with a random spender gets 400 `invalid_payload` from `/
 - **Limits.**
   - Between the hang-up and the end of the receipt wait the settlement is still running. `/verify` and an
     identical `/settle` both get `invalid_transaction_state` ("A settlement of this payment authorization
-    is in progress"), without the hash. From the end of the wait, 0011's rules apply. The hash is not
+    is in progress"), without the hash. Once the wait ends, 0011's rules apply, and 0016 keeps a success
+    that arrives during the wait. The hash is not
     written to the record at the moment of broadcast: that needs a hook in the provider, and the record
     would then have to stop a retry from claiming the success while the original request is still waiting
     for the same receipt.
@@ -860,7 +918,7 @@ The e2e test (`06-settlement-pending.test.ts`, automine off, 5 s receipt timeout
 
 1. `/settle` P; the test aborts the request once the facilitator's transaction H is in the fork's mempool,
    well before the receipt timeout.
-2. `/verify` P → 400 `invalid_transaction_state` throughout, naming H once the receipt wait has ended.
+2. `/verify` P → `invalid_transaction_state` throughout, naming H once the receipt wait has ended.
 3. An identical `/settle` → `settlement_pending` H at once; the signer's pending nonce shows nothing new
    was sent.
 4. One block is mined. A retry → `{"success":true,"transaction":H,…}`; the next settle is a replay.
@@ -876,6 +934,126 @@ Against patches 0001–0014 the test fails at step 2: `/verify` answers `isValid
 > `post_settle` awaits the settlement inside the request future. When the client disconnects (or a proxy timeout fires) while the settlement waits for its receipt, hyper drops the future and the settlement with it. The transaction is already broadcast and still pays out, but its hash is never returned or logged, so neither the client nor the operator can reconcile the payment, and any per-request state the settlement keeps is lost with it.
 >
 > This PR runs the settlement on its own task (instrumented with the request span) and awaits the `JoinHandle`, so a disconnect detaches the settlement instead of cancelling it; a panic in it is answered with 500 `unexpected_settle_error`. `Eip155ChainProvider::send_transaction` logs each broadcast hash at info level before waiting for the receipt, and a warning with the hash when the receipt is unavailable. `post_settle` now requires the state to be `Clone + Send + Sync + 'static`, as `routes()` already did. Unit test: a handler aborted in the middle of a settlement; the settlement still completes.
+</details>
+
+### 0016 eip155: keep a success whose caller left for that caller's retry
+
+- **The bug** (critic, hemi.6, fork with automine off and a 60 s receipt timeout). The client hangs up
+  1.6 s after the broadcast. A retry during the receipt wait gets "in progress". A block is mined and
+  `payTo` is paid. The settlement, still running since 0015, sees the receipt and ends in success, with
+  nobody to receive it, and its drop guard removes the record. The next identical retry, and `/verify`,
+  get `invalid_transaction_state` ("Payment authorization was already used on chain") with
+  `"transaction": ""`. The buyer is charged and not served, and the hash is only in the log.
+- **The fix.**
+  - `x402-types`: `SettleCaller` tells a settlement whether its caller is still waiting.
+    `Facilitator::settle_for` and `X402SchemeFacilitator::settle_for` take one. Their defaults ignore it
+    and call `settle`, so other implementations (v1, other chains, other facilitators) are unaffected.
+  - `facilitator-local`: `post_settle` passes a `SettleCaller` that turns false when the handler's future
+    is dropped, i.e. when the client disconnects (a guard sets an `AtomicBool` on drop).
+  - v2 exact EVM: a settlement that succeeds after its caller left keeps its record, naming the
+    transaction, exactly as a `settlement_pending` one does (0011). The first identical retry claims the
+    success through the same atomic `claim`; later settles and `/verify` are replays. Any other request
+    carrying the authorization still gets `invalid_transaction_state`, now naming the transaction. A retry
+    whose own caller has left does not claim it either. The record still expires after 15 minutes. It logs
+    `Settlement succeeded after its caller left; kept for a retry of the same request tx=<hash>`.
+- **Limits.**
+  - A client that disconnects in the instant between the settlement's check and the response being
+    written still loses that success.
+  - A retry during the receipt wait is still answered "in progress" (0015, Limits).
+
+Before (hemi.6, HTTP 400), the identical retry after the block was mined:
+
+```json
+{"success":false,"errorReason":"invalid_transaction_state","errorMessage":"Payment authorization was already used on chain","transaction":"","network":"eip155:43111","payer":"0x90F79bf6EB2c4f870365E785982E1f101E93b906"}
+```
+
+After, and the facilitator's log for H (spans shortened; the client hung up right after the first line):
+
+```json
+{"success":true,"transaction":"0x31e0981902bdd7da5c8a76156372a3c220ea39f15cab5a9c2b703ddf7357dea2","network":"eip155:43111","payer":"0x90F79bf6EB2c4f870365E785982E1f101E93b906"}
+```
+
+```text
+07:26:52.884  INFO …: x402_chain_eip155::chain::provider: Transaction broadcast tx=0x31e0981902bdd7da5c8a76156372a3c220ea39f15cab5a9c2b703ddf7357dea2 from=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC to=0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA
+07:26:53.652  INFO …: x402_chain_eip155::v2_eip155_exact::facilitator: Settlement succeeded after its caller left; kept for a retry of the same request tx=0x31e0981902bdd7da5c8a76156372a3c220ea39f15cab5a9c2b703ddf7357dea2
+```
+
+The e2e test (`06-settlement-pending.test.ts`, second block) runs against the container as
+`facilitator/config.json` configures it. Its receipt timeout (60 s) leaves the settlement time to see the
+block before the wait ends.
+
+1. `/settle` P; the test aborts the request once H is in the fork's mempool.
+2. An identical `/settle` during the receipt wait → `invalid_transaction_state`, in progress.
+3. One block is mined; `payTo` is paid.
+4. `/verify` P is refused throughout, and names H once the settlement has seen the receipt, before the
+   receipt timeout.
+5. Another request with the same authorization (different `maxTimeoutSeconds`) →
+   `invalid_transaction_state` naming H, without taking the success.
+6. The identical retry → `{"success":true,"transaction":H,…}`. The next settle is a replay, and so is
+   `/verify`.
+7. `payTo` was paid once; the signer sent one transaction; the log has the broadcast line and the kept
+   success for H, and no receipt warning.
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** Let a settlement know its caller left, so that a handler can keep an undelivered success
+>
+> With the settlement running on its own task (previous PR), a settlement that completes after the client disconnected has nobody to report to. This PR adds `SettleCaller`, which tells a settlement whether its caller is still waiting, and `settle_for(request, caller)` on `Facilitator` and `X402SchemeFacilitator`, defaulting to `settle`. The HTTP handler passes one that turns false when its future is dropped. It is a building block: a scheme that remembers per-payment state, such as a pending-settlement store, can keep a success nobody received and answer the client's retry with it.
+</details>
+
+### 0017 facilitator-local: report an `x402Version` the payload contradicts as `invalid_x402_version`
+
+- **The bug.** A request with top-level `x402Version` 2 and `paymentPayload.x402Version` 1 was routed by
+  the top-level version to the v2 handler, which could not read the payload and answered
+  `invalid_payload`. The payload is not malformed: the request disagrees with itself about its protocol
+  version, which §9 reports as `invalid_x402_version` ("Protocol version is not supported").
+- **The fix.** `VerifyRequest::payment_payload_x402_version` reads `paymentPayload.x402Version`.
+  `PaymentVerificationError::InvalidX402Version(details)` is a version that cannot be read: no top-level
+  `x402Version`, or one the payload contradicts. `FacilitatorLocal` checks it before routing, on
+  `/verify` and `/settle`. `UnsupportedX402Version` keeps the case of a consistent version no handler
+  serves. Both are reported as `invalid_x402_version`. 0018 answers the first with 400 and the second with
+  200.
+
+Before (hemi.6, HTTP 400): `{"isValid":false,"invalidReason":"invalid_payload",…}`. After (HTTP 400):
+
+```json
+{"isValid":false,"invalidReason":"invalid_x402_version","invalidMessage":"The request's x402Version is 2, but paymentPayload.x402Version is 1","invalidReasonDetails":"The request's x402Version is 2, but paymentPayload.x402Version is 1"}
+```
+
+e2e (`04b-payload-checks.test.ts`): top-level 2 with payload 1, top-level 1 with payload 2, no top-level
+version, and `{}` all get `invalid_x402_version` with 400. Version 1 throughout gets
+`invalid_x402_version` with 200.
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** A request whose `x402Version` contradicts `paymentPayload.x402Version` is reported as `invalid_payload`
+>
+> Routing uses the top-level `x402Version`, so `{"x402Version": 2, "paymentPayload": {"x402Version": 1, …}}` reaches the v2 handler, which fails to deserialize the payload and answers `invalid_payload`. This PR checks, before routing, that the top-level version exists and that the payload does not contradict it, and reports a failure as x402 v2 §9 `invalid_x402_version` with a message naming both versions (`PaymentVerificationError::InvalidX402Version`). Unit test included.
+</details>
+
+### 0018 facilitator-local: answer a rejected payment with 200, as the TS reference facilitator does
+
+See [HTTP status codes](#http-status-codes) for the decision and the references. In short:
+
+- 200 for every verdict on a payment that could be read, including `permit2_allowance_required` (was
+  412), `invalid_network`, `unsupported_scheme`, an unserved version, a mined revert (was 400) and
+  `settlement_pending` (already 200).
+- 400 for a request that cannot be read: `InvalidFormat` (`invalid_payload`) and `InvalidX402Version`.
+  A body that is not JSON keeps axum's status.
+- 500 for `OnchainFailure` (`unexpected_*_error`).
+- `PaymentVerificationError::InvalidPermit2Spender` takes over 0014's spender check from `InvalidFormat`.
+  It is still `invalid_payload`, but a verdict on a readable payload, so 200.
+
+Unit tests cover the status of every case and parse a 200 rejection the way `x402-axum` does.
+
+e2e: every rejection test now expects 200 (`tests/lib/spec.ts` `STATUS_VERDICT`), and unreadable requests
+400 (`STATUS_UNREADABLE`). `04c-stock-seller.test.ts` checks what a stock TS seller makes of it.
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** Answer rejected payments with 200 like the TS reference facilitator; a 400 makes a stock TS seller report "<code>: <message>"
+>
+> x402-rs answers a rejected `/verify` or `/settle` with 400, and a missing Permit2 allowance with 412. The TS reference facilitator (`examples/typescript/facilitator/basic/index.ts`) sends whatever `verify`/`settle` returns with `res.json` (200), and 400 only for a body it cannot read. The TS `HTTPFacilitatorClient` turns any non-2xx answer into a `VerifyError`/`SettleError` whose message is `"<code>: <message>"`, which `x402HTTPResourceServer` then puts into its 402 instead of the bare x402 v2 §9 code; and since it only answers 412 when that error is exactly `permit2_allowance_required`, a missing allowance reaches the buyer as 402. This PR answers every verdict on a readable payment with 200, keeps 400 for `InvalidFormat` and an unreadable `x402Version`, and 500 for `OnchainFailure`. A Permit2 spender mismatch gets its own variant (`InvalidPermit2Spender`, still `invalid_payload`) so that it is a verdict. `x402-axum` reads the bodies of 200, 400 and 412 alike, so it is unaffected; a unit test parses a 200 rejection as it does.
 </details>
 
 ## What these patches do not change

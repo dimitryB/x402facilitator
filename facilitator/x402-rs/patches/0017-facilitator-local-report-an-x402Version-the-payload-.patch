@@ -1,0 +1,176 @@
+From fdffded1f4150c18148f453594c82f21e0d554e2 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 03:17:47 -0400
+Subject: [PATCH 17/18] facilitator-local: report an x402Version the payload
+ contradicts as invalid_x402_version
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A request whose top-level x402Version was 2 but whose paymentPayload said
+x402Version 1 was routed by the top-level version to the v2 handler, which
+then failed to read the payload and answered invalid_payload. The payload is
+not malformed: the request disagrees with itself about the protocol version,
+which x402 v2 §9 reports as invalid_x402_version ("Protocol version is not
+supported").
+
+- VerifyRequest::payment_payload_x402_version reads paymentPayload.x402Version.
+- PaymentVerificationError::InvalidX402Version(details) is a version that
+  cannot be read: no top-level x402Version, or one paymentPayload.x402Version
+  contradicts. FacilitatorLocal checks it before routing, for /verify and
+  /settle. UnsupportedX402Version keeps the case of a version no handler
+  serves. Both are reported as invalid_x402_version.
+---
+ .../src/facilitator_local.rs                  | 52 +++++++++++++++++--
+ crates/x402-types/src/proto/mod.rs            | 18 ++++++-
+ 2 files changed, 65 insertions(+), 5 deletions(-)
+
+diff --git a/crates/x402-facilitator-local/src/facilitator_local.rs b/crates/x402-facilitator-local/src/facilitator_local.rs
+index 30bacde..6bd8e1d 100644
+--- a/crates/x402-facilitator-local/src/facilitator_local.rs
++++ b/crates/x402-facilitator-local/src/facilitator_local.rs
+@@ -93,6 +93,9 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
+         request: &proto::VerifyRequest,
+     ) -> Result<proto::VerifyResponse, Self::Error> {
+         let context = ErrorContext::from_request(request);
++        if let Some(error) = x402_version_error(request) {
++            return Err(FacilitatorLocalError::Verification(error.into(), context));
++        }
+         let handler = request
+             .scheme_handler_slug()
+             .and_then(|slug| self.handlers.by_slug(&slug))
+@@ -121,6 +124,9 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
+         caller: SettleCaller,
+     ) -> Result<proto::SettleResponse, Self::Error> {
+         let context = ErrorContext::from_request(request);
++        if let Some(error) = x402_version_error(request) {
++            return Err(FacilitatorLocalError::Settlement(error.into(), context));
++        }
+         let handler = request
+             .scheme_handler_slug()
+             .and_then(|slug| self.handlers.by_slug(&slug))
+@@ -158,7 +164,26 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
+     }
+ }
+ 
+-/// Why no handler serves `request`: a missing or unserved `x402Version` is `invalid_x402_version`;
++/// Why the protocol version of `request` cannot be read (x402 v2 §9 `invalid_x402_version`, "Protocol
++/// version is not supported"): there is no top-level `x402Version`, or `paymentPayload.x402Version`
++/// says otherwise. Checked before routing, which goes by the top-level version.
++fn x402_version_error(request: &proto::VerifyRequest) -> Option<PaymentVerificationError> {
++    let Some(version) = request.x402_version() else {
++        return Some(PaymentVerificationError::InvalidX402Version(
++            "The request has no top-level x402Version".to_string(),
++        ));
++    };
++    match request.payment_payload_x402_version() {
++        Some(payload_version) if payload_version != version => {
++            Some(PaymentVerificationError::InvalidX402Version(format!(
++                "The request's x402Version is {version}, but paymentPayload.x402Version is {payload_version}"
++            )))
++        }
++        _ => None,
++    }
++}
++
++/// Why no handler serves `request`: an `x402Version` no handler serves is `invalid_x402_version`;
+ /// a network no handler serves (or one x402-rs does not know) is
+ /// `invalid_network` ("Specified blockchain network is not supported", x402 v2 §9); a served network
+ /// without the requested scheme or protocol version is `unsupported_scheme`; a request that names no
+@@ -167,7 +192,8 @@ fn no_handler_error(
+     handlers: &SchemeRegistry,
+     request: &proto::VerifyRequest,
+ ) -> PaymentVerificationError {
+-    // §9 "Protocol version is not supported": no top-level x402Version, or one no handler serves.
++    // §9 "Protocol version is not supported": one no handler serves. (A missing one was reported
++    // by x402_version_error.)
+     if !request
+         .x402_version()
+         .is_some_and(|version| handlers.supports_version(version))
+@@ -316,18 +342,38 @@ mod tests {
+         assert_eq!(settle, ErrorReason::InvalidNetwork);
+     }
+ 
++    fn request_with_payload_version(version: u8, payload_version: u8) -> proto::VerifyRequest {
++        serde_json::from_str(&format!(
++            r#"{{"x402Version":{version},"paymentPayload":{{"x402Version":{payload_version},"accepted":{{"scheme":"exact","network":"eip155:43111"}},"payload":{{}}}},"paymentRequirements":{{}}}}"#
++        ))
++        .unwrap()
++    }
++
+     #[tokio::test]
+-    async fn missing_or_unserved_version_is_invalid_x402_version() {
++    async fn missing_mismatched_or_unserved_version_is_invalid_x402_version() {
+         let facilitator = facilitator();
+         for request in [
+             request(Some(1), "eip155:43111"),
+             request(None, "eip155:43111"),
++            request_with_payload_version(2, 1),
++            request_with_payload_version(1, 1),
+         ] {
+             let (verify, _) = reason(facilitator.verify(&request).await.unwrap_err());
+             assert_eq!(verify, ErrorReason::InvalidX402Version);
+             let (settle, _) = reason(facilitator.settle(&request).await.unwrap_err());
+             assert_eq!(settle, ErrorReason::InvalidX402Version);
+         }
++        let mismatch = facilitator
++            .verify(&request_with_payload_version(2, 1))
++            .await
++            .unwrap_err();
++        let FacilitatorLocalError::Verification(error, _) = &mismatch else {
++            panic!("expected a verification error");
++        };
++        assert_eq!(
++            error.as_payment_problem().details(),
++            "The request's x402Version is 2, but paymentPayload.x402Version is 1"
++        );
+         let empty: proto::VerifyRequest = serde_json::from_str("{}").unwrap();
+         let (settle, context) = reason(facilitator.settle(&empty).await.unwrap_err());
+         assert_eq!(settle, ErrorReason::InvalidX402Version);
+diff --git a/crates/x402-types/src/proto/mod.rs b/crates/x402-types/src/proto/mod.rs
+index c79a9fc..245ac5d 100644
+--- a/crates/x402-types/src/proto/mod.rs
++++ b/crates/x402-types/src/proto/mod.rs
+@@ -156,6 +156,13 @@ impl VerifyRequest {
+         u8::try_from(value.get("x402Version")?.as_u64()?).ok()
+     }
+ 
++    /// Returns `paymentPayload.x402Version`, if it is a number that fits a protocol version.
++    pub fn payment_payload_x402_version(&self) -> Option<u8> {
++        let value: serde_json::Value = serde_json::from_str(self.as_str()).ok()?;
++        let version = value.get("paymentPayload")?.get("x402Version")?.as_u64()?;
++        u8::try_from(version).ok()
++    }
++
+     /// Returns the network the request is for, as the request writes it:
+     /// `paymentPayload.accepted.network` (v2, a CAIP-2 chain id) or
+     /// `paymentPayload.network` (v1, a network name).
+@@ -295,11 +302,17 @@ pub enum PaymentVerificationError {
+     /// The payment scheme is not supported by this facilitator.
+     #[error("Unsupported scheme")]
+     UnsupportedScheme,
+-    /// The request names no x402 protocol version, or one this facilitator does not serve.
++    /// The request names an x402 protocol version this facilitator does not serve.
+     ///
+     /// Reported as x402 v2 §9 `invalid_x402_version`.
+     #[error("Unsupported x402 protocol version")]
+     UnsupportedX402Version,
++    /// The request's x402 protocol version cannot be read: there is no top-level `x402Version`, or it
++    /// disagrees with `paymentPayload.x402Version`.
++    ///
++    /// Reported as x402 v2 §9 `invalid_x402_version`.
++    #[error("{0}")]
++    InvalidX402Version(String),
+     /// The accepted payment details don't match the requirements.
+     #[error("Accepted does not match payment requirements")]
+     AcceptedRequirementsMismatch,
+@@ -374,7 +387,8 @@ impl AsPaymentProblem for PaymentVerificationError {
+             }
+             PaymentVerificationError::UnsupportedChain => ErrorReason::InvalidNetwork,
+             PaymentVerificationError::UnsupportedScheme => ErrorReason::UnsupportedScheme,
+-            PaymentVerificationError::UnsupportedX402Version => ErrorReason::InvalidX402Version,
++            PaymentVerificationError::UnsupportedX402Version
++            | PaymentVerificationError::InvalidX402Version(_) => ErrorReason::InvalidX402Version,
+             // The requirements are not the ones the payload accepted: §9 invalid_payment_requirements.
+             PaymentVerificationError::AcceptedRequirementsMismatch => {
+                 ErrorReason::InvalidPaymentRequirements

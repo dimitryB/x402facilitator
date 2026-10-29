@@ -53,7 +53,13 @@ import {
   withSignature,
 } from "../lib/payments";
 import { snapshot, type Snapshot } from "../lib/snapshot";
-import { SPEC_INSUFFICIENT_FUNDS, SPEC_INVALID_SIGNATURE, settleFailureViolations, verifyFailureViolations } from "../lib/spec";
+import {
+  SPEC_INSUFFICIENT_FUNDS,
+  SPEC_INVALID_SIGNATURE,
+  STATUS_VERDICT,
+  settleFailureViolations,
+  verifyFailureViolations,
+} from "../lib/spec";
 
 interface Method {
   method: "EIP-3009" | "Permit2";
@@ -115,8 +121,8 @@ for (const m of METHODS_BOTH_NETWORKS) {
           expect(verifyFailureViolations(res.body, { reason: SPEC_INVALID_SIGNATURE, payer: victim.address })).toEqual([]);
           expect(res.body.payer).toBe(victim.address);
           expect(res.body.invalidMessage).toEqual(expect.any(String));
-          // A rejected payload is a client error, not a facilitator failure.
-          expect(res.status).toBe(400);
+          // A verdict on a readable payload: an ordinary answer, as the TS reference facilitator gives.
+          expect(res.status).toBe(STATUS_VERDICT);
         });
 
         it(`/settle answers success false, "${SPEC_INVALID_SIGNATURE}", in the spec's §7.2 shape; nothing moves`, async () => {
@@ -131,7 +137,7 @@ for (const m of METHODS_BOTH_NETWORKS) {
             }),
           ).toEqual([]);
           expect(res.body.payer).toBe(victim.address);
-          expect(res.status).toBe(400);
+          expect(res.status).toBe(STATUS_VERDICT);
           // Rejected before any transaction: no tokens moved and the facilitator's nonce is unchanged.
           expect(await snapshot(m.network, m.asset, victim.address, payTo)).toEqual(before);
         });
@@ -174,7 +180,7 @@ describe("bad signature from a payer with no tokens and no Permit2 allowance: th
           const v = await verify(bad, requirements);
           record(`verify bad signature, unfunded payer: ${m.method}, ${variant}`, v);
           expect(verifyFailureViolations(v.body, { reason: SPEC_INVALID_SIGNATURE, payer: poor.address })).toEqual([]);
-          expect(v.status).toBe(400);
+          expect(v.status).toBe(STATUS_VERDICT);
 
           const s = await settle(bad, requirements);
           record(`settle bad signature, unfunded payer: ${m.method}, ${variant}`, s);
@@ -186,7 +192,7 @@ describe("bad signature from a payer with no tokens and no Permit2 allowance: th
               broadcast: false,
             }),
           ).toEqual([]);
-          expect(s.status).toBe(400);
+          expect(s.status).toBe(STATUS_VERDICT);
           expect(await snapshot(m.network, m.asset, poor.address, payTo)).toEqual(before);
         });
       }
@@ -237,14 +243,14 @@ describe("contract-wallet payers (EIP-1271): the wallet's isValidSignature decid
         const v = await verify(payment, requirements);
         record(`verify EIP-1271 rejecting wallet: ${m.method}`, v);
         expect(verifyFailureViolations(v.body, { reason: SPEC_INVALID_SIGNATURE, payer: wallet })).toEqual([]);
-        expect(v.status).toBe(400);
+        expect(v.status).toBe(STATUS_VERDICT);
 
         const s = await settle(payment, requirements);
         record(`settle EIP-1271 rejecting wallet: ${m.method}`, s);
         expect(
           settleFailureViolations(s.body, { reasons: [SPEC_INVALID_SIGNATURE], payer: wallet, network: m.network, broadcast: false }),
         ).toEqual([]);
-        expect(s.status).toBe(400);
+        expect(s.status).toBe(STATUS_VERDICT);
         expect(await snapshot(m.network, m.asset, wallet, payTo)).toEqual(before);
       });
     });
@@ -286,14 +292,14 @@ describe("EIP-6492-wrapped signatures", () => {
           const v = await verify(bad, requirements);
           record(`verify EIP-6492 bad signature, ${funded ? "funded" : "unfunded"}: ${m.method}`, v);
           expect(verifyFailureViolations(v.body, { reason: SPEC_INVALID_SIGNATURE, payer: payer.address })).toEqual([]);
-          expect(v.status).toBe(400);
+          expect(v.status).toBe(STATUS_VERDICT);
 
           const s = await settle(bad, requirements);
           record(`settle EIP-6492 bad signature, ${funded ? "funded" : "unfunded"}: ${m.method}`, s);
           expect(
             settleFailureViolations(s.body, { reasons: [SPEC_INVALID_SIGNATURE], payer: payer.address, network: m.network, broadcast: false }),
           ).toEqual([]);
-          expect(s.status).toBe(400);
+          expect(s.status).toBe(STATUS_VERDICT);
           // No Multicall3 / factory transaction was sent: the facilitator's nonce did not move.
           expect(await snapshot(m.network, m.asset, payer.address, payTo)).toEqual(before);
         });

@@ -1,0 +1,527 @@
+From eb00d4922ad1206e7752047e172cb432b6df2627 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 03:16:54 -0400
+Subject: [PATCH 16/18] eip155: keep a success whose caller left for that
+ caller's retry
+
+Since 0015 a settlement runs to its end when its HTTP client disconnects.
+If the transaction was then mined within the receipt wait, the settle ended
+in success, the drop guard removed the authorization's record, and nobody
+received the success: the next identical retry, and /verify, got
+invalid_transaction_state ("already used on chain") with "transaction": "".
+The buyer was charged and not served, and the hash was only in the log.
+
+- x402-types: SettleCaller tells a settlement whether its caller is still
+  waiting for the outcome. Facilitator::settle_for and
+  X402SchemeFacilitator::settle_for take one; their defaults ignore it and
+  call settle, so other implementations are unaffected.
+- facilitator-local: post_settle passes a SettleCaller that turns false when
+  the handler's future is dropped (the client disconnected).
+  FacilitatorLocal::settle_for hands it to the scheme handler.
+- eip155 (v2 exact): a settlement that succeeds after its caller left keeps
+  its record, naming the transaction, exactly like a settlement_pending one.
+  The first identical retry claims the success (pending_outcome, atomic
+  claim as before); later settles and /verify are replays; any other
+  request carrying the authorization still gets invalid_transaction_state.
+  A retry whose own caller has left does not claim it. The record still
+  expires after 15 minutes. InFlight::pending is renamed InFlight::keep.
+
+A client that disconnects in the instant between the settlement's check and
+the response being written still loses that success.
+---
+ .../src/v2_eip155_exact/facilitator/mod.rs    | 46 ++++++++++--
+ .../v2_eip155_exact/facilitator/pending.rs    | 23 +++---
+ .../src/facilitator_local.rs                  | 12 +++-
+ crates/x402-facilitator-local/src/handlers.rs | 70 +++++++++++++++---
+ crates/x402-types/src/facilitator.rs          | 72 +++++++++++++++++++
+ crates/x402-types/src/scheme/mod.rs           | 14 ++++
+ 6 files changed, 209 insertions(+), 28 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
+index fa9de1b..a0ad21e 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
+@@ -14,6 +14,7 @@ use alloy_provider::Provider;
+ use serde::{Deserialize, Serialize};
+ use std::collections::HashMap;
+ use x402_types::chain::ChainProviderOps;
++use x402_types::facilitator::SettleCaller;
+ use x402_types::proto;
+ use x402_types::proto::{PaymentVerificationError, v2};
+ use x402_types::scheme::{
+@@ -149,17 +150,20 @@ where
+     P: Eip155MetaTransactionProvider,
+     P::Inner: Provider,
+ {
+-    /// The answer to a retried settle request whose transaction was broadcast earlier but not
+-    /// confirmed then. Nothing is sent again:
++    /// The answer to a retried settle request whose transaction was broadcast earlier but whose outcome
++    /// its caller did not receive (not confirmed in time, or confirmed after the caller left). Nothing
++    /// is sent again:
+     /// - not mined yet: `settlement_pending` with the same hash;
+     /// - mined: success with the hash, for the first retry that claims the record; any later settle
+-    ///   of the payload is a replay (`invalid_transaction_state`);
++    ///   of the payload is a replay (`invalid_transaction_state`). A retry whose own caller has left
++    ///   does not claim it;
+     /// - reverted: `invalid_transaction_state` with the hash, and the record is removed.
+     async fn pending_outcome(
+         &self,
+         request: &types::FacilitatorSettleRequest,
+         id: B256,
+         tx_hash: TxHash,
++        caller: &SettleCaller,
+     ) -> Result<proto::SettleResponse, X402SchemeFacilitatorError> {
+         let (payer, network) = match request {
+             types::FacilitatorSettleRequest::Eip3009 {
+@@ -182,6 +186,13 @@ where
+         let transaction = tx_hash.to_string();
+         match self.provider.inner().get_transaction_receipt(tx_hash).await {
+             Ok(Some(receipt)) => match tx_hash_from_receipt(&receipt) {
++                // Nobody would receive this success: leave the record for the next retry.
++                Ok(_) if !caller.is_waiting() => Ok(v2::SettleResponse::Success {
++                    payer,
++                    transaction,
++                    network,
++                }
++                .into()),
+                 Ok(_) if self.pending.claim(&id, tx_hash) => Ok(v2::SettleResponse::Success {
+                     payer,
+                     transaction,
+@@ -277,15 +288,23 @@ where
+         Ok(verify_response.into())
+     }
+ 
+-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all, err, fields(
++    async fn settle(
++        &self,
++        request: &proto::SettleRequest,
++    ) -> Result<proto::SettleResponse, X402SchemeFacilitatorError> {
++        self.settle_for(request, SettleCaller::waiting()).await
++    }
++
++    #[cfg_attr(feature = "telemetry", tracing::instrument(name = "settle", skip_all, err, fields(
+         otel.kind = "internal",
+         chain_id = tracing::field::Empty,
+         payer = tracing::field::Empty,
+         pay_to = tracing::field::Empty
+     )))]
+-    async fn settle(
++    async fn settle_for(
+         &self,
+         request: &proto::SettleRequest,
++        caller: SettleCaller,
+     ) -> Result<proto::SettleResponse, X402SchemeFacilitatorError> {
+         let settle_request = types::FacilitatorSettleRequest::try_from(request.clone())?;
+         // One settlement at a time per authorization. A retry of the request whose settlement is
+@@ -300,7 +319,9 @@ where
+                 transaction: Some(tx_hash),
+                 ..
+             }) if request == request_key => {
+-                return self.pending_outcome(&settle_request, id, tx_hash).await;
++                return self
++                    .pending_outcome(&settle_request, id, tx_hash, &caller)
++                    .await;
+             }
+             Err(record) => return Err(authorization_in_flight(record).into()),
+         };
+@@ -309,7 +330,7 @@ where
+             if let X402SchemeFacilitatorError::SettlementPending { transaction, .. } = &error
+                 && let Ok(tx_hash) = transaction.parse::<TxHash>()
+             {
+-                in_flight.pending(tx_hash);
++                in_flight.keep(tx_hash);
+             }
+             error
+         };
+@@ -357,6 +378,17 @@ where
+                 .map_err(remember_pending)?
+             }
+         };
++        // The transfer went through, but if the caller has left, nobody receives this success. Keep the
++        // record, naming the transaction, so that the caller's retry of the same request gets it
++        // (pending_outcome), instead of a replay error that hides a payment which went through.
++        if !caller.is_waiting()
++            && let v2::SettleResponse::Success { transaction, .. } = &settle_response
++            && let Ok(tx_hash) = transaction.parse::<TxHash>()
++        {
++            #[cfg(feature = "telemetry")]
++            tracing::info!(tx = %tx_hash, "Settlement succeeded after its caller left; kept for a retry of the same request");
++            in_flight.keep(tx_hash);
++        }
+         Ok(settle_response.into())
+     }
+ 
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs
+index 441ec53..1d92194 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs
+@@ -12,8 +12,10 @@
+ //! - While a record exists, `/verify` of that authorization is rejected, and so is `/settle` of any other
+ //!   request for it: the authorization is already committed to a settlement, so it must not pay for
+ //!   anything else.
+-//! - A settle that ends in anything but `settlement_pending` removes its record when it returns.
+-//! - A retry of the very same request is answered from the pending transaction: `settlement_pending` with
++//! - A settle that ends in anything but `settlement_pending` removes its record when it returns, unless it
++//!   succeeded after its caller left ([`SettleCaller`](x402_types::facilitator::SettleCaller)): nobody
++//!   received that success, so the record is kept, naming the transaction, like a pending one.
++//! - A retry of the very same request is answered from the recorded transaction: `settlement_pending` with
+ //!   the same hash while it is unmined. Once it is mined, the first retry that sees the receipt claims the
+ //!   record ([`PendingSettlements::claim`], atomic) and gets the success. Every later settle of the payload
+ //!   finds no record and is an ordinary replay (`invalid_transaction_state`). A reverted transaction
+@@ -65,8 +67,8 @@ pub fn request_key(request: &FacilitatorSettleRequest) -> B256 {
+ pub struct Record {
+     /// [`request_key`] of the settle request that started it.
+     pub request: B256,
+-    /// The broadcast transaction, once the settle ended in `settlement_pending`; `None` while the
+-    /// settle is still running.
++    /// The broadcast transaction, once the settle ended in `settlement_pending` or in a success its
++    /// caller did not receive; `None` while the settle is still running.
+     pub transaction: Option<TxHash>,
+     since: Instant,
+ }
+@@ -115,7 +117,7 @@ impl PendingSettlements {
+ 
+     /// Starts settling authorization `id` with the request `request`. Fails with the existing record if
+     /// the authorization is already being settled or pending. The returned guard removes the record
+-    /// when dropped, unless [`InFlight::pending`] recorded a broadcast transaction first.
++    /// when dropped, unless [`InFlight::keep`] recorded a broadcast transaction first.
+     pub fn begin(&self, id: B256, request: B256) -> Result<InFlight<'_>, Record> {
+         let mut records = self.records();
+         if let Some(record) = records.get(&id) {
+@@ -164,8 +166,9 @@ pub struct InFlight<'a> {
+ }
+ 
+ impl InFlight<'_> {
+-    /// The settle ended in `settlement_pending` with `transaction`: keep the record, now naming it.
+-    pub fn pending(&self, transaction: TxHash) {
++    /// The settle ended in `settlement_pending` with `transaction`, or in a success with `transaction`
++    /// that its caller did not receive: keep the record, now naming it, for a retry of the request.
++    pub fn keep(&self, transaction: TxHash) {
+         if let Some(record) = self.store.records().get_mut(&self.id) {
+             record.transaction = Some(transaction);
+         }
+@@ -206,7 +209,7 @@ mod tests {
+     fn a_pending_settlement_is_kept_and_claimed_exactly_once() {
+         let store = PendingSettlements::default();
+         let tx = TxHash::repeat_byte(0xaa);
+-        store.begin(ID, REQUEST).unwrap().pending(tx);
++        store.begin(ID, REQUEST).unwrap().keep(tx);
+         let record = store.get(&ID).unwrap();
+         assert_eq!((record.request, record.transaction), (REQUEST, Some(tx)));
+         assert!(!store.claim(&ID, TxHash::repeat_byte(0xbb)));
+@@ -218,14 +221,14 @@ mod tests {
+     #[test]
+     fn records_expire_and_the_oldest_goes_when_full() {
+         let expired = PendingSettlements::new(Duration::ZERO, 10);
+-        expired.begin(ID, REQUEST).unwrap().pending(TxHash::ZERO);
++        expired.begin(ID, REQUEST).unwrap().keep(TxHash::ZERO);
+         assert!(expired.get(&ID).is_none());
+ 
+         let full = PendingSettlements::new(Duration::from_secs(60), 2);
+         for i in 1..=3u8 {
+             full.begin(B256::repeat_byte(i), REQUEST)
+                 .unwrap()
+-                .pending(TxHash::repeat_byte(i));
++                .keep(TxHash::repeat_byte(i));
+         }
+         assert!(full.get(&B256::repeat_byte(1)).is_none());
+         assert!(full.get(&B256::repeat_byte(3)).is_some());
+diff --git a/crates/x402-facilitator-local/src/facilitator_local.rs b/crates/x402-facilitator-local/src/facilitator_local.rs
+index d765c9e..30bacde 100644
+--- a/crates/x402-facilitator-local/src/facilitator_local.rs
++++ b/crates/x402-facilitator-local/src/facilitator_local.rs
+@@ -33,7 +33,7 @@
+ //! [`PaymentVerificationError::UnsupportedScheme`](x402_types::proto::PaymentVerificationError::UnsupportedScheme).
+ 
+ use std::collections::{HashMap, HashSet};
+-use x402_types::facilitator::Facilitator;
++use x402_types::facilitator::{Facilitator, SettleCaller};
+ use x402_types::proto;
+ use x402_types::proto::PaymentVerificationError;
+ use x402_types::scheme::{SchemeRegistry, X402SchemeFacilitatorError};
+@@ -111,6 +111,14 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
+     async fn settle(
+         &self,
+         request: &proto::SettleRequest,
++    ) -> Result<proto::SettleResponse, Self::Error> {
++        self.settle_for(request, SettleCaller::waiting()).await
++    }
++
++    async fn settle_for(
++        &self,
++        request: &proto::SettleRequest,
++        caller: SettleCaller,
+     ) -> Result<proto::SettleResponse, Self::Error> {
+         let context = ErrorContext::from_request(request);
+         let handler = request
+@@ -122,7 +130,7 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
+                     context.clone(),
+                 )
+             })?;
+-        let response = handler.settle(request).await.map_err(|error| {
++        let response = handler.settle_for(request, caller).await.map_err(|error| {
+             FacilitatorLocalError::Settlement(error, context.with_payer(handler.payer(request)))
+         })?;
+         Ok(response)
+diff --git a/crates/x402-facilitator-local/src/handlers.rs b/crates/x402-facilitator-local/src/handlers.rs
+index 97bab07..1d15dc0 100644
+--- a/crates/x402-facilitator-local/src/handlers.rs
++++ b/crates/x402-facilitator-local/src/handlers.rs
+@@ -17,7 +17,9 @@ use axum::routing::{get, post};
+ use axum::{Json, Router, response::IntoResponse};
+ use serde::Serialize;
+ use serde_json::json;
+-use x402_types::facilitator::Facilitator;
++use std::sync::Arc;
++use std::sync::atomic::{AtomicBool, Ordering};
++use x402_types::facilitator::{Facilitator, SettleCaller};
+ use x402_types::proto;
+ use x402_types::proto::{AsPaymentProblem, ErrorReason, PaymentVerificationError};
+ use x402_types::scheme::X402SchemeFacilitatorError;
+@@ -220,11 +222,14 @@ where
+     };
+     // A settlement may broadcast a transaction. It runs on its own task so that a client that
+     // disconnects, which drops this handler's future, cannot cancel it half-way: the settlement then
+-    // completes, and its outcome (for example a pending transaction) is recorded as usual.
++    // completes, and its outcome (for example a pending transaction) is recorded as usual. The
++    // settlement is told when that happens, so that it can keep an outcome nobody received.
++    let hang_up = HangUp::default();
+     let settlement = {
+         let facilitator = facilitator.clone();
+         let body = body.clone();
+-        async move { facilitator.settle(&body).await }
++        let caller = hang_up.caller();
++        async move { facilitator.settle_for(&body, caller).await }
+     };
+     #[cfg(feature = "telemetry")]
+     let settlement = tracing::Instrument::in_current_span(settlement);
+@@ -254,6 +259,25 @@ where
+     }
+ }
+ 
++/// Marks a `/settle` request's caller as gone when the handler's future is dropped: by the client
++/// disconnecting, or by the handler ending, at which point the settlement has already returned.
++#[derive(Default)]
++struct HangUp(Arc<AtomicBool>);
++
++impl HangUp {
++    /// The [`SettleCaller`] that waits until this guard is dropped.
++    fn caller(&self) -> SettleCaller {
++        let gone = self.0.clone();
++        SettleCaller::new(move || !gone.load(Ordering::SeqCst))
++    }
++}
++
++impl Drop for HangUp {
++    fn drop(&mut self) {
++        self.0.store(true, Ordering::SeqCst);
++    }
++}
++
+ /// `/verify` error body (x402 v2 §5.4.2, §7.1).
+ #[derive(Serialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -568,12 +592,14 @@ mod tests {
+         assert_eq!(status, StatusCode::BAD_REQUEST);
+     }
+ 
+-    /// A facilitator whose settlement waits for `release`, then signals `settled`.
++    /// A facilitator whose settlement waits for `release`, then records whether its caller was still
++    /// waiting and signals `settled`.
+     #[derive(Clone, Default)]
+     struct SlowSettlement {
+-        started: std::sync::Arc<tokio::sync::Notify>,
+-        release: std::sync::Arc<tokio::sync::Notify>,
+-        settled: std::sync::Arc<tokio::sync::Notify>,
++        started: Arc<tokio::sync::Notify>,
++        release: Arc<tokio::sync::Notify>,
++        settled: Arc<tokio::sync::Notify>,
++        caller_waiting_at_the_end: Arc<AtomicBool>,
+     }
+ 
+     impl Facilitator for SlowSettlement {
+@@ -586,14 +612,24 @@ mod tests {
+             unreachable!()
+         }
+ 
+-        fn settle(
++        async fn settle(
++            &self,
++            request: &proto::SettleRequest,
++        ) -> Result<proto::SettleResponse, Self::Error> {
++            self.settle_for(request, SettleCaller::waiting()).await
++        }
++
++        fn settle_for(
+             &self,
+             _: &proto::SettleRequest,
++            caller: SettleCaller,
+         ) -> impl Future<Output = Result<proto::SettleResponse, Self::Error>> + Send {
+             let me = self.clone();
+             async move {
+                 me.started.notify_one();
+                 me.release.notified().await;
++                me.caller_waiting_at_the_end
++                    .store(caller.is_waiting(), Ordering::SeqCst);
+                 me.settled.notify_one();
+                 Ok(proto::SettleResponse(json!({ "success": true })))
+             }
+@@ -605,7 +641,7 @@ mod tests {
+     }
+ 
+     #[tokio::test(flavor = "multi_thread")]
+-    async fn a_settlement_outlives_a_client_that_disconnects() {
++    async fn a_settlement_outlives_a_client_that_disconnects_and_is_told_so() {
+         let facilitator = SlowSettlement::default();
+         let request: proto::SettleRequest = serde_json::from_str("{}").unwrap();
+         let handler = tokio::spawn(post_settle(State(facilitator.clone()), Ok(Json(request))));
+@@ -626,6 +662,22 @@ mod tests {
+             settled.is_ok(),
+             "the settlement was cancelled with the request"
+         );
++        assert!(
++            !facilitator.caller_waiting_at_the_end.load(Ordering::SeqCst),
++            "the settlement was not told that its caller left"
++        );
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn a_settlement_whose_client_stays_sees_it_waiting() {
++        let facilitator = SlowSettlement::default();
++        let request: proto::SettleRequest = serde_json::from_str("{}").unwrap();
++        let handler = tokio::spawn(post_settle(State(facilitator.clone()), Ok(Json(request))));
++        facilitator.started.notified().await;
++        facilitator.release.notify_one();
++        let response = handler.await.unwrap().into_response();
++        assert_eq!(response.status(), StatusCode::OK);
++        assert!(facilitator.caller_waiting_at_the_end.load(Ordering::SeqCst));
+     }
+ 
+     #[test]
+diff --git a/crates/x402-types/src/facilitator.rs b/crates/x402-types/src/facilitator.rs
+index 655d9a5..68c0e03 100644
+--- a/crates/x402-types/src/facilitator.rs
++++ b/crates/x402-types/src/facilitator.rs
+@@ -9,6 +9,39 @@ use std::sync::Arc;
+ 
+ use crate::proto;
+ 
++/// Tells a settlement whether its caller is still waiting for the outcome.
++///
++/// An HTTP server passes one that turns false when the client disconnects. A settlement that completes
++/// after that has nobody to report to, and a handler that keeps per-payment state can then keep the
++/// outcome for the caller's retry instead of discarding it.
++#[derive(Clone, Default)]
++pub struct SettleCaller(Option<Arc<dyn Fn() -> bool + Send + Sync>>);
++
++impl SettleCaller {
++    /// A caller that waits for the outcome: what [`Facilitator::settle`] assumes.
++    pub fn waiting() -> Self {
++        Self(None)
++    }
++
++    /// A caller that is waiting for as long as `is_waiting` returns true.
++    pub fn new(is_waiting: impl Fn() -> bool + Send + Sync + 'static) -> Self {
++        Self(Some(Arc::new(is_waiting)))
++    }
++
++    /// Whether the caller is still waiting for the outcome.
++    pub fn is_waiting(&self) -> bool {
++        self.0.as_ref().is_none_or(|is_waiting| is_waiting())
++    }
++}
++
++impl Debug for SettleCaller {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("SettleCaller")
++            .field("is_waiting", &self.is_waiting())
++            .finish()
++    }
++}
++
+ /// Type-level contract that associates the concrete request/response types used
+ /// by a [`Facilitator`] implementation.
+ ///
+@@ -97,6 +130,17 @@ pub trait Facilitator<C: FacilitatorContract = ProtoContract> {
+     /// Returns [`Self::Error`] if the facilitator is unable to enumerate its capabilities.
+     #[allow(dead_code)] // For some reason clippy believes it is not used.
+     fn supported(&self) -> impl Future<Output = Result<C::SupportedResponse, Self::Error>> + Send;
++
++    /// [`Facilitator::settle`] for a caller that may stop waiting for the outcome, for example an
++    /// HTTP client that disconnects. The default ignores `caller`.
++    fn settle_for(
++        &self,
++        request: &C::SettleRequest,
++        caller: SettleCaller,
++    ) -> impl Future<Output = Result<C::SettleResponse, Self::Error>> + Send {
++        let _ = caller;
++        self.settle(request)
++    }
+ }
+ 
+ impl<C, T> Facilitator<C> for Arc<T>
+@@ -123,4 +167,32 @@ where
+     fn supported(&self) -> impl Future<Output = Result<C::SupportedResponse, Self::Error>> + Send {
+         self.as_ref().supported()
+     }
++
++    fn settle_for(
++        &self,
++        request: &C::SettleRequest,
++        caller: SettleCaller,
++    ) -> impl Future<Output = Result<C::SettleResponse, Self::Error>> + Send {
++        self.as_ref().settle_for(request, caller)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::atomic::{AtomicBool, Ordering};
++
++    #[test]
++    fn a_settle_caller_waits_until_told_otherwise() {
++        assert!(SettleCaller::waiting().is_waiting());
++        assert!(SettleCaller::default().is_waiting());
++        let gone = Arc::new(AtomicBool::new(false));
++        let caller = SettleCaller::new({
++            let gone = gone.clone();
++            move || !gone.load(Ordering::SeqCst)
++        });
++        assert!(caller.is_waiting());
++        gone.store(true, Ordering::SeqCst);
++        assert!(!caller.clone().is_waiting());
++    }
+ }
+diff --git a/crates/x402-types/src/scheme/mod.rs b/crates/x402-types/src/scheme/mod.rs
+index e4469e0..645341b 100644
+--- a/crates/x402-types/src/scheme/mod.rs
++++ b/crates/x402-types/src/scheme/mod.rs
+@@ -34,6 +34,7 @@
+ pub mod client;
+ 
+ use crate::chain::{ChainId, ChainIdPattern, ChainProviderOps, ChainRegistry};
++use crate::facilitator::SettleCaller;
+ use crate::proto;
+ use crate::proto::{AsPaymentProblem, ErrorReason, PaymentProblem, PaymentVerificationError};
+ use serde::{Deserialize, Serialize};
+@@ -66,6 +67,19 @@ pub trait X402SchemeFacilitator: Send + Sync {
+         request: &proto::SettleRequest,
+     ) -> Result<proto::SettleResponse, X402SchemeFacilitatorError>;
+ 
++    /// Settles a payment for a caller that may stop waiting for the outcome (see [`SettleCaller`]).
++    ///
++    /// The default ignores `caller` and calls [`X402SchemeFacilitator::settle`]. A handler that keeps
++    /// per-payment state can use it to keep an outcome nobody received for the caller's retry.
++    async fn settle_for(
++        &self,
++        request: &proto::SettleRequest,
++        caller: SettleCaller,
++    ) -> Result<proto::SettleResponse, X402SchemeFacilitatorError> {
++        let _ = caller;
++        self.settle(request).await
++    }
++
+     /// Returns the payment methods supported by this handler.
+     async fn supported(&self) -> Result<proto::SupportedResponse, X402SchemeFacilitatorError>;
+ 

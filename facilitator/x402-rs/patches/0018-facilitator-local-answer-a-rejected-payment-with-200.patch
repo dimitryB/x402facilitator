@@ -1,0 +1,258 @@
+From cff14d97315aad05fc6d1797c474b3f8dd9b21a3 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 03:19:07 -0400
+Subject: [PATCH 18/18] facilitator-local: answer a rejected payment with 200,
+ as the TS reference facilitator does
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+x402-rs answered every rejected /verify and failed /settle with 400, and a
+missing Permit2 allowance with 412. The x402 TS reference facilitator
+(examples/typescript/facilitator/basic/index.ts) sends whatever verify or
+settle returns with res.json, so isValid: false and success: false come with
+200; it answers 400 only for a request it cannot read, and 500 when verify or
+settle throws.
+
+The difference matters to a stock TS resource server. HTTPFacilitatorClient
+reads a 2xx body as the result, but turns any other status into a VerifyError
+or SettleError whose message is "<code>: <message>". The seller then puts that
+message, not the bare x402 v2 §9 code, into its 402 answer, and never answers
+412 for permit2_allowance_required, which it only does when the code is the
+bare string (x402HTTPResourceServer).
+
+- 200: every verdict on a payment that could be read, including
+  permit2_allowance_required, unsupported_scheme, invalid_network, an
+  unserved x402 version, a reverted settlement and settlement_pending (as
+  before).
+- 400: a request that cannot be read: invalid_payload for a payload that does
+  not parse (InvalidFormat), invalid_x402_version for a version that cannot be
+  read (InvalidX402Version). A body that is not JSON keeps axum's status.
+- 500: unexpected failures (OnchainFailure), as before.
+- PaymentVerificationError::InvalidPermit2Spender takes over the Permit2
+  spender check from InvalidFormat: still invalid_payload, but a verdict (200)
+  on a readable payload.
+
+x402-rs's own client (x402-axum) deserializes the body of a 200, 400 or 412
+alike and decides by its fields; a unit test checks that a 200 rejection reads
+as one.
+---
+ .../v2_eip155_exact/facilitator/permit2.rs    |   2 +-
+ crates/x402-facilitator-local/src/handlers.rs | 130 +++++++++++++-----
+ crates/x402-types/src/proto/mod.rs            |   9 +-
+ 3 files changed, 106 insertions(+), 35 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+index 08adbf3..a1bac69 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+@@ -164,7 +164,7 @@ pub fn assert_exact_proxy_spender(
+ ) -> Result<(), PaymentVerificationError> {
+     let spender = payment_payload.payload.permit_2_authorization.spender.0;
+     if spender != EXACT_PERMIT2_PROXY_ADDRESS {
+-        return Err(PaymentVerificationError::InvalidFormat(format!(
++        return Err(PaymentVerificationError::InvalidPermit2Spender(format!(
+             "Permit2 spender {spender} is not the x402 exact proxy {EXACT_PERMIT2_PROXY_ADDRESS}"
+         )));
+     }
+diff --git a/crates/x402-facilitator-local/src/handlers.rs b/crates/x402-facilitator-local/src/handlers.rs
+index 1d15dc0..dff324a 100644
+--- a/crates/x402-facilitator-local/src/handlers.rs
++++ b/crates/x402-facilitator-local/src/handlers.rs
+@@ -153,9 +153,9 @@ where
+ ///
+ /// # Errors
+ ///
+-/// Returns `400 Bad Request` if the payment verification fails (e.g., invalid signature,
+-/// unsupported scheme, insufficient funds). Returns `500 Internal Server Error` if an
+-/// unexpected error occurs during verification.
++/// A payment that fails verification (e.g., invalid signature, unsupported scheme, insufficient
++/// funds) is answered with `200 OK` and `isValid: false`. A request that cannot be read gets
++/// `400 Bad Request`, and an unexpected error during verification `500 Internal Server Error`.
+ #[cfg_attr(feature = "telemetry", instrument(skip_all))]
+ pub async fn post_verify<A>(
+     State(facilitator): State<A>,
+@@ -199,8 +199,9 @@ where
+ ///
+ /// # Errors
+ ///
+-/// Returns `400 Bad Request` if the payment verification fails (e.g., invalid signature,
+-/// insufficient funds). Returns `500 Internal Server Error` if the on-chain settlement fails.
++/// A payment that is rejected, reverts on chain or is not confirmed in time is answered with
++/// `200 OK` and `success: false`. A request that cannot be read gets `400 Bad Request`, and an
++/// unexpected error (e.g., an RPC that cannot be reached) `500 Internal Server Error`.
+ #[cfg_attr(feature = "telemetry", instrument(skip_all))]
+ pub async fn post_settle<A>(
+     State(facilitator): State<A>,
+@@ -409,22 +410,31 @@ impl IntoResponse for FacilitatorLocalError {
+     }
+ }
+ 
++/// HTTP status codes as the x402 TS reference facilitator answers (`x402-foundation/x402`,
++/// `examples/typescript/facilitator/basic/index.ts`):
++///
++/// - 200 for every verdict on a payment that could be read: `isValid: false` or `success: false`
++///   with its §9 code, including `permit2_allowance_required`, `settlement_pending` and a reverted
++///   settlement. The reference sends whatever `verify` or `settle` returns with `res.json`. The
++///   resource server, not the facilitator, turns the code into its own status (402, or 412 for
++///   `permit2_allowance_required`), and the TS client only reads the code as-is from a 2xx answer: it
++///   turns any other status into an exception whose message is "<code>: <message>".
++/// - 400 for a request that cannot be read as a payment: the reference's 400s for a body without
++///   `paymentPayload` or `paymentRequirements`, or with a payload that is not an object or has
++///   neither `authorization` nor `permit2Authorization`. Here: `invalid_payload` for a payload that
++///   does not parse, and `invalid_x402_version` for a version that cannot be read.
++/// - 500 for an unexpected failure (an RPC that cannot be reached), as the reference does when
++///   `verify` or `settle` throws.
+ fn scheme_error_to_status_code(error: &X402SchemeFacilitatorError) -> StatusCode {
+     match error {
+-        X402SchemeFacilitatorError::PaymentVerification(e) => {
+-            if let PaymentVerificationError::InsufficientAllowance = e {
+-                StatusCode::PRECONDITION_FAILED
+-            } else {
+-                StatusCode::BAD_REQUEST
+-            }
+-        }
++        X402SchemeFacilitatorError::PaymentVerification(
++            PaymentVerificationError::InvalidFormat(_)
++            | PaymentVerificationError::InvalidX402Version(_),
++        ) => StatusCode::BAD_REQUEST,
++        X402SchemeFacilitatorError::PaymentVerification(_)
++        | X402SchemeFacilitatorError::SettlementPending { .. }
++        | X402SchemeFacilitatorError::TransactionFailed { .. } => StatusCode::OK,
+         X402SchemeFacilitatorError::OnchainFailure(_) => StatusCode::INTERNAL_SERVER_ERROR,
+-        // Not a failed request: the transaction is out and may still be mined. Like the TS reference
+-        // facilitator, answer it as an ordinary settle response, so that clients read the body and
+-        // its transaction hash (x402-rs's own facilitator client ignores the body of a 5xx).
+-        X402SchemeFacilitatorError::SettlementPending { .. } => StatusCode::OK,
+-        // The payment failed on chain, like any other invalid_transaction_state: 400.
+-        X402SchemeFacilitatorError::TransactionFailed { .. } => StatusCode::BAD_REQUEST,
+     }
+ }
+ 
+@@ -589,7 +599,7 @@ mod tests {
+         let status = FacilitatorLocalError::Settlement(failed(), context())
+             .into_response()
+             .status();
+-        assert_eq!(status, StatusCode::BAD_REQUEST);
++        assert_eq!(status, StatusCode::OK);
+     }
+ 
+     /// A facilitator whose settlement waits for `release`, then records whether its caller was still
+@@ -681,22 +691,76 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn status_codes_are_unchanged() {
+-        let status = |e: FacilitatorLocalError| e.into_response().status();
+-        let allowance = PaymentVerificationError::InsufficientAllowance.into();
+-        assert_eq!(
+-            status(FacilitatorLocalError::Verification(allowance, context())),
+-            StatusCode::PRECONDITION_FAILED
++    fn status_codes_follow_the_ts_reference_facilitator() {
++        let status = |e: X402SchemeFacilitatorError| {
++            let verify = FacilitatorLocalError::Verification(e, context()).into_response();
++            verify.status()
++        };
++        let verdicts: Vec<X402SchemeFacilitatorError> = vec![
++            PaymentVerificationError::InsufficientAllowance.into(),
++            PaymentVerificationError::InsufficientFunds.into(),
++            PaymentVerificationError::InvalidExactEvmPayloadSignature("x".into()).into(),
++            PaymentVerificationError::AuthorizationAlreadyUsed.into(),
++            PaymentVerificationError::UnsupportedChain.into(),
++            PaymentVerificationError::UnsupportedScheme.into(),
++            PaymentVerificationError::UnsupportedX402Version.into(),
++            PaymentVerificationError::AssetMismatch.into(),
++            PaymentVerificationError::InvalidPermit2Spender("x".into()).into(),
++            X402SchemeFacilitatorError::SettlementPending {
++                transaction: "0x01".into(),
++                details: "x".into(),
++            },
++            X402SchemeFacilitatorError::TransactionFailed {
++                transaction: "0x01".into(),
++                details: "x".into(),
++            },
++        ];
++        for error in verdicts {
++            let name = format!("{error:?}");
++            assert_eq!(status(error), StatusCode::OK, "{name}");
++        }
++        for unreadable in [
++            PaymentVerificationError::InvalidFormat("x".into()),
++            PaymentVerificationError::InvalidX402Version("x".into()),
++        ] {
++            assert_eq!(status(unreadable.into()), StatusCode::BAD_REQUEST);
++        }
++        let onchain = X402SchemeFacilitatorError::OnchainFailure("x".to_string());
++        assert_eq!(status(onchain), StatusCode::INTERNAL_SERVER_ERROR);
++    }
++
++    /// x402-rs's own facilitator client (`x402-axum`) deserializes the body of a 200, 400 or 412 and
++    /// decides by its fields (`FacilitatorClient::post_json`, `PaygateProtocol::validate_verify_response`,
++    /// `validate_settlement_success`). A rejection answered with 200 must read as one.
++    #[test]
++    fn a_rejection_reads_as_one_for_the_x402_axum_client() {
++        use x402_types::proto::v2;
++        let rejected = FacilitatorLocalError::Verification(
++            PaymentVerificationError::InsufficientFunds.into(),
++            context(),
+         );
+-        let funds = PaymentVerificationError::InsufficientFunds.into();
+-        assert_eq!(
+-            status(FacilitatorLocalError::Settlement(funds, context())),
+-            StatusCode::BAD_REQUEST
++        let body = rejected.as_json_value().unwrap();
++        let parsed = v2::VerifyResponse::try_from(proto::VerifyResponse(body)).unwrap();
++        assert!(matches!(
++            parsed,
++            v2::VerifyResponse::Invalid { ref reason, .. } if reason == "insufficient_funds"
++        ));
++        let allowance = FacilitatorLocalError::Verification(
++            PaymentVerificationError::InsufficientAllowance.into(),
++            context(),
+         );
+-        let onchain = X402SchemeFacilitatorError::OnchainFailure("x".to_string());
+-        assert_eq!(
+-            status(FacilitatorLocalError::Settlement(onchain, context())),
+-            StatusCode::INTERNAL_SERVER_ERROR
++        let parsed =
++            v2::VerifyResponse::try_from(proto::VerifyResponse(allowance.as_json_value().unwrap()))
++                .unwrap();
++        // x402-axum answers the buyer 412 for this reason, read from the body.
++        assert!(matches!(
++            parsed,
++            v2::VerifyResponse::Invalid { ref reason, .. } if reason == "permit2_allowance_required"
++        ));
++        let failed = FacilitatorLocalError::Settlement(
++            PaymentVerificationError::InsufficientFunds.into(),
++            context(),
+         );
++        assert_eq!(failed.as_json_value().unwrap()["success"], json!(false));
+     }
+ }
+diff --git a/crates/x402-types/src/proto/mod.rs b/crates/x402-types/src/proto/mod.rs
+index 245ac5d..b79bf84 100644
+--- a/crates/x402-types/src/proto/mod.rs
++++ b/crates/x402-types/src/proto/mod.rs
+@@ -307,6 +307,12 @@ pub enum PaymentVerificationError {
+     /// Reported as x402 v2 §9 `invalid_x402_version`.
+     #[error("Unsupported x402 protocol version")]
+     UnsupportedX402Version,
++    /// A Permit2 payload whose spender is not the scheme's proxy: readable, but unusable.
++    ///
++    /// Reported as x402 v2 §9 `invalid_payload`, like [`Self::InvalidFormat`], but it is a verdict on
++    /// a payment that could be read, not a request that could not.
++    #[error("{0}")]
++    InvalidPermit2Spender(String),
+     /// The request's x402 protocol version cannot be read: there is no top-level `x402Version`, or it
+     /// disagrees with `paymentPayload.x402Version`.
+     ///
+@@ -367,7 +373,8 @@ impl AsPaymentProblem for PaymentVerificationError {
+     fn as_payment_problem(&self) -> PaymentProblem {
+         let error_reason = match self {
+             // §9 "Payment payload is malformed or contains invalid data".
+-            PaymentVerificationError::InvalidFormat(_) => ErrorReason::InvalidPayload,
++            PaymentVerificationError::InvalidFormat(_)
++            | PaymentVerificationError::InvalidPermit2Spender(_) => ErrorReason::InvalidPayload,
+             PaymentVerificationError::InvalidPaymentAmount => ErrorReason::InvalidPaymentAmount,
+             PaymentVerificationError::InsufficientFunds => ErrorReason::InsufficientFunds,
+             PaymentVerificationError::InsufficientAllowance => {

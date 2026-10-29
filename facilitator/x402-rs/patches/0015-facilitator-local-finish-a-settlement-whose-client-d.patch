@@ -1,7 +1,7 @@
-From bf4a6d8512d01ece4b8d59969291a901efa67d4f Mon Sep 17 00:00:00 2001
+From 839171d24266759570f176ed2392ece4ae783cdf Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 02:24:06 -0400
-Subject: [PATCH 15/15] facilitator-local: finish a settlement whose client
+Subject: [PATCH 15/18] facilitator-local: finish a settlement whose client
  disconnected; log every broadcast
 
 post_settle awaited the settlement inside the request's future. When the
@@ -24,7 +24,6 @@ same payload went back to the chain instead of naming the pending transaction.
 
 The handler now requires the facilitator state to be Clone + Send + Sync +
 'static, as routes() already did.
-
 ---
  .../x402-chain-eip155/src/chain/provider.rs   |   6 +
  crates/x402-facilitator-local/src/handlers.rs | 104 +++++++++++++++++-

@@ -14,7 +14,7 @@ import { ensurePermit2Approval, nonceOf, publicClient, tokenBalance } from "../l
 import { BUYER_KEY, FACILITATOR_SIGNER } from "../lib/env";
 import { record, settle, verify } from "../lib/facilitator";
 import { freshAddress, requirementsFor, signPayment } from "../lib/payments";
-import { SPEC_INVALID_TRANSACTION_STATE, settleFailureViolations, verifyFailureViolations } from "../lib/spec";
+import { SPEC_INVALID_TRANSACTION_STATE, STATUS_VERDICT, settleFailureViolations, verifyFailureViolations } from "../lib/spec";
 
 const buyer = privateKeyToAccount(BUYER_KEY);
 const PROXY = CONTRACTS.x402ExactPermit2Proxy;
@@ -184,7 +184,7 @@ describe("replay", () => {
           broadcast: false,
         }),
       ).toEqual([]);
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(STATUS_VERDICT);
 
       expect(await tokenBalance(c.network, c.asset, buyer.address)).toBe(payerBefore);
       expect(await tokenBalance(c.network, c.asset, s.payTo)).toBe(payToBefore);
@@ -199,7 +199,7 @@ describe("replay", () => {
       expect(
         verifyFailureViolations(res.body, { reason: SPEC_INVALID_TRANSACTION_STATE, payer: buyer.address }),
       ).toEqual([]);
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(STATUS_VERDICT);
     });
   }
 });

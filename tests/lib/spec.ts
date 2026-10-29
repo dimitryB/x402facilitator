@@ -57,7 +57,21 @@ export const SPEC_INSUFFICIENT_FUNDS: SpecErrorCode = "insufficient_funds";
  * that fits a transfer the chain rejects because its authorization's nonce is already spent.
  */
 export const SPEC_INVALID_TRANSACTION_STATE: SpecErrorCode = "invalid_transaction_state";
-/** scheme_exact_evm.md Permit2 Phase 3 step 2 (the TS reference SDK spells it `permit2_allowance_required`). */
+/**
+ * HTTP status of a /verify or /settle answer that is a verdict on a payment the facilitator could read
+ * (isValid false, or success false, with any §9 code): 200, as the x402 TS reference facilitator answers
+ * (x402-foundation/x402 @ e4a0868, examples/typescript/facilitator/basic/index.ts: `res.json(response)`).
+ * A stock TS resource server reads the bare §9 code only from a 2xx answer; see
+ * facilitator/x402-rs/README.md, "HTTP status codes".
+ */
+export const STATUS_VERDICT = 200;
+/** HTTP status of a request that cannot be read (invalid_payload, invalid_x402_version): 400. */
+export const STATUS_UNREADABLE = 400;
+/**
+ * scheme_exact_evm.md Permit2 Phase 3 step 2 (the TS reference SDK spells it `permit2_allowance_required`).
+ * The 412 there is the resource server's answer to the client (x402HTTPResourceServer.ts 1351–1353);
+ * the facilitator reports the code with STATUS_VERDICT.
+ */
 export const SPEC_PERMIT2_ALLOWANCE_REQUIRED = "PERMIT2_ALLOWANCE_REQUIRED";
 
 type Body = Record<string, unknown>;

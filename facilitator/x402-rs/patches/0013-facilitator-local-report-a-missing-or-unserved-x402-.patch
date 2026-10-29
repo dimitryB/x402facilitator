@@ -1,7 +1,7 @@
 From 7d3f894d37ee49805e9eada1368988ab709e1ede Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 01:05:39 -0400
-Subject: [PATCH 13/15] facilitator-local: report a missing or unserved x402
+Subject: [PATCH 13/18] facilitator-local: report a missing or unserved x402
  version as invalid_x402_version
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
