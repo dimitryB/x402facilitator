@@ -1,0 +1,16 @@
+# Rust
+target/
+# Node
+node_modules/
+dist/
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/*/dry-run/
+# Secrets
+.env
+.env.*
+!.env.example
+*.key
+# OS
+.DS_Store
