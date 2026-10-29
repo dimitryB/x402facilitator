@@ -1,0 +1,250 @@
+From 4f1166b8b82173b0afa12696ed093d3425360b66 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 01:04:22 -0400
+Subject: [PATCH 12/13] eip155: validate EIP-6492 signatures first; ignore a
+ wrapper around the payer's own signature
+
+EIP-6492-wrapped signatures skipped the signature-first rule of 0003: the
+wrapped signature was only checked by the validator inside the transfer
+simulation, after balance and allowance. An unfunded payer with a tampered
+inner signature got insufficient_funds / 412 permit2_allowance_required, a
+funded one got invalid_transaction_state ("Multicall3: call failed"), instead
+of invalid_exact_evm_payload_signature.
+
+Worse, /settle did not validate the signature at all before sending. For a
+payer without code it sent Multicall3.aggregate3([factory.call(<calldata from
+the payload>), transfer]): a call to a caller-chosen address with caller-chosen
+calldata, paid for by the facilitator, even when /verify had rejected the
+payload.
+
+- assert_signed_by_payer, which the v2 exact verify and settle paths of both
+  methods run before balances, allowances and simulation, now asks the
+  EIP-6492 validator (isValidSigWithSideEffects, as an eth_call: nothing is
+  deployed for real) about a wrapped signature. A rejection or a revert is an
+  invalid signature; only a failure to reach the chain is reported as such. A
+  settle therefore never sends the factory call for a signature the validator
+  rejects.
+- StructuredSignature::try_from_bytes treats an EIP-6492 wrapper around a
+  64/65-byte signature that recovers to the payer as the plain EOA signature:
+  the payer's own key signed, so no wallet needs deploying and the factory is
+  never called.
+
+The deployment path itself is unchanged: Multicall3 calls the factory with
+allowFailure, then the transfer, so msg.sender of both calls is Multicall3 and
+the factory call cannot spend anything the facilitator holds; gas is its only
+cost.
+---
+ .../src/v1_eip155_exact/facilitator.rs        | 165 +++++++++++++++---
+ 1 file changed, 137 insertions(+), 28 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+index f4709c3..f4a6304 100644
+--- a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
++++ b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+@@ -554,39 +554,45 @@ impl StructuredSignature {
+             let body = &bytes[..bytes.len() - 32];
+             let sig6492 = Sig6492::abi_decode_params(body)
+                 .map_err(StructuredSignatureFormatError::InvalidEIP6492Format)?;
+-            StructuredSignature::EIP6492 {
+-                factory: sig6492.factory,
+-                factory_calldata: sig6492.factoryCalldata,
+-                inner: sig6492.innerSig,
+-                original: bytes,
++            // A wrapper around a signature the payer's own key made needs no wallet deployment:
++            // treat it as the plain EOA signature, so the factory is never called.
++            match Self::eoa_signature_by(&sig6492.innerSig, expected_signer, prehash) {
++                Some(eoa) => StructuredSignature::EOA(eoa),
++                None => StructuredSignature::EIP6492 {
++                    factory: sig6492.factory,
++                    factory_calldata: sig6492.factoryCalldata,
++                    inner: sig6492.innerSig,
++                    original: bytes,
++                },
+             }
+         } else {
+-            // Let's see if it is a EOA signature
+-            let eoa_signature = if bytes.len() == 65 {
+-                Signature::from_raw(&bytes).ok().map(|s| s.normalized_s())
+-            } else if bytes.len() == 64 {
+-                Some(Signature::from_erc2098(&bytes).normalized_s())
+-            } else {
+-                None
+-            };
+-            match eoa_signature {
++            match Self::eoa_signature_by(&bytes, expected_signer, prehash) {
++                Some(eoa) => StructuredSignature::EOA(eoa),
+                 None => StructuredSignature::EIP1271(bytes),
+-                Some(s) => {
+-                    let is_expected_signer = s
+-                        .recover_address_from_prehash(prehash)
+-                        .ok()
+-                        .map(|r| r == expected_signer)
+-                        .unwrap_or(false);
+-                    if is_expected_signer {
+-                        StructuredSignature::EOA(EOASignature::new(s))
+-                    } else {
+-                        StructuredSignature::EIP1271(bytes)
+-                    }
+-                }
+             }
+         };
+         Ok(signature)
+     }
++
++    /// `bytes` as a 64/65-byte ECDSA signature by `expected_signer` over `prehash`, if it is one.
++    fn eoa_signature_by(
++        bytes: &Bytes,
++        expected_signer: Address,
++        prehash: &B256,
++    ) -> Option<EOASignature> {
++        let signature = if bytes.len() == 65 {
++            Signature::from_raw(bytes).ok().map(|s| s.normalized_s())
++        } else if bytes.len() == 64 {
++            Some(Signature::from_erc2098(bytes).normalized_s())
++        } else {
++            None
++        }?;
++        let is_expected_signer = signature
++            .recover_address_from_prehash(prehash)
++            .ok()
++            .is_some_and(|r| r == expected_signer);
++        is_expected_signer.then(|| EOASignature::new(signature))
++    }
+ }
+ 
+ impl From<StructuredSignature> for Bytes {
+@@ -831,6 +837,35 @@ pub async fn assert_eip1271_signature_valid<P: Provider>(
+     }
+ }
+ 
++/// Asks the EIP-6492 validator whether `signature` (the full wrapped signature) is `signer`'s for
++/// `hash`. The validator deploys the wallet through the signature's factory if it has no code yet,
++/// then checks the signature; run as an `eth_call`, nothing is deployed for real. A rejection or a
++/// revert is an invalid signature; only a failure to reach the chain is reported as such. This keeps
++/// an unauthenticated factory call from ever being sent: settle runs this check before anything else.
++pub async fn assert_eip6492_signature_valid<P: Provider>(
++    provider: &P,
++    signer: &Address,
++    hash: &B256,
++    signature: &Bytes,
++) -> Result<(), Eip155ExactError> {
++    let validator = Validator6492::new(VALIDATOR_ADDRESS, provider);
++    let call = validator.isValidSigWithSideEffects(*signer, *hash, signature.clone());
++    match call.call().await {
++        Ok(true) => Ok(()),
++        Ok(false) => Err(PaymentVerificationError::InvalidSignature(format!(
++            "The EIP-6492 validator does not accept the signature for {signer}"
++        ))
++        .into()),
++        Err(alloy_contract::Error::TransportError(e)) if !is_revert_response(&e) => {
++            Err(Eip155ExactError::Transport(e))
++        }
++        Err(e) => Err(PaymentVerificationError::InvalidSignature(format!(
++            "The EIP-6492 validator does not accept the signature for {signer}: {e}"
++        ))
++        .into()),
++    }
++}
++
+ /// Whether a JSON-RPC error is an execution revert rather than an RPC failure.
+ fn is_revert_response(error: &TransportError) -> bool {
+     error
+@@ -847,7 +882,8 @@ fn is_revert_response(error: &TransportError) -> bool {
+ /// - An EIP-1271 signature (one that does not recover to the payer) is only possible from a contract
+ ///   ([`assert_eip1271_signer_has_code`]), and that contract must accept it for `hash`, the EIP-712
+ ///   hash the token or Permit2 will check ([`assert_eip1271_signature_valid`]).
+-/// - An EIP-6492 signature is left to the on-chain validator, because the wallet may not be deployed yet.
++/// - An EIP-6492 signature (a wallet that may not be deployed yet) must be accepted by the EIP-6492
++///   validator ([`assert_eip6492_signature_valid`]).
+ pub async fn assert_signed_by_payer<P: Provider>(
+     provider: &P,
+     signature: &StructuredSignature,
+@@ -859,7 +895,10 @@ pub async fn assert_signed_by_payer<P: Provider>(
+             assert_eip1271_signer_has_code(provider, payer).await?;
+             assert_eip1271_signature_valid(provider, payer, hash, signature).await
+         }
+-        StructuredSignature::EOA(_) | StructuredSignature::EIP6492 { .. } => Ok(()),
++        StructuredSignature::EIP6492 { original, .. } => {
++            assert_eip6492_signature_valid(provider, payer, hash, original).await
++        }
++        StructuredSignature::EOA(_) => Ok(()),
+     }
+ }
+ 
+@@ -1532,6 +1571,76 @@ mod tests {
+         )));
+     }
+ 
++    fn wrap_6492(inner: Bytes) -> Bytes {
++        let body = alloy_sol_types::SolValue::abi_encode_params(&Sig6492 {
++            factory: Address::repeat_byte(0xfa),
++            factoryCalldata: Bytes::from_static(&[0xde, 0xad]),
++            innerSig: inner,
++        });
++        let mut wrapped = body;
++        wrapped.extend_from_slice(&EIP6492_MAGIC_SUFFIX);
++        Bytes::from(wrapped)
++    }
++
++    #[test]
++    fn eip6492_wrapper_around_the_payers_own_signature_is_a_plain_eoa_signature() {
++        let payer = PrivateKeySigner::random();
++        let owner = PrivateKeySigner::random();
++        let hash = B256::repeat_byte(0x42);
++        let own = wrap_6492(Bytes::from(payer.sign_hash_sync(&hash).unwrap().as_bytes()));
++        let others = wrap_6492(Bytes::from(owner.sign_hash_sync(&hash).unwrap().as_bytes()));
++        assert!(matches!(
++            StructuredSignature::try_from_bytes(own, payer.address(), &hash).unwrap(),
++            StructuredSignature::EOA(_)
++        ));
++        assert!(matches!(
++            StructuredSignature::try_from_bytes(others, payer.address(), &hash).unwrap(),
++            StructuredSignature::EIP6492 { .. }
++        ));
++    }
++
++    async fn eip6492_check(asserter: &Asserter) -> Result<(), Eip155ExactError> {
++        assert_eip6492_signature_valid(
++            &mocked_provider(asserter),
++            &Address::repeat_byte(0x11),
++            &B256::repeat_byte(0x42),
++            &Bytes::from_static(&[1, 2, 3]),
++        )
++        .await
++    }
++
++    #[tokio::test]
++    async fn eip6492_signature_needs_the_validators_yes() {
++        let word = |value: bool| {
++            let mut word = [0u8; 32];
++            word[31] = value as u8;
++            Bytes::from(word)
++        };
++        let asserter = Asserter::new();
++        asserter.push_success(&word(true));
++        assert!(eip6492_check(&asserter).await.is_ok());
++
++        let asserter = Asserter::new();
++        asserter.push_success(&word(false));
++        assert!(is_invalid_signature(&eip6492_check(&asserter).await));
++
++        let asserter = Asserter::new();
++        asserter.push_failure(
++            serde_json::from_value(serde_json::json!({
++                "code": 3, "message": "execution reverted", "data": "0x"
++            }))
++            .unwrap(),
++        );
++        assert!(is_invalid_signature(&eip6492_check(&asserter).await));
++
++        let asserter = Asserter::new();
++        asserter.push_failure_msg("rate limited");
++        assert!(matches!(
++            eip6492_check(&asserter).await,
++            Err(Eip155ExactError::Transport(_))
++        ));
++    }
++
+     #[tokio::test]
+     async fn eip1271_signature_from_an_address_without_code_is_invalid() {
+         let asserter = Asserter::new();

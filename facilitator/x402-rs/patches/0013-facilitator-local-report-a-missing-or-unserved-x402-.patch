@@ -1,0 +1,260 @@
+From 7d3f894d37ee49805e9eada1368988ab709e1ede Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 01:05:39 -0400
+Subject: [PATCH 13/13] facilitator-local: report a missing or unserved x402
+ version as invalid_x402_version
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A request whose top-level x402Version was 1, or missing, was answered with
+invalid_network ("Unsupported chain") even for a network the facilitator
+serves: the v2 slug could not be read, so the network looked unknown. x402 v2
+§9 has a code for this case, invalid_x402_version: "Protocol version is not
+supported".
+
+- VerifyRequest::x402_version reads the top-level x402Version.
+- SchemeRegistry::supports_version tells whether any handler serves a version,
+  and SchemeRegistry::with_handler adds a handler to a registry assembled by
+  hand (used by the new tests).
+- When no handler matches, FacilitatorLocal first reports
+  UnsupportedX402Version (invalid_x402_version) if the request names no
+  version, or one no handler serves; the network and scheme checks follow.
+---
+ .../src/facilitator_local.rs                  | 99 ++++++++++++++++---
+ crates/x402-types/src/proto/mod.rs            | 18 ++++
+ crates/x402-types/src/scheme/mod.rs           | 16 +++
+ 3 files changed, 121 insertions(+), 12 deletions(-)
+
+diff --git a/crates/x402-facilitator-local/src/facilitator_local.rs b/crates/x402-facilitator-local/src/facilitator_local.rs
+index fcc7812..d765c9e 100644
+--- a/crates/x402-facilitator-local/src/facilitator_local.rs
++++ b/crates/x402-facilitator-local/src/facilitator_local.rs
+@@ -150,7 +150,8 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
+     }
+ }
+ 
+-/// Why no handler serves `request`: a network no handler serves (or one x402-rs does not know) is
++/// Why no handler serves `request`: a missing or unserved `x402Version` is `invalid_x402_version`;
++/// a network no handler serves (or one x402-rs does not know) is
+ /// `invalid_network` ("Specified blockchain network is not supported", x402 v2 §9); a served network
+ /// without the requested scheme or protocol version is `unsupported_scheme`; a request that names no
+ /// network is `invalid_payload`.
+@@ -158,6 +159,13 @@ fn no_handler_error(
+     handlers: &SchemeRegistry,
+     request: &proto::VerifyRequest,
+ ) -> PaymentVerificationError {
++    // §9 "Protocol version is not supported": no top-level x402Version, or one no handler serves.
++    if !request
++        .x402_version()
++        .is_some_and(|version| handlers.supports_version(version))
++    {
++        return PaymentVerificationError::UnsupportedX402Version;
++    }
+     match request.scheme_handler_slug() {
+         Some(slug) if !handlers.supports_chain(&slug.chain_id) => {
+             PaymentVerificationError::UnsupportedChain
+@@ -219,11 +227,63 @@ impl ErrorContext {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use x402_types::chain::ChainId;
+     use x402_types::proto::{AsPaymentProblem, ErrorReason};
++    use x402_types::scheme::SchemeHandlerSlug;
++
++    /// A handler that is never reached: these tests are about requests no handler serves.
++    /// (The trait is `async_trait`; this crate does not depend on the macro, so it is spelled out.)
++    struct Unreachable;
++
++    type Answer<'a, T> = std::pin::Pin<
++        Box<dyn std::future::Future<Output = Result<T, X402SchemeFacilitatorError>> + Send + 'a>,
++    >;
++
++    impl x402_types::scheme::X402SchemeFacilitator for Unreachable {
++        fn verify<'a, 'b, 'c>(
++            &'a self,
++            _: &'b proto::VerifyRequest,
++        ) -> Answer<'c, proto::VerifyResponse>
++        where
++            'a: 'c,
++            'b: 'c,
++            Self: 'c,
++        {
++            Box::pin(async { unreachable!() })
++        }
++        fn settle<'a, 'b, 'c>(
++            &'a self,
++            _: &'b proto::SettleRequest,
++        ) -> Answer<'c, proto::SettleResponse>
++        where
++            'a: 'c,
++            'b: 'c,
++            Self: 'c,
++        {
++            Box::pin(async { unreachable!() })
++        }
++        fn supported<'a, 'c>(&'a self) -> Answer<'c, proto::SupportedResponse>
++        where
++            'a: 'c,
++            Self: 'c,
++        {
++            Box::pin(async { unreachable!() })
++        }
++    }
+ 
+-    fn request(network: &str) -> proto::VerifyRequest {
++    /// A facilitator serving `exact` v2 on eip155:43111 only.
++    fn facilitator() -> FacilitatorLocal<SchemeRegistry> {
++        let chain: ChainId = "eip155:43111".parse().unwrap();
++        let slug = SchemeHandlerSlug::new(chain, 2, "exact".to_string());
++        FacilitatorLocal::new(SchemeRegistry::default().with_handler(slug, Box::new(Unreachable)))
++    }
++
++    fn request(version: Option<u8>, network: &str) -> proto::VerifyRequest {
++        let version = version
++            .map(|v| format!(r#""x402Version":{v},"#))
++            .unwrap_or_default();
+         serde_json::from_str(&format!(
+-            r#"{{"x402Version":2,"paymentPayload":{{"x402Version":2,"accepted":{{"scheme":"exact","network":"{network}"}},"payload":{{}}}},"paymentRequirements":{{}}}}"#
++            r#"{{{version}"paymentPayload":{{"x402Version":2,"accepted":{{"scheme":"exact","network":"{network}"}},"payload":{{}}}},"paymentRequirements":{{}}}}"#
+         ))
+         .unwrap()
+     }
+@@ -239,8 +299,8 @@ mod tests {
+ 
+     #[tokio::test]
+     async fn unknown_network_is_invalid_network() {
+-        let facilitator = FacilitatorLocal::new(SchemeRegistry::default());
+-        let request = request("eip155:1");
++        let facilitator = facilitator();
++        let request = request(Some(2), "eip155:1");
+         let (verify, context) = reason(facilitator.verify(&request).await.unwrap_err());
+         assert_eq!(verify, ErrorReason::InvalidNetwork);
+         assert_eq!(context.network.as_deref(), Some("eip155:1"));
+@@ -249,13 +309,28 @@ mod tests {
+     }
+ 
+     #[tokio::test]
+-    async fn request_without_a_network_is_invalid_payload() {
+-        let facilitator = FacilitatorLocal::new(SchemeRegistry::default());
+-        for body in [r#"{"x402Version":2}"#, "{}"] {
+-            let request: proto::VerifyRequest = serde_json::from_str(body).unwrap();
+-            let (settle, context) = reason(facilitator.settle(&request).await.unwrap_err());
+-            assert_eq!(settle, ErrorReason::InvalidPayload, "{body}");
+-            assert_eq!(context.network, None);
++    async fn missing_or_unserved_version_is_invalid_x402_version() {
++        let facilitator = facilitator();
++        for request in [
++            request(Some(1), "eip155:43111"),
++            request(None, "eip155:43111"),
++        ] {
++            let (verify, _) = reason(facilitator.verify(&request).await.unwrap_err());
++            assert_eq!(verify, ErrorReason::InvalidX402Version);
++            let (settle, _) = reason(facilitator.settle(&request).await.unwrap_err());
++            assert_eq!(settle, ErrorReason::InvalidX402Version);
+         }
++        let empty: proto::VerifyRequest = serde_json::from_str("{}").unwrap();
++        let (settle, context) = reason(facilitator.settle(&empty).await.unwrap_err());
++        assert_eq!(settle, ErrorReason::InvalidX402Version);
++        assert_eq!(context.network, None);
++    }
++
++    #[tokio::test]
++    async fn request_without_a_network_is_invalid_payload() {
++        let request: proto::VerifyRequest = serde_json::from_str(r#"{"x402Version":2}"#).unwrap();
++        let (settle, context) = reason(facilitator().settle(&request).await.unwrap_err());
++        assert_eq!(settle, ErrorReason::InvalidPayload);
++        assert_eq!(context.network, None);
+     }
+ }
+diff --git a/crates/x402-types/src/proto/mod.rs b/crates/x402-types/src/proto/mod.rs
+index d65187e..c79a9fc 100644
+--- a/crates/x402-types/src/proto/mod.rs
++++ b/crates/x402-types/src/proto/mod.rs
+@@ -150,6 +150,12 @@ impl VerifyRequest {
+         self.0.get()
+     }
+ 
++    /// Returns the request's top-level `x402Version`, if it is a number that fits a protocol version.
++    pub fn x402_version(&self) -> Option<u8> {
++        let value: serde_json::Value = serde_json::from_str(self.as_str()).ok()?;
++        u8::try_from(value.get("x402Version")?.as_u64()?).ok()
++    }
++
+     /// Returns the network the request is for, as the request writes it:
+     /// `paymentPayload.accepted.network` (v2, a CAIP-2 chain id) or
+     /// `paymentPayload.network` (v1, a network name).
+@@ -289,6 +295,11 @@ pub enum PaymentVerificationError {
+     /// The payment scheme is not supported by this facilitator.
+     #[error("Unsupported scheme")]
+     UnsupportedScheme,
++    /// The request names no x402 protocol version, or one this facilitator does not serve.
++    ///
++    /// Reported as x402 v2 §9 `invalid_x402_version`.
++    #[error("Unsupported x402 protocol version")]
++    UnsupportedX402Version,
+     /// The accepted payment details don't match the requirements.
+     #[error("Accepted does not match payment requirements")]
+     AcceptedRequirementsMismatch,
+@@ -363,6 +374,7 @@ impl AsPaymentProblem for PaymentVerificationError {
+             }
+             PaymentVerificationError::UnsupportedChain => ErrorReason::InvalidNetwork,
+             PaymentVerificationError::UnsupportedScheme => ErrorReason::UnsupportedScheme,
++            PaymentVerificationError::UnsupportedX402Version => ErrorReason::InvalidX402Version,
+             // The requirements are not the ones the payload accepted: §9 invalid_payment_requirements.
+             PaymentVerificationError::AcceptedRequirementsMismatch => {
+                 ErrorReason::InvalidPaymentRequirements
+@@ -459,6 +471,8 @@ pub enum ErrorReason {
+     InvalidPaymentRequirements,
+     /// x402 v2 §9: "Payment payload is malformed or contains invalid data".
+     InvalidPayload,
++    /// x402 v2 §9: "Protocol version is not supported".
++    InvalidX402Version,
+ }
+ 
+ /// Trait for converting errors into structured payment problems.
+@@ -558,6 +572,7 @@ mod tests {
+                 "invalid_payment_requirements",
+             ),
+             (ErrorReason::InvalidPayload, "invalid_payload"),
++            (ErrorReason::InvalidX402Version, "invalid_x402_version"),
+             (ErrorReason::InsufficientFunds, "insufficient_funds"),
+         ];
+         for (reason, code) in cases {
+@@ -633,6 +648,9 @@ mod tests {
+         );
+         assert_eq!(v2.network().as_deref(), Some("eip155:43111"));
+         let v1 = request(r#"{"x402Version":1,"paymentPayload":{"network":"base-sepolia"}}"#);
++        assert_eq!(v1.x402_version(), Some(1));
++        assert_eq!(request(r#"{"paymentPayload":{}}"#).x402_version(), None);
++        assert_eq!(request(r#"{"x402Version":"2"}"#).x402_version(), None);
+         assert_eq!(v1.network().as_deref(), Some("base-sepolia"));
+         let none = request(r#"{"x402Version":2,"paymentPayload":{}}"#);
+         assert_eq!(none.network(), None);
+diff --git a/crates/x402-types/src/scheme/mod.rs b/crates/x402-types/src/scheme/mod.rs
+index b9d9e1c..e4469e0 100644
+--- a/crates/x402-types/src/scheme/mod.rs
++++ b/crates/x402-types/src/scheme/mod.rs
+@@ -352,6 +352,22 @@ impl SchemeRegistry {
+     pub fn supports_chain(&self, chain_id: &ChainId) -> bool {
+         self.0.keys().any(|slug| &slug.chain_id == chain_id)
+     }
++
++    /// Whether any handler serves x402 protocol version `x402_version`.
++    pub fn supports_version(&self, x402_version: u8) -> bool {
++        self.0.keys().any(|slug| slug.x402_version == x402_version)
++    }
++
++    /// The registry with `handler` added under `slug` (replacing any handler already there), for
++    /// registries assembled by hand rather than from configuration.
++    pub fn with_handler(
++        mut self,
++        slug: SchemeHandlerSlug,
++        handler: Box<dyn X402SchemeFacilitator>,
++    ) -> Self {
++        self.0.insert(slug, handler);
++        self
++    }
+ }
+ 
+ /// Configuration for a specific scheme.

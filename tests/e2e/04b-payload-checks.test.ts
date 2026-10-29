@@ -11,6 +11,7 @@
  * | pays someone other than payTo          | invalid_exact_evm_payload_recipient_mismatch             |
  * | Permit2 permit for another token       | invalid_payload                                          |
  * | body is not JSON / names no network    | invalid_payload                                          |
+ * | no or unserved top-level x402Version   | invalid_x402_version                                     |
  *
  * Stock x402-rs (and hemi.2) accepted an over-payment and settled the larger amount, and used its own
  * names for the rest (invalid_payment_expired, recipient_mismatch, asset_mismatch, ...); a body that is
@@ -133,11 +134,40 @@ describe("unreadable requests get the endpoint's JSON error shape with invalid_p
     }
   });
 
-  it("an empty object names no network: invalid_payload, network omitted", async () => {
-    const res = await postRaw("/settle", "{}");
-    record("/settle with {}", res);
+  it("a request with x402Version but no payment names no network: invalid_payload, network omitted", async () => {
+    const res = await postRaw("/settle", JSON.stringify({ x402Version: 2 }));
+    record("/settle with only x402Version", res);
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ success: false, errorReason: "invalid_payload", transaction: "" });
     expect(res.body).not.toHaveProperty("network");
+  });
+});
+
+/**
+ * §9 `invalid_x402_version`: "Protocol version is not supported" (facilitator/x402-rs/patches 0013). The
+ * facilitator serves x402 v2 only. Stock x402-rs, and hemi.3, answered a top-level x402Version of 1, or
+ * none, with invalid_network ("Unsupported chain") although the network is served.
+ */
+describe("an x402 version the facilitator does not serve", () => {
+  const payer = freshAccount();
+
+  it("top-level x402Version 1, or none, on a served network: invalid_x402_version", async () => {
+    const requirements = requirementsFor(MAINNET, usdcAsset(MAINNET), freshAddress(), 1_000n);
+    const payment = await signPayment(payer, requirements);
+    const bodies: [string, Record<string, unknown>][] = [
+      ["x402Version 1", { x402Version: 1, paymentPayload: payment, paymentRequirements: requirements }],
+      ["no x402Version", { paymentPayload: payment, paymentRequirements: requirements }],
+      ["empty object", {}],
+    ];
+    for (const [label, body] of bodies) {
+      const v = await postRaw("/verify", JSON.stringify(body));
+      record(`/verify with ${label}`, v);
+      expect(v.status).toBe(400);
+      expect(v.body).toMatchObject({ isValid: false, invalidReason: "invalid_x402_version" });
+      const s = await postRaw("/settle", JSON.stringify(body));
+      record(`/settle with ${label}`, s);
+      expect(s.status).toBe(400);
+      expect(s.body).toMatchObject({ success: false, errorReason: "invalid_x402_version", transaction: "" });
+    }
   });
 });

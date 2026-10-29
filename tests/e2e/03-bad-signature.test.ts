@@ -26,10 +26,19 @@
  * 0003 and 0008 fix that.
  */
 import { beforeAll, describe, expect, it } from "vitest";
-import { erc20Abi, getAddress, parseEventLogs, type Hex, type LocalAccount } from "viem";
+import { erc20Abi, getAddress, parseEventLogs, serializeErc6492Signature, type Hex, type LocalAccount } from "viem";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { btcAsset, MAINNET, usdcAsset, type HemiAsset, type HemiNetwork } from "@hemi-x402/shared";
-import { ensurePermit2Approval, fundEth, fundToken, makeContractWallet, publicClient, tokenBalance } from "../lib/chain";
+import {
+  ensurePermit2Approval,
+  fundEth,
+  fundToken,
+  makeContractWallet,
+  nonceOf,
+  publicClient,
+  tokenBalance,
+} from "../lib/chain";
+import { FACILITATOR_SIGNER } from "../lib/env";
 import { record, settle, verify } from "../lib/facilitator";
 import {
   contractWalletSigner,
@@ -230,6 +239,81 @@ describe("contract-wallet payers (EIP-1271): the wallet's isValidSignature decid
         ).toEqual([]);
         expect(s.status).toBe(400);
         expect(await snapshot(m.network, m.asset, wallet, payTo)).toEqual(before);
+      });
+    });
+  }
+});
+
+/**
+ * EIP-6492-wrapped signatures (counterfactual wallets): facilitator/x402-rs/patches 0012.
+ *
+ * - The wrapped signature is checked by the EIP-6492 validator first, before balance and allowance, on
+ *   /verify and /settle. hemi.3 answered an unfunded payer with insufficient_funds / 412 and a funded
+ *   one with invalid_transaction_state ("Multicall3: call failed"); its /settle also sent
+ *   Multicall3.aggregate3([factory.call(<payload calldata>), transfer]) for a payer without code.
+ * - A wrapper around the payer's own EOA signature is ignored: the payment settles as a plain EOA
+ *   payment, and no factory is called.
+ */
+describe("EIP-6492-wrapped signatures", () => {
+  /** Some address standing in for a wallet factory; the validator calls it in its simulation only. */
+  const FACTORY = "0x00000000000000000000000000000000fac70e11" as const;
+  const wrap = (signature: Hex) =>
+    serializeErc6492Signature({ address: FACTORY, data: "0xdeadbeef", signature });
+
+  for (const m of METHODS) {
+    describe(`${m.method} (${m.asset.symbol} on ${m.network})`, () => {
+      for (const funded of [false, true]) {
+        it(`${funded ? "funded" : "unfunded"} payer, wrapped signature by another key: "${SPEC_INVALID_SIGNATURE}", nothing sent`, async () => {
+          const payer = freshAccount();
+          if (funded) {
+            await fundEth(m.network, payer.address);
+            await fundToken(m.network, m.asset, payer.address, 1_000_000n);
+            if (m.asset.transferMethod === "permit2") await ensurePermit2Approval(m.network, payer, m.asset, m.amount);
+          }
+          const payTo = freshAddress();
+          const requirements = requirementsFor(m.network, m.asset, payTo, m.amount);
+          const foreign = withFrom(await signPayment(freshAccount(), requirements), payer.address);
+          const bad = withSignature(foreign, wrap((foreign.payload as { signature: Hex }).signature));
+          const before = await snapshot(m.network, m.asset, payer.address, payTo);
+
+          const v = await verify(bad, requirements);
+          record(`verify EIP-6492 bad signature, ${funded ? "funded" : "unfunded"}: ${m.method}`, v);
+          expect(verifyFailureViolations(v.body, { reason: SPEC_INVALID_SIGNATURE, payer: payer.address })).toEqual([]);
+          expect(v.status).toBe(400);
+
+          const s = await settle(bad, requirements);
+          record(`settle EIP-6492 bad signature, ${funded ? "funded" : "unfunded"}: ${m.method}`, s);
+          expect(
+            settleFailureViolations(s.body, { reasons: [SPEC_INVALID_SIGNATURE], payer: payer.address, network: m.network, broadcast: false }),
+          ).toEqual([]);
+          expect(s.status).toBe(400);
+          // No Multicall3 / factory transaction was sent: the facilitator's nonce did not move.
+          expect(await snapshot(m.network, m.asset, payer.address, payTo)).toEqual(before);
+        });
+      }
+
+      it("a wrapper around the payer's own signature is ignored: it settles as a plain EOA payment", async () => {
+        const payer = freshAccount();
+        await fundEth(m.network, payer.address);
+        await fundToken(m.network, m.asset, payer.address, 1_000_000n);
+        if (m.asset.transferMethod === "permit2") await ensurePermit2Approval(m.network, payer, m.asset, m.amount);
+        const payTo = freshAddress();
+        const requirements = requirementsFor(m.network, m.asset, payTo, m.amount);
+        const own = await signPayment(payer, requirements);
+        const wrapped = withSignature(own, wrap((own.payload as { signature: Hex }).signature));
+
+        const v = await verify(wrapped, requirements);
+        record(`verify EIP-6492 wrapper around own signature: ${m.method}`, v);
+        expect(v.body).toEqual({ isValid: true, payer: payer.address });
+        const nonceBefore = await nonceOf(m.network, FACILITATOR_SIGNER[m.network]);
+        const s = await settle(wrapped, requirements);
+        record(`settle EIP-6492 wrapper around own signature: ${m.method}`, s);
+        expect(s.body).toMatchObject({ success: true, payer: payer.address, network: m.network });
+        // One transaction, straight to the token (EIP-3009) or the x402 proxy (Permit2): no Multicall3.
+        const receipt = await publicClient(m.network).getTransactionReceipt({ hash: s.body.transaction as Hex });
+        expect(getAddress(receipt.to!)).toBe(m.asset.transferMethod === "eip3009" ? m.asset.address : getAddress("0x402085c248EeA27D92E8b30b2C58ed07f9E20001"));
+        expect(await nonceOf(m.network, FACILITATOR_SIGNER[m.network])).toBe(nonceBefore + 1);
+        expect(await tokenBalance(m.network, m.asset, payTo)).toBe(m.amount);
       });
     });
   }

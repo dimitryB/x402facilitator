@@ -1,0 +1,650 @@
+From 34659c789328682f788fd0f4bcae0f428a4c5c2d Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 00:22:12 -0400
+Subject: [PATCH 11/13] eip155: one settlement per authorization; answer a
+ pending one's retry from its transaction
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+x402 v2 §9 makes settlement_pending non-terminal: the caller reconciles and may
+send the same settle request again. The TS SDK's resource server does so once,
+immediately (settleWithPendingRetry). x402-rs kept no record of the first
+attempt, so the retry was settled from scratch: a second broadcast while the
+first transaction was still pending, or invalid_transaction_state once it had
+spent the nonce, although the payment had gone through. Meanwhile /verify still
+called the authorization valid while its transaction was unmined, so a seller
+could serve another request with the same payment.
+
+The v2 exact handler now keeps one record per payment authorization (chain,
+payer, EIP-3009 or Permit2 nonce) from the start of a settle until its outcome
+is known:
+
+- While a record exists, /verify of that authorization, and /settle of any
+  other request carrying it, get invalid_transaction_state (new
+  PaymentVerificationError::AuthorizationInFlight): the authorization is
+  already committed to a settlement and must not pay for anything else.
+- A settle that ends in anything but settlement_pending drops its record when
+  it returns (a drop guard, so also if the request is cancelled).
+- A retry of the very same request (same parsed payload, signature and
+  requirements) sends nothing and is answered from the transaction's receipt:
+  settlement_pending with the same hash while unmined; success with the hash
+  for the first retry that sees it mined, which removes the record atomically,
+  so concurrent retries cannot both get the success and every later settle is
+  an ordinary replay (invalid_transaction_state); a reverted transaction
+  removes the record and gets invalid_transaction_state with its hash.
+- Records are in memory, bounded (10,000, oldest dropped first) and expire
+  after 15 minutes.
+
+A settlement transaction that was mined but reverted is now reported with its
+hash in transaction (new X402SchemeFacilitatorError::TransactionFailed, x402 v2
+§9 invalid_transaction_state, HTTP 400) instead of unexpected_error with
+"transaction": "": §5.3.2 allows "" only if nothing was broadcast. Such a
+revert is no longer re-explained as a replay.
+---
+ .../src/v1_eip155_exact/facilitator.rs        |   7 +-
+ .../src/v2_eip155_exact/facilitator/mod.rs    | 115 +++++++-
+ .../v2_eip155_exact/facilitator/pending.rs    | 265 ++++++++++++++++++
+ crates/x402-facilitator-local/src/handlers.rs |  23 +-
+ crates/x402-types/src/proto/mod.rs            |  14 +-
+ crates/x402-types/src/scheme/mod.rs           |  12 +
+ 6 files changed, 429 insertions(+), 7 deletions(-)
+ create mode 100644 crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs
+
+diff --git a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+index d9cc791..f4709c3 100644
+--- a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
++++ b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+@@ -887,7 +887,6 @@ pub fn is_failed_execution(error: &Eip155ExactError) -> bool {
+         error,
+         Eip155ExactError::Transport(_)
+             | Eip155ExactError::ContractCall(_)
+-            | Eip155ExactError::TransactionReverted(_)
+             | Eip155ExactError::PaymentVerification(
+                 PaymentVerificationError::TransactionSimulation(_)
+             )
+@@ -1296,7 +1295,11 @@ impl From<Eip155ExactError> for X402SchemeFacilitatorError {
+         match value {
+             Eip155ExactError::Transport(_) => Self::OnchainFailure(value.to_string()),
+             Eip155ExactError::PendingTransaction(_) => Self::OnchainFailure(value.to_string()),
+-            Eip155ExactError::TransactionReverted(_) => Self::OnchainFailure(value.to_string()),
++            // Mined and reverted: the transaction exists, so its hash goes into the response.
++            Eip155ExactError::TransactionReverted(tx_hash) => Self::TransactionFailed {
++                transaction: tx_hash.to_string(),
++                details: value.to_string(),
++            },
+             Eip155ExactError::ContractCall(_) => Self::OnchainFailure(value.to_string()),
+             Eip155ExactError::PaymentVerification(e) => Self::PaymentVerification(e),
+             Eip155ExactError::SettlementPending { tx_hash, .. } => Self::SettlementPending {
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
+index de70ca6..fa9de1b 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
+@@ -6,8 +6,10 @@
+ 
+ pub mod eip2612;
+ pub mod eip3009;
++pub mod pending;
+ pub mod permit2;
+ 
++use alloy_primitives::{B256, TxHash};
+ use alloy_provider::Provider;
+ use serde::{Deserialize, Serialize};
+ use std::collections::HashMap;
+@@ -24,7 +26,7 @@ use crate::V2Eip155Exact;
+ use crate::chain::Eip155MetaTransactionProvider;
+ use crate::eip2612_gas_sponsoring::Eip2612GasSponsoring;
+ use crate::v1_eip155_exact::ExactScheme;
+-use crate::v1_eip155_exact::facilitator::Eip155ExactError;
++use crate::v1_eip155_exact::facilitator::{Eip155ExactError, tx_hash_from_receipt};
+ use crate::v2_eip155_exact::types;
+ 
+ impl<P> X402SchemeFacilitatorBuilder<P> for V2Eip155Exact
+@@ -71,6 +73,16 @@ fn exact_evm_error(error: X402SchemeFacilitatorError) -> X402SchemeFacilitatorEr
+     error.into()
+ }
+ 
++/// The error for an authorization that is being settled, or whose settlement is pending.
++fn authorization_in_flight(record: pending::Record) -> PaymentVerificationError {
++    PaymentVerificationError::AuthorizationInFlight(match record.transaction {
++        Some(tx_hash) => format!(
++            "A settlement of this payment authorization is pending in transaction {tx_hash}"
++        ),
++        None => "A settlement of this payment authorization is in progress".to_string(),
++    })
++}
++
+ /// Configuration for the V2 EIP-155 exact scheme facilitator.
+ ///
+ /// This struct holds optional configuration parameters that control
+@@ -116,6 +128,9 @@ pub struct V2Eip155ExactFacilitatorExtra {
+ pub struct V2Eip155ExactFacilitator<P> {
+     provider: P,
+     eip2612_gas_sponsoring: bool,
++    /// Settlements answered with `settlement_pending`, so that a retry is answered from the same
++    /// transaction instead of being settled again.
++    pending: pending::PendingSettlements,
+ }
+ 
+ impl<P> V2Eip155ExactFacilitator<P> {
+@@ -124,6 +139,70 @@ impl<P> V2Eip155ExactFacilitator<P> {
+         Self {
+             provider,
+             eip2612_gas_sponsoring: config.eip2612_gas_sponsoring,
++            pending: pending::PendingSettlements::default(),
++        }
++    }
++}
++
++impl<P> V2Eip155ExactFacilitator<P>
++where
++    P: Eip155MetaTransactionProvider,
++    P::Inner: Provider,
++{
++    /// The answer to a retried settle request whose transaction was broadcast earlier but not
++    /// confirmed then. Nothing is sent again:
++    /// - not mined yet: `settlement_pending` with the same hash;
++    /// - mined: success with the hash, for the first retry that claims the record; any later settle
++    ///   of the payload is a replay (`invalid_transaction_state`);
++    /// - reverted: `invalid_transaction_state` with the hash, and the record is removed.
++    async fn pending_outcome(
++        &self,
++        request: &types::FacilitatorSettleRequest,
++        id: B256,
++        tx_hash: TxHash,
++    ) -> Result<proto::SettleResponse, X402SchemeFacilitatorError> {
++        let (payer, network) = match request {
++            types::FacilitatorSettleRequest::Eip3009 {
++                payment_payload, ..
++            } => (
++                payment_payload.payload.authorization.from.to_string(),
++                payment_payload.accepted.network.to_string(),
++            ),
++            types::FacilitatorSettleRequest::Permit2 {
++                payment_payload, ..
++            } => (
++                payment_payload
++                    .payload
++                    .permit_2_authorization
++                    .from
++                    .to_string(),
++                payment_payload.accepted.network.to_string(),
++            ),
++        };
++        let transaction = tx_hash.to_string();
++        match self.provider.inner().get_transaction_receipt(tx_hash).await {
++            Ok(Some(receipt)) => match tx_hash_from_receipt(&receipt) {
++                Ok(_) if self.pending.claim(&id, tx_hash) => Ok(v2::SettleResponse::Success {
++                    payer,
++                    transaction,
++                    network,
++                }
++                .into()),
++                // Another retry already got this success: this one is a replay.
++                Ok(_) => Err(PaymentVerificationError::AuthorizationAlreadyUsed.into()),
++                Err(reverted) => {
++                    self.pending.claim(&id, tx_hash);
++                    Err(reverted.into())
++                }
++            },
++            Ok(None) => Err(X402SchemeFacilitatorError::SettlementPending {
++                transaction,
++                details: format!("Transaction {tx_hash} is not confirmed yet"),
++            }),
++            Err(e) => Err(X402SchemeFacilitatorError::SettlementPending {
++                transaction,
++                details: format!("Transaction {tx_hash} is not confirmed yet: {e}"),
++            }),
+         }
+     }
+ }
+@@ -146,6 +225,11 @@ where
+         request: &proto::VerifyRequest,
+     ) -> Result<proto::VerifyResponse, X402SchemeFacilitatorError> {
+         let verify_request = types::FacilitatorVerifyRequest::try_from(request.clone())?;
++        // An authorization that is being settled, or whose settlement is pending, must not pay for
++        // anything else.
++        if let Some(record) = self.pending.get(&pending::payment_id(&verify_request)) {
++            return Err(authorization_in_flight(record).into());
++        }
+         let verify_response = match verify_request {
+             types::FacilitatorVerifyRequest::Eip3009 {
+                 payment_payload,
+@@ -204,6 +288,31 @@ where
+         request: &proto::SettleRequest,
+     ) -> Result<proto::SettleResponse, X402SchemeFacilitatorError> {
+         let settle_request = types::FacilitatorSettleRequest::try_from(request.clone())?;
++        // One settlement at a time per authorization. A retry of the request whose settlement is
++        // pending is answered from its transaction rather than settled again; any other request for
++        // an authorization being settled is refused.
++        let id = pending::payment_id(&settle_request);
++        let request_key = pending::request_key(&settle_request);
++        let in_flight = match self.pending.begin(id, request_key) {
++            Ok(in_flight) => in_flight,
++            Err(pending::Record {
++                request,
++                transaction: Some(tx_hash),
++                ..
++            }) if request == request_key => {
++                return self.pending_outcome(&settle_request, id, tx_hash).await;
++            }
++            Err(record) => return Err(authorization_in_flight(record).into()),
++        };
++        let remember_pending = |error: X402SchemeFacilitatorError| {
++            let error = exact_evm_error(error);
++            if let X402SchemeFacilitatorError::SettlementPending { transaction, .. } = &error
++                && let Ok(tx_hash) = transaction.parse::<TxHash>()
++            {
++                in_flight.pending(tx_hash);
++            }
++            error
++        };
+         let settle_response = match settle_request {
+             types::FacilitatorSettleRequest::Eip3009 {
+                 payment_payload,
+@@ -222,7 +331,7 @@ where
+                     &payment_requirements,
+                 )
+                 .await
+-                .map_err(exact_evm_error)?
++                .map_err(remember_pending)?
+             }
+             types::FacilitatorSettleRequest::Permit2 {
+                 payment_requirements,
+@@ -245,7 +354,7 @@ where
+                     &payment_requirements,
+                 )
+                 .await
+-                .map_err(exact_evm_error)?
++                .map_err(remember_pending)?
+             }
+         };
+         Ok(settle_response.into())
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs
+new file mode 100644
+index 0000000..441ec53
+--- /dev/null
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs
+@@ -0,0 +1,265 @@
++//! Payment authorizations that are being settled, or whose settlement transaction was broadcast but
++//! not confirmed in time (`settlement_pending`).
++//!
++//! x402 v2 §9 makes `settlement_pending` non-terminal: the caller is expected to reconcile and may send
++//! the same settle request again (the TS SDK's resource server retries once, immediately). Without a
++//! record of the first attempt, that retry would be settled from scratch: a second transaction, or
++//! `invalid_transaction_state` once the first one has spent the nonce.
++//!
++//! [`PendingSettlements`] keeps one record per payment authorization (chain, payer, EIP-3009 or Permit2
++//! nonce) from the start of a settle until its outcome is known:
++//!
++//! - While a record exists, `/verify` of that authorization is rejected, and so is `/settle` of any other
++//!   request for it: the authorization is already committed to a settlement, so it must not pay for
++//!   anything else.
++//! - A settle that ends in anything but `settlement_pending` removes its record when it returns.
++//! - A retry of the very same request is answered from the pending transaction: `settlement_pending` with
++//!   the same hash while it is unmined. Once it is mined, the first retry that sees the receipt claims the
++//!   record ([`PendingSettlements::claim`], atomic) and gets the success. Every later settle of the payload
++//!   finds no record and is an ordinary replay (`invalid_transaction_state`). A reverted transaction
++//!   removes the record as well.
++//!
++//! Records live in memory, are bounded and expire.
++
++use alloy_primitives::{B256, TxHash, keccak256};
++use std::collections::HashMap;
++use std::sync::{Arc, Mutex, MutexGuard};
++use std::time::{Duration, Instant};
++
++use crate::v2_eip155_exact::types::FacilitatorSettleRequest;
++
++/// Identifies a payment authorization: chain, payer and nonce. Two requests carrying the same signed
++/// authorization have the same id, whatever else differs between them.
++pub fn payment_id(request: &FacilitatorSettleRequest) -> B256 {
++    let id = match request {
++        FacilitatorSettleRequest::Eip3009 {
++            payment_payload, ..
++        } => {
++            let authorization = &payment_payload.payload.authorization;
++            format!(
++                "{}/eip3009/{}/{}",
++                payment_payload.accepted.network, authorization.from, authorization.nonce
++            )
++        }
++        FacilitatorSettleRequest::Permit2 {
++            payment_payload, ..
++        } => {
++            let authorization = &payment_payload.payload.permit_2_authorization;
++            format!(
++                "{}/permit2/{}/{}",
++                payment_payload.accepted.network, authorization.from, authorization.nonce
++            )
++        }
++    };
++    keccak256(id.to_lowercase())
++}
++
++/// Identifies a settle request: the hash of the parsed request (payload, signature and requirements),
++/// so that only the very same payment, retried, is answered from the remembered transaction.
++pub fn request_key(request: &FacilitatorSettleRequest) -> B256 {
++    keccak256(serde_json::to_vec(request).unwrap_or_default())
++}
++
++/// The record of an authorization being settled.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct Record {
++    /// [`request_key`] of the settle request that started it.
++    pub request: B256,
++    /// The broadcast transaction, once the settle ended in `settlement_pending`; `None` while the
++    /// settle is still running.
++    pub transaction: Option<TxHash>,
++    since: Instant,
++}
++
++/// In-memory, bounded and expiring map from payment authorization to its settlement.
++#[derive(Debug, Clone)]
++pub struct PendingSettlements {
++    records: Arc<Mutex<HashMap<B256, Record>>>,
++    ttl: Duration,
++    capacity: usize,
++}
++
++impl Default for PendingSettlements {
++    fn default() -> Self {
++        Self::new(Self::DEFAULT_TTL, Self::DEFAULT_CAPACITY)
++    }
++}
++
++impl PendingSettlements {
++    /// How long a record is kept. Longer than any receipt timeout, and long enough for a client to
++    /// retry; after that a retry is settled afresh (and fails on the spent nonce).
++    pub const DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
++    /// At most this many records are kept; the oldest are dropped first.
++    pub const DEFAULT_CAPACITY: usize = 10_000;
++
++    pub fn new(ttl: Duration, capacity: usize) -> Self {
++        Self {
++            records: Arc::new(Mutex::new(HashMap::new())),
++            ttl,
++            capacity: capacity.max(1),
++        }
++    }
++
++    /// The records, with expired ones dropped.
++    fn records(&self) -> MutexGuard<'_, HashMap<B256, Record>> {
++        let mut records = self.records.lock().unwrap_or_else(|e| e.into_inner());
++        let now = Instant::now();
++        records.retain(|_, record| now.duration_since(record.since) < self.ttl);
++        records
++    }
++
++    /// The record of authorization `id`, if it is being settled or its settlement is pending.
++    pub fn get(&self, id: &B256) -> Option<Record> {
++        self.records().get(id).copied()
++    }
++
++    /// Starts settling authorization `id` with the request `request`. Fails with the existing record if
++    /// the authorization is already being settled or pending. The returned guard removes the record
++    /// when dropped, unless [`InFlight::pending`] recorded a broadcast transaction first.
++    pub fn begin(&self, id: B256, request: B256) -> Result<InFlight<'_>, Record> {
++        let mut records = self.records();
++        if let Some(record) = records.get(&id) {
++            return Err(*record);
++        }
++        if records.len() >= self.capacity
++            && let Some(oldest) = records
++                .iter()
++                .min_by_key(|(_, record)| record.since)
++                .map(|(id, _)| *id)
++        {
++            records.remove(&oldest);
++        }
++        records.insert(
++            id,
++            Record {
++                request,
++                transaction: None,
++                since: Instant::now(),
++            },
++        );
++        Ok(InFlight { store: self, id })
++    }
++
++    /// Removes the record of `id` if it still names `transaction`, and says whether it did. Only one
++    /// caller can win this for a given record, so only one retry is answered with the success.
++    pub fn claim(&self, id: &B256, transaction: TxHash) -> bool {
++        let mut records = self.records();
++        if records
++            .get(id)
++            .is_some_and(|record| record.transaction == Some(transaction))
++        {
++            records.remove(id);
++            true
++        } else {
++            false
++        }
++    }
++}
++
++/// A settle in progress for one authorization (see [`PendingSettlements::begin`]).
++#[derive(Debug)]
++pub struct InFlight<'a> {
++    store: &'a PendingSettlements,
++    id: B256,
++}
++
++impl InFlight<'_> {
++    /// The settle ended in `settlement_pending` with `transaction`: keep the record, now naming it.
++    pub fn pending(&self, transaction: TxHash) {
++        if let Some(record) = self.store.records().get_mut(&self.id) {
++            record.transaction = Some(transaction);
++        }
++    }
++}
++
++impl Drop for InFlight<'_> {
++    fn drop(&mut self) {
++        let mut records = self.store.records();
++        if records
++            .get(&self.id)
++            .is_some_and(|record| record.transaction.is_none())
++        {
++            records.remove(&self.id);
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const ID: B256 = B256::repeat_byte(1);
++    const REQUEST: B256 = B256::repeat_byte(2);
++
++    #[test]
++    fn a_settle_holds_its_authorization_until_it_ends() {
++        let store = PendingSettlements::default();
++        let guard = store.begin(ID, REQUEST).unwrap();
++        // Meanwhile the authorization cannot start another settlement, and verify sees it.
++        assert_eq!(store.begin(ID, REQUEST).unwrap_err().transaction, None);
++        assert!(store.get(&ID).is_some());
++        drop(guard);
++        assert!(store.get(&ID).is_none());
++    }
++
++    #[test]
++    fn a_pending_settlement_is_kept_and_claimed_exactly_once() {
++        let store = PendingSettlements::default();
++        let tx = TxHash::repeat_byte(0xaa);
++        store.begin(ID, REQUEST).unwrap().pending(tx);
++        let record = store.get(&ID).unwrap();
++        assert_eq!((record.request, record.transaction), (REQUEST, Some(tx)));
++        assert!(!store.claim(&ID, TxHash::repeat_byte(0xbb)));
++        assert!(store.claim(&ID, tx));
++        assert!(!store.claim(&ID, tx));
++        assert!(store.get(&ID).is_none());
++    }
++
++    #[test]
++    fn records_expire_and_the_oldest_goes_when_full() {
++        let expired = PendingSettlements::new(Duration::ZERO, 10);
++        expired.begin(ID, REQUEST).unwrap().pending(TxHash::ZERO);
++        assert!(expired.get(&ID).is_none());
++
++        let full = PendingSettlements::new(Duration::from_secs(60), 2);
++        for i in 1..=3u8 {
++            full.begin(B256::repeat_byte(i), REQUEST)
++                .unwrap()
++                .pending(TxHash::repeat_byte(i));
++        }
++        assert!(full.get(&B256::repeat_byte(1)).is_none());
++        assert!(full.get(&B256::repeat_byte(3)).is_some());
++    }
++
++    fn request(signature: &str, pay_to: &str) -> FacilitatorSettleRequest {
++        let requirements = format!(
++            r#"{{"scheme":"exact","network":"eip155:43111","amount":"1000","asset":"0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA","payTo":"{pay_to}","maxTimeoutSeconds":300,"extra":{{"assetTransferMethod":"eip3009","name":"Bridged USDC (Stargate)","version":"2"}}}}"#
++        );
++        let json = format!(
++            r#"{{"x402Version":2,"paymentPayload":{{"x402Version":2,"accepted":{requirements},"payload":{{"signature":"{signature}","authorization":{{"from":"0x90F79bf6EB2c4f870365E785982E1f101E93b906","to":"0x000000000000000000000000000000000000dEaD","value":"1000","validAfter":"0","validBefore":"9999999999","nonce":"0x{nonce}"}}}}}},"paymentRequirements":{requirements}}}"#,
++            nonce = "22".repeat(32),
++        );
++        serde_json::from_str(&json).unwrap()
++    }
++
++    #[test]
++    fn ids_follow_the_authorization_and_keys_the_whole_request() {
++        let dead = "0x000000000000000000000000000000000000dEaD";
++        let other = "0x000000000000000000000000000000000000bEEF";
++        let a = format!("0x{}1b", "11".repeat(64));
++        let b = format!("0x{}1c", "11".repeat(64));
++        assert_eq!(
++            request_key(&request(&a, dead)),
++            request_key(&request(&a, dead))
++        );
++        assert_ne!(
++            request_key(&request(&a, dead)),
++            request_key(&request(&b, dead))
++        );
++        // Same payer and nonce: the same authorization, even inside a different request.
++        assert_eq!(
++            payment_id(&request(&a, dead)),
++            payment_id(&request(&b, other))
++        );
++    }
++}
+diff --git a/crates/x402-facilitator-local/src/handlers.rs b/crates/x402-facilitator-local/src/handlers.rs
+index 76d7e9b..7cf5ca8 100644
+--- a/crates/x402-facilitator-local/src/handlers.rs
++++ b/crates/x402-facilitator-local/src/handlers.rs
+@@ -321,7 +321,8 @@ impl AsJsonValue for FacilitatorLocalError {
+                 let problem = scheme_handler_error.as_payment_problem();
+                 // §5.3.2: "" only if no transaction was broadcast; a pending one carries its hash.
+                 let transaction = match scheme_handler_error {
+-                    X402SchemeFacilitatorError::SettlementPending { transaction, .. } => {
++                    X402SchemeFacilitatorError::SettlementPending { transaction, .. }
++                    | X402SchemeFacilitatorError::TransactionFailed { transaction, .. } => {
+                         transaction
+                     }
+                     _ => "",
+@@ -366,6 +367,8 @@ fn scheme_error_to_status_code(error: &X402SchemeFacilitatorError) -> StatusCode
+         // facilitator, answer it as an ordinary settle response, so that clients read the body and
+         // its transaction hash (x402-rs's own facilitator client ignores the body of a 5xx).
+         X402SchemeFacilitatorError::SettlementPending { .. } => StatusCode::OK,
++        // The payment failed on chain, like any other invalid_transaction_state: 400.
++        X402SchemeFacilitatorError::TransactionFailed { .. } => StatusCode::BAD_REQUEST,
+     }
+ }
+ 
+@@ -515,6 +518,24 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn failed_transaction_carries_its_hash() {
++        let hash = "0x5e1fb6f2a0fe5ed1d4a2e9a2a0d6c7e8b3c4d5e6f708192a3b4c5d6e7f809102";
++        let failed = || X402SchemeFacilitatorError::TransactionFailed {
++            transaction: hash.to_string(),
++            details: "reverted".to_string(),
++        };
++        let body = FacilitatorLocalError::Settlement(failed(), context())
++            .as_json_value()
++            .unwrap();
++        assert_eq!(body["errorReason"], json!("invalid_transaction_state"));
++        assert_eq!(body["transaction"], json!(hash));
++        let status = FacilitatorLocalError::Settlement(failed(), context())
++            .into_response()
++            .status();
++        assert_eq!(status, StatusCode::BAD_REQUEST);
++    }
++
+     #[test]
+     fn status_codes_are_unchanged() {
+         let status = |e: FacilitatorLocalError| e.into_response().status();
+diff --git a/crates/x402-types/src/proto/mod.rs b/crates/x402-types/src/proto/mod.rs
+index bd90ed5..d65187e 100644
+--- a/crates/x402-types/src/proto/mod.rs
++++ b/crates/x402-types/src/proto/mod.rs
+@@ -303,6 +303,12 @@ pub enum PaymentVerificationError {
+     /// Reported as x402 v2 §9 `invalid_transaction_state`.
+     #[error("Payment authorization was already used on chain")]
+     AuthorizationAlreadyUsed,
++    /// The payment authorization is committed to a settlement that is in progress or whose
++    /// transaction is not confirmed yet, so it cannot pay for anything else.
++    ///
++    /// Reported as x402 v2 §9 `invalid_transaction_state`.
++    #[error("{0}")]
++    AuthorizationInFlight(String),
+     /// An `exact` scheme EVM authorization that is not valid yet (`validAfter` in the future).
+     ///
+     /// Reported as x402 v2 §9 `invalid_exact_evm_payload_authorization_valid_after`.
+@@ -364,7 +370,8 @@ impl AsPaymentProblem for PaymentVerificationError {
+             PaymentVerificationError::InvalidExactEvmPayloadSignature(_) => {
+                 ErrorReason::InvalidExactEvmPayloadSignature
+             }
+-            PaymentVerificationError::AuthorizationAlreadyUsed => {
++            PaymentVerificationError::AuthorizationAlreadyUsed
++            | PaymentVerificationError::AuthorizationInFlight(_) => {
+                 ErrorReason::InvalidTransactionState
+             }
+             PaymentVerificationError::InvalidExactEvmPayloadAuthorizationValidAfter => {
+@@ -608,6 +615,11 @@ mod tests {
+             used.as_payment_problem().reason(),
+             ErrorReason::InvalidTransactionState
+         );
++        let in_flight = PaymentVerificationError::AuthorizationInFlight("pending".into());
++        assert_eq!(
++            in_flight.as_payment_problem().reason(),
++            ErrorReason::InvalidTransactionState
++        );
+     }
+ 
+     fn request(json: &str) -> VerifyRequest {
+diff --git a/crates/x402-types/src/scheme/mod.rs b/crates/x402-types/src/scheme/mod.rs
+index d06d28d..b9d9e1c 100644
+--- a/crates/x402-types/src/scheme/mod.rs
++++ b/crates/x402-types/src/scheme/mod.rs
+@@ -153,6 +153,15 @@ pub enum X402SchemeFacilitatorError {
+         /// Human-readable explanation.
+         details: String,
+     },
++    /// A settlement transaction was mined but failed (reverted); `transaction` is its hash
++    /// (x402 v2 §9 `invalid_transaction_state`).
++    #[error("Settlement transaction failed: {details}")]
++    TransactionFailed {
++        /// Hash of the failed transaction.
++        transaction: String,
++        /// Human-readable explanation.
++        details: String,
++    },
+ }
+ 
+ impl AsPaymentProblem for X402SchemeFacilitatorError {
+@@ -165,6 +174,9 @@ impl AsPaymentProblem for X402SchemeFacilitatorError {
+             X402SchemeFacilitatorError::SettlementPending { details, .. } => {
+                 PaymentProblem::new(ErrorReason::SettlementPending, details.clone())
+             }
++            X402SchemeFacilitatorError::TransactionFailed { details, .. } => {
++                PaymentProblem::new(ErrorReason::InvalidTransactionState, details.clone())
++            }
+         }
+     }
+ }

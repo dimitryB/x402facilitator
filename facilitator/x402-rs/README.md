@@ -14,8 +14,10 @@ how a payment is settled. What they change:
 - what may be settled: the exact scheme now settles only the exact required amount and rejects an
   over-authorization, which stock x402-rs settled in full (0010);
 - transaction handling in two places: after a broadcast transaction's receipt times out, the signer's
-  nonce is kept instead of reset (0006); and a retry of such a settle is answered from that transaction,
-  without sending another (0011).
+  nonce is kept instead of reset (0006); and each payment authorization is settled at most once at a
+  time, with a retry of a pending settle answered from its transaction rather than sending another (0011);
+- what is sent at all: an EIP-6492 wallet deployment through Multicall3 is only sent after the EIP-6492
+  validator accepted the signature, and a wrapper around the payer's own signature is never sent (0012).
 
 HTTP status codes follow x402-rs's existing mapping: 400 for a rejected payment, 412 for a missing Permit2
 allowance, 500 for an unexpected failure (an RPC that cannot be reached). Additions: `settlement_pending` is
@@ -40,7 +42,9 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0008](patches/0008-eip155-verify-EIP-1271-signatures-before-the-transfe.patch) | a contract wallet (EIP-1271) with a signature it rejects gets HTTP 500 `unexpected_*_error` | scheme_exact_evm.md step 1, §9 |
 | [0009](patches/0009-errors-report-the-remaining-failures-with-x402-v2-9-.patch) | the remaining errors use x402-rs names (`invalid_payment_expired`, `recipient_mismatch`, ...); `"network": ""` for a request without one; plain-text 400 for a body that is not JSON | §9, §5.3.2 |
 | [0010](patches/0010-eip155-require-exactly-the-required-amount-in-the-v2.patch) | the exact scheme accepts and settles an amount above the requirement | §9 `…_value_mismatch` |
-| [0011](patches/0011-eip155-answer-a-retried-pending-settlement-from-its-.patch) | a retried `settlement_pending` settle is settled again from scratch; a mined revert loses its hash | §9 `settlement_pending`, §5.3.2 |
+| [0011](patches/0011-eip155-one-settlement-per-authorization-answer-a-pen.patch) | a retried `settlement_pending` settle is settled again from scratch; `/verify` accepts a payment whose settle is pending; a mined revert loses its hash | §9 `settlement_pending`, §5.3.2 |
+| [0012](patches/0012-eip155-validate-EIP-6492-signatures-first-ignore-a-w.patch) | EIP-6492 signatures skip the signature-first rule; `/settle` sends a caller-chosen factory call without validating the signature | scheme_exact_evm.md step 1, §9 |
+| [0013](patches/0013-facilitator-local-report-a-missing-or-unserved-x402-.patch) | a missing or unserved `x402Version` is reported as `invalid_network` | §9 `invalid_x402_version` |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -70,7 +74,9 @@ The **signature check** reads nothing from the chain unless it needs to:
   Permit2 will check. Anything else, a revert included, is an invalid signature. This costs an
   `eth_getCode` and an `eth_call`, and only on this path. It is the TS reference facilitator's strict
   EIP-1271 check.
-- An EIP-6492 signature (a counterfactual wallet) is still checked by the on-chain validator.
+- An EIP-6492-wrapped signature (a wallet that may not be deployed yet) must be accepted by the EIP-6492
+  validator (`isValidSigWithSideEffects`, run as an `eth_call`) before anything else is read or sent.
+  A wrapper around a signature that recovers to `from` is dropped: it is a plain EOA payment.
 - If the transfer simulation or send still reverts with a signature error, that is reported as an invalid
   signature too: FiatToken "invalid signature", or Permit2 `InvalidSigner()`, `InvalidSignature()`,
   `InvalidContractSignature()` or `InvalidSignatureLength()`. That covers an EIP-712 domain in the
@@ -100,20 +106,22 @@ exact handler, where §9 has a scheme-specific code.
 | `InsufficientFunds` | `insufficient_funds` | unchanged |
 | `InsufficientAllowance` | `permit2_allowance_required` (412) | scheme_exact_evm.md Permit2 step 2; same spelling as the TS reference |
 | `AuthorizationAlreadyUsed` | `invalid_transaction_state` | the chain rejects the transfer because the nonce is spent (0005) |
+| `AuthorizationInFlight`: `/verify` (or another settle request) of an authorization whose settle is running or pending | `invalid_transaction_state` | the authorization is committed to a transaction and can't pay for anything else (0011; see below) |
 | `TransactionSimulation`, other simulation reverts | `invalid_transaction_state` | §9: "Blockchain transaction failed or was rejected": the transfer fails on chain (generic) |
 | a mined settlement that reverted | `invalid_transaction_state`, with its hash | same, and §5.3.2: a broadcast transaction is reported (0011) |
 | `AssetMismatch` | `invalid_payload` | the payload authorizes another token than the requirements ask for: "contains invalid data" (generic) |
-| `InvalidFormat`, a body that is not JSON, a request naming no network | `invalid_payload` | §9: "malformed or contains invalid data" (generic) |
+| `InvalidFormat`, a body that is not JSON, a v2 request naming no network | `invalid_payload` | §9: "malformed or contains invalid data" (generic) |
 | `AcceptedRequirementsMismatch` | `invalid_payment_requirements` | the requirements sent are not the ones the payload accepted; §9: "requirements object is invalid" (generic) |
 | `ChainIdMismatch`, `UnsupportedChain` | `invalid_network` | §9: "network is not supported" (generic) |
 | `UnsupportedScheme` | `unsupported_scheme` | unchanged |
+| `UnsupportedX402Version`: no top-level `x402Version`, or one no handler serves (here: anything but 2) | `invalid_x402_version` | §9: "Protocol version is not supported" (0013) |
 | receipt not confirmed in time | `settlement_pending` (200, with the hash) | §9 (0006, 0011) |
 | an RPC that cannot be reached | `unexpected_verify_error` / `unexpected_settle_error` (500) | §9; the only case left as "unexpected" |
 
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.3` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.4` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -127,8 +135,8 @@ silicon), with the base images already pulled:
 
 - Cold build: 114 s for hemi.1. Of that, 57 s compiles the dependency graph and 12 s rebuilds after the
   patches.
-- `docker compose build --no-cache` of hemi.3, which re-fetches x402-rs and the crates and compiles
-  everything: 113 s (57.7 s dependencies, 11.7 s after the patches).
+- `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
+  113 s for hemi.3, 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches).
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -151,7 +159,7 @@ cargo test -p x402-types -p x402-facilitator-local -p x402-chain-eip155 \
 ```
 
 Every patch was checked one by one: `cargo fmt --check`, `cargo clippy --tests -D warnings`, and the
-tests, with 32 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
+tests, with 36 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
 the built image on anvil forks.
 
 ## The one non-spec field: `invalidReasonDetails`
@@ -567,42 +575,145 @@ Under-payment gets the same code.
 > `assert_enough_value` accepts any authorized amount ≥ the requirement, so an `exact` payment authorizing 5× the price verifies and settles 5×. §9 defines `invalid_exact_evm_payload_authorization_value_mismatch` as "Payment amount does not exactly match the required amount", and the TS reference facilitator compares with `!==`. This PR adds `assert_exact_value` and uses it in the v2 exact EIP-3009 and Permit2 paths; `upto` (where the amount is a ceiling) and v1 are unchanged.
 </details>
 
-### 0011 eip155: answer a retried pending settlement from its transaction
+### 0011 eip155: one settlement per authorization; answer a pending one's retry from its transaction
 
 - **The bug.** §9 makes `settlement_pending` non-terminal, and the TS SDK's resource server re-sends the
-  same settle once, immediately (`settleWithPendingRetry`). x402-rs kept no record of the first attempt,
-  so the retry was settled from scratch. That produced either a second broadcast or
-  `invalid_transaction_state` once the first transaction had spent the nonce, although the payment went
-  through.
-- **The record.** The v2 exact handler remembers the transaction of each `settlement_pending` settle,
-  keyed by the hash of the parsed request: payload, signature and requirements.
-  - Only an identical request matches, so another payload is never answered with this payment's
-    transaction.
-  - It lives in memory, holds at most 10,000 entries (oldest dropped first), and expires after 15 minutes.
-- **How a retry is answered.** It sends nothing, looks up the receipt, and answers:
-  - success with that hash once the transaction is mined;
-  - `settlement_pending` with the same hash while it is not;
-  - `invalid_transaction_state` with the hash if it reverted.
-- **Mined reverts.** Any settlement transaction that was mined but reverted is now reported with its hash
-  (`TransactionFailed`, HTTP 400). Before, it went out as `unexpected_error` with `"transaction": ""`,
-  which §5.3.2 allows only if nothing was broadcast.
+  same settle once, immediately (`settleWithPendingRetry`). Stock x402-rs kept no record of the first
+  attempt, so the retry was settled from scratch: a second broadcast, or `invalid_transaction_state` once
+  the first transaction had spent the nonce, although the payment went through. Meanwhile `/verify`
+  still called the payment valid while its transaction was unmined.
+- **The hemi.3 version of this patch was unsafe.** It answered success to *every* repeat of a pending
+  payload for 15 minutes, and `/verify` still accepted the payload while it was unmined. A stock seller
+  (verify, then handler, then settle) therefore served one payment several times.
+- **The record.** The v2 exact handler keeps one record per payment authorization, keyed by chain, payer
+  and EIP-3009 or Permit2 nonce. It is created when a settle starts and holds until the outcome is known:
+  - While it exists, `/verify` of that authorization is refused with `invalid_transaction_state`. So is
+    `/settle` of any other request carrying it. The authorization is committed to a settlement and must
+    not pay for anything else.
+  - A settle that ends in anything but `settlement_pending` drops the record when it returns. A drop
+    guard does this, so it also happens if the request is cancelled.
+  - A retry of the very same request sends nothing and is answered from the receipt, as below.
+  - Records live in memory, are bounded (10,000, oldest dropped first) and expire after 15 minutes.
+- **How a retry of the same request is answered** (same payload, signature and requirements):
+  - not mined yet: `settlement_pending` with the same hash;
+  - mined, for the first retry that sees it: success with the hash. That retry also removes the record,
+    under the same lock as the check (`PendingSettlements::claim`), so two concurrent retries cannot
+    both get the success;
+  - every later settle of the payload: a replay, `invalid_transaction_state`;
+  - reverted: `invalid_transaction_state` with the hash, and the record is removed.
+  This is what the TS reference's pending-settlement store does: its entry is cleared on success or
+  terminal failure (`mechanisms/evm/src/shared/settleReceipt.ts`).
+- **Why `/verify` answers `invalid_transaction_state`, not `settlement_pending`.**
+  - `settlement_pending` is a settle outcome. §5.3.2 and §9 tie it to a broadcast transaction that the
+    caller of `/settle` reconciles, and it means "retry this settle".
+  - A `/verify` caller is deciding whether to run a handler. The answer it needs is "this authorization
+    cannot pay for a new request": its nonce is committed to a transaction, exactly as for a spent
+    authorization.
+  - `invalidMessage` names the pending transaction, for operators.
+- **Mined reverts.** Any settlement transaction that was mined but reverted is reported with its hash
+  (`TransactionFailed`, HTTP 400), instead of `unexpected_error` with `"transaction": ""`.
 - **Limits.**
-  - The record is per process, so a restart forgets it.
-  - Two identical requests arriving at the same moment are not deduplicated; only a retry that comes
-    after the first answer is.
+  - The record is per process, so a restart forgets it, and a pending authorization is then judged by
+    the chain alone.
+  - If no client ever retries, the record expires after 15 minutes. Until then, `/verify` keeps refusing
+    the authorization, which is spent by then anyway.
 
-e2e (`06-settlement-pending.test.ts`), with automine off:
+What the e2e suite checks (`06-settlement-pending.test.ts`, automine off, 5 s receipt timeout):
 
-1. A settle comes back `settlement_pending` (200) with hash H.
-2. A retry comes back at once with the same H, and the signer has sent no other transaction.
-3. One block is mined.
-4. A retry answers `{"success":true,"transaction":H,…}` (200), and `payTo` was paid exactly once.
+1. `/verify` P → valid. `/settle` P → `settlement_pending` H (200).
+2. `/verify` P → 400 `invalid_transaction_state`, naming H. A retry → `settlement_pending` H at once, and
+   no new transaction is sent.
+3. One block is mined. A retry → `{"success":true,"transaction":H,…}`. The next settle → 400
+   `invalid_transaction_state`, and so does `/verify`.
+4. `payTo` was paid exactly once.
+5. Two concurrent retries after mining give exactly one success.
+6. The seller flow, with the SDK's `x402ResourceServer` plus `HTTPFacilitatorClient`, does
+   verify → handler → settle with the SDK's automatic retry. Three requests with the same payment header
+   run the paid handler once. (`seller/server.ts` itself listens on its own TCP port, which the test rules
+   don't allow.)
 
 <details><summary>Upstream issue / PR draft</summary>
 
-> **Title:** Retrying a `settlement_pending` settle settles again; remember the pending transaction
+> **Title:** One settlement per authorization: answer a `settlement_pending` retry from its transaction, refuse `/verify` while it is pending
 >
-> After `settlement_pending` (non-terminal per x402 v2 §9) the TS SDK's resource server retries the same settle once, immediately. x402-rs has no record of the first attempt, so the retry runs a fresh settlement: a second broadcast, or `invalid_transaction_state` once the first transaction has spent the nonce, although the payment succeeded. This PR keeps an in-memory, bounded (10,000) and expiring (15 min) map from the hash of the parsed settle request to its broadcast transaction. A retry of the same request is answered from that transaction's receipt (success, still `settlement_pending` with the same hash, or `invalid_transaction_state` with the hash if it reverted), and nothing is sent again. It also reports any mined-but-reverted settlement with its hash instead of `unexpected_error` with `"transaction": ""`. Unit tests cover the store and the request key.
+> After `settlement_pending` (non-terminal per x402 v2 §9) the TS SDK's resource server retries the same settle once, immediately. x402-rs keeps no record of the first attempt, so the retry runs a fresh settlement (a second broadcast, or `invalid_transaction_state` once the nonce is spent), and `/verify` keeps calling the payment valid while its transaction is unmined, so a seller can run its handler again for the same payment.
+>
+> This PR keeps an in-memory record per payment authorization (chain, payer, nonce) from the start of a settle until its outcome is known. While it exists, `/verify` of the authorization and `/settle` of any other request carrying it return `invalid_transaction_state`. A retry of the identical request sends nothing and is answered from the receipt: `settlement_pending` with the same hash while unmined; success for the first retry that sees it mined, which removes the record atomically (so concurrent retries cannot both succeed and later settles are replays); `invalid_transaction_state` with the hash if it reverted. A settle that ends otherwise drops its record via a drop guard. Records are bounded (10,000) and expire (15 min). It also reports any mined-but-reverted settlement with its hash instead of `unexpected_error` with `"transaction": ""`. Unit tests cover the store, the claim and the keys.
+</details>
+
+### 0012 eip155: validate EIP-6492 signatures first; ignore a wrapper around the payer's own signature
+
+- **The bugs.**
+  - EIP-6492-wrapped signatures skipped 0003's signature-first rule: they were only checked inside the
+    transfer simulation. With a tampered inner signature, an unfunded payer got `insufficient_funds` or
+    412, and a funded one got `invalid_transaction_state` ("Multicall3: call failed").
+  - `/settle` did not validate the signature at all before sending. For a payer without code it sent
+    `Multicall3.aggregate3([factory.call(<calldata from the payload>), transfer])`. That is a call to a
+    caller-chosen address with caller-chosen calldata, paid for by the facilitator, even when `/verify`
+    had rejected the payload.
+- **The fix.**
+  - `assert_signed_by_payer` runs on verify and settle, for both methods, before balances, allowances
+    and simulation. It now asks the EIP-6492 validator (`isValidSigWithSideEffects`, as an `eth_call`, so
+    nothing is deployed for real) whether it accepts the wrapped signature.
+  - A rejection or a revert is `invalid_exact_evm_payload_signature`. Only an RPC that cannot be reached
+    stays an unexpected error.
+  - `StructuredSignature::try_from_bytes` treats a wrapper around a 64/65-byte signature that recovers to
+    the payer as the plain EOA signature. The payer's own key signed, so nothing needs deploying and the
+    factory is never called.
+
+**The Multicall3 deployment path**, as it stands after 0012: for a counterfactual wallet whose signature
+the validator accepted, `/settle` sends one transaction to Multicall3 (`0xcA11…CA11`).
+`aggregate3([Call3{factory, allowFailure: true, factoryCalldata}, Call3{token or proxy, allowFailure: false, transfer}])`
+
+- **What it can do.** Run the factory call (deploying the wallet), then the same transfer as on the
+  normal path. The transfer is still bound by the payer's signature, so the amount and recipient are
+  the signed ones.
+- **What it cannot do.** Spend anything the facilitator owns. Both calls are made by Multicall3
+  (`msg.sender` is Multicall3), not by the facilitator signer, and Multicall3 holds no funds or
+  approvals. Its only cost to the facilitator is gas.
+- **What 0012 changes.** That gas is now spent only after the validator has shown, in a simulation, that
+  this factory call yields a wallet that accepts the signature. Before, any payload could make the
+  facilitator pay for an arbitrary factory call.
+
+Before (hemi.3): unfunded payer → 400 `insufficient_funds` / 412 `permit2_allowance_required`; funded →
+`invalid_transaction_state` "Multicall3: call failed". After (HTTP 400, verify and settle, funded or not):
+
+```json
+{"isValid":false,"invalidReason":"invalid_exact_evm_payload_signature","invalidMessage":"The EIP-6492 validator does not accept the signature for 0x11733Cd3111FAd509780dA54c7A189eAe9C6f0A0: server returned an error response: error code 3: execution reverted, data: \"0x\"","invalidReasonDetails":"…same…","payer":"0x11733Cd3111FAd509780dA54c7A189eAe9C6f0A0"}
+```
+
+A wrapper around the payer's own signature now verifies and settles as an EOA payment. The settle
+transaction goes straight to the token or the x402 proxy, not to Multicall3.
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** EIP-6492: validate before balance checks and before settling; drop a wrapper around an EOA signature
+>
+> 1. An EIP-6492-wrapped signature is only checked inside the transfer simulation, after balance and allowance, so a tampered one from an unfunded payer gets `insufficient_funds` / 412 instead of an invalid signature. x402's exact EVM scheme checks the signature first.
+> 2. `/settle` does not validate a wrapped signature before sending: for a payer without code it sends `Multicall3.aggregate3([factory.call(calldata), transfer])` with the factory and calldata taken from the payload, so any payload can make the facilitator pay gas for an arbitrary call (msg.sender is Multicall3, so no funds are at risk, only gas).
+>
+> This PR runs the EIP-6492 validator's `isValidSigWithSideEffects` (as an `eth_call`) on verify and settle before anything else is read or sent, reporting a rejection as an invalid signature, and treats a wrapper around a 64/65-byte signature that recovers to the payer as the plain EOA signature, so the factory is never called for it. Unit tests cover both, with alloy's mocked transport.
+</details>
+
+### 0013 facilitator-local: report a missing or unserved x402 version as `invalid_x402_version`
+
+- **The bug.** A request whose top-level `x402Version` was 1, or missing, got `invalid_network`
+  ("Unsupported chain") even for a served network, because its slug could not be read.
+- **The fix.**
+  - `FacilitatorLocal` first checks the top-level `x402Version` (`VerifyRequest::x402_version`) against
+    the versions its handlers serve (`SchemeRegistry::supports_version`). A missing or unserved version
+    gets `invalid_x402_version`: §9 "Protocol version is not supported".
+  - `SchemeRegistry::with_handler` builds registries by hand for the tests.
+  - A v2 request that names no network still gets `invalid_payload` (0009).
+
+After (HTTP 400): `{"isValid":false,"invalidReason":"invalid_x402_version","invalidMessage":"Unsupported x402 protocol version",…}`.
+`/settle` gives the same, with the network if the request names one.
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** Missing or unsupported `x402Version` is reported as `invalid_network`; x402 v2 §9 has `invalid_x402_version`
+>
+> A request with top-level `x402Version: 1` (to a v2-only facilitator) or none at all gets `invalid_network` "Unsupported chain", although the network is served. This PR checks the version first: `VerifyRequest::x402_version` reads it, `SchemeRegistry::supports_version` tells whether any handler serves it, and a missing or unserved version gets `invalid_x402_version`. It also adds `SchemeRegistry::with_handler` for registries built by hand. Unit tests cover v1, a missing version and `{}`.
 </details>
 
 ## What these patches do not change
@@ -611,12 +722,14 @@ e2e (`06-settlement-pending.test.ts`), with automine off:
   - the exact EVM codes;
   - the check of the signature first, including EIP-1271;
   - the exact amount;
-  - the pending-settlement record.
+  - the pending-settlement record;
+  - EIP-6492 validation first.
   The generic code mappings in `x402-types` apply to every chain.
 - **Unknown payers are omitted.** v1 handlers and non-EVM chains don't implement `payer`, so their error
   bodies leave the field out. The spec allows that.
 - **`invalidReasonDetails` remains.** It is the one non-spec field, kept for compatibility (see above).
 - **Untested end to end:**
-  - EIP-6492 counterfactual wallets, because the suite has no wallet factory. The code path is unchanged
-    from stock x402-rs, apart from the revert mapping.
+  - The successful EIP-6492 deployment path (a real counterfactual wallet and factory). The suite has no
+    wallet factory. It does test rejected wrapped signatures (funded and unfunded, both methods, nothing
+    sent) and the EOA-wrapper shortcut.
   - A mined settlement revert. The unit tests cover it.

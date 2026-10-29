@@ -463,7 +463,7 @@ Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return 
 
 The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
 
-No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.3`. Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.4`. Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
 
 | Patch | Change |
 |------|------|
@@ -477,7 +477,9 @@ No config setting changes any of this, so the facilitator is now built from `fac
 | 0008 | Contract-wallet payer: `isValidSignature` must return `0x1626ba7e`; known signature reverts map to `invalid_exact_evm_payload_signature` |
 | 0009 | Remaining errors map to §9 codes; `network` is omitted rather than `""`; a body that is not JSON gets JSON `invalid_payload` |
 | 0010 | The v2 exact scheme requires exactly the required amount (`…_authorization_value_mismatch`) |
-| 0011 | A retried settle of a pending payment is answered from its tx: same hash while pending, success once mined, `invalid_transaction_state` with the hash if it reverted |
+| 0011 | One settlement per authorization, keyed by chain, payer and nonce. While a settle is pending, `/verify` of the authorization and any other settle carrying it return `invalid_transaction_state`. An identical retry gets the same hash while pending. The first retry after mining claims the success and removes the record in the same locked step; later settles are replays. A revert returns `invalid_transaction_state` with the hash |
+| 0012 | EIP-6492 signatures are validated with the validator's `isValidSigWithSideEffects` (`eth_call`) before balance, allowance or any send. A wrapper around the payer's own EOA signature is ignored, so no factory call is made |
+| 0013 | A missing or unsupported top-level `x402Version` returns `invalid_x402_version` |
 
 hemi.1 had patches 0001 to 0005. A fresh-context critic then found three more gaps:
 
@@ -492,18 +494,20 @@ hemi.2 fixes all three. A second critic pass on hemi.2 found four more:
 - **Codes:** several codes were not in §9.
 - **Retries:** the SDK's automatic retry after `settlement_pending` was handled as a fresh settle.
 
-hemi.3 (0008 to 0011) fixes these. The receipt timeout also dropped to 60 s, under the seller SDK's 90 s facilitator timeout, so a stock seller receives `settlement_pending` (D-013 config).
+hemi.3 (0008 to 0011) fixes these. A third critic pass on hemi.3 found that the first version of 0011 answered success to every repeat of a payload whose settle had gone pending, so one payment could pay for several requests. hemi.4 reworks 0011 to allow one settlement per authorization. It also adds 0012, after the critic found EIP-6492 signatures skipped the signature-first check and `/settle` would make an unvalidated factory call. 0013 maps the protocol version. The receipt timeout also dropped to 60 s, under the seller SDK's 90 s facilitator timeout, so a stock seller receives `settlement_pending` (D-013 config).
 
 - **Replay code:** a replay is reported as `invalid_transaction_state`. §9 has no replay code, and its definition ("Blockchain transaction failed or was rejected") fits. The TS reference facilitator also uses it as its default for failed settlements.
 - **`settlement_pending` is HTTP 200:** the TS reference facilitator returns it the same way, and x402-rs's own client reads the body only on 200, 400 and 412.
 - **Nonce trade-off:** a tx that is later dropped from every mempool leaves a nonce gap until restart. Before, the nonce could be reused while the earlier tx might still mine.
 - **Kept on purpose:** `invalidReasonDetails` stays next to `invalidMessage` for clients of stock x402-rs.
-- **Limits of the pending record (0011):** it is in memory in a single process, so a restart forgets it, and identical requests arriving at the same moment are not deduplicated. EIP-6492 counterfactual wallets are untested end to end, because there is no wallet factory on the forks.
+- **Limits of the pending record (0011):** it lives in memory in one process, so a restart forgets it. An unclaimed record blocks `/verify` of its authorization for up to 15 minutes; by then the authorization is spent anyway.
+- **Verify-then-settle race:** two requests that both pass `/verify` before either settles can both reach a seller's handler, and only one settle succeeds. This is inherent to the x402 flow.
+- **EIP-6492 deployment:** a counterfactual wallet deployed during settle is untested end to end, because the forks have no wallet factory.
 - **Build:** base images are pinned by digest, and each patch is applied with `git apply --check`, so upstream drift fails the build. A no-cache build takes about 115 s on the workstation (Colima, 4 CPUs). The image is 170 MB.
 
-Verified on 2026-10-29 against a no-cache hemi.3 build (113 s):
+Verified on 2026-10-29 against a no-cache hemi.4 build (115 s):
 
-- **e2e suite:** 8 files, 73 tests passed, with dead primary RPCs and no expected-failure markers.
+- **e2e suite:** 8 files, 82 tests passed, with dead primary RPCs and no expected-failure markers.
 - **Rust checks:** `cargo fmt`, `clippy -D warnings` and the unit tests pass at each patch commit.
 - **Demo:** `buyer/demo-fork.sh` settles all four asset and network pairs, and the seller logs a `/verify` before each `/settle`.
 
