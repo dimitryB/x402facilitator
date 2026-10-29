@@ -19,7 +19,7 @@ All spike entries ran on 2026-10-29 (UTC) from the local workstation with Foundr
 | USDC.e implements EIP-3009 | **yes** | **no** | D-009 |
 | USDC.e implements EIP-2612 | **yes** | **no** | D-010 |
 | hemiBTC / hBTC implements EIP-3009 or EIP-2612 | no | no | D-011 |
-| hBK contract and precompiles (phase 2) | contract live; precompiles per docs | contract present, `getLastHeader` reverts | D-012 |
+| hBK contract and precompiles (phase 2) | contract live (`getLastHeader` decodes); precompile `0x44` answers | contract present but `getLastHeader` reverts; precompile `0x44` answers | D-012 |
 
 ## D-001. Spike result: transfer method per asset and network
 
@@ -341,8 +341,14 @@ Source: `hemilabs/docs@61aced77175307475fea525d864496b95a21e913`, pages `buildin
 ```
 $ cast code 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12 --rpc-url https://rpc.hemi.network/rpc   # size shown
 bytes=8415
-$ cast call 0x7007…8F12 'getLastHeader()((uint32,bytes32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://rpc.hemi.network/rpc
-(973622 [9.736e5], 0x00000000000000000001f2dc3f0fed055da48b9c4f6882e5e6e9bcea811aa1de, …)
+$ curl -sS https://raw.githubusercontent.com/hemilabs/docs/61aced77175307475fea525d864496b95a21e913/building-bitcoin-apps/hemi-bitcoin-kit-hbk/hbk-smart-contract.md | grep -A10 'struct BitcoinHeader'
+struct BitcoinHeader {
+  uint32 height; bytes32 blockHash; uint32 version; bytes32 previousBlockHash; bytes32 merkleRoot; uint32 timestamp; uint32 bits; uint32 nonce;
+}
+$ cast call 0x7007…8F12 'getLastHeader()((uint32,bytes32,uint32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://rpc.hemi.network/rpc
+(973644, 0x00000000000000000001263978371155791d58c2e4ad51afcf737be312fcd87d, 584622080, 0x00000000000000000001e71307152f2006b2cca991ac4b7badb640be94a54b97, 0xf07d1cbd…, …)
+$ cast call 0xeC9f…f215 'getLastHeader()((uint32,bytes32,uint32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
 $ cast code 0xeC9fa5daC1118963933e1A675a4EEA0009b7f215 --rpc-url https://testnet.rpc.hemi.network/rpc   # size shown
 bytes=10266
 $ cast call 0xeC9f…f215 'getLastHeader()(…)' --rpc-url https://testnet.rpc.hemi.network/rpc
@@ -351,9 +357,9 @@ $ cast code 0x0000000000000000000000000000000000000044 --rpc-url <either>
 0x
 ```
 
-On mainnet, hBK returns a current Bitcoin height (973622) and a block hash. The tuple shape used here is a guess from the docs, so only the first two fields are meaningful. On testnet the same call reverts.
+With the `BitcoinHeader` struct the docs define, mainnet hBK decodes cleanly to a current Bitcoin height (973644), block hash, version and previous hash. (The first spike run used a 7-field guess; the docs' 8-field struct replaced it.) On testnet the same call reverts.
 
-`cast code` proves nothing for a precompile, because a precompile always has empty code. Calling the `BtcLastHeader` precompile (`0x44`) directly does answer on both networks:
+`cast code` proves nothing for a precompile, because a precompile always has empty code. Only `BtcLastHeader` (`0x44`) was exercised; precompiles `0x40` to `0x43`, `0x45` and `0x46` are listed from the docs and were not called. Calling `0x44` directly answers on both networks:
 
 ```
 $ cast call 0x0000000000000000000000000000000000000044 0x --rpc-url https://rpc.hemi.network/rpc
@@ -383,7 +389,7 @@ Failed to parse config file: invalid type: sequence, expected a string at line 4
 Choices in `facilitator/config.json`:
 
 - Only `v2-eip155-exact` is enabled; v1 and upto are out of scope. It accepts both EIP-3009 and Permit2 payloads. `/supported` lists `scheme: exact` per network with `extra: {}`, because x402-rs has no field for transfer methods. Which method a payment uses is set per asset by the seller's `extra.assetTransferMethod` (D-001).
-- `eip1559: true`, since Hemi has a base fee (D-005). `receipt_timeout_secs: 120`, because the brief expects stalled RPCs and the default of 30 is tight for Hemi's roughly 12-second blocks.
+- `eip1559: true`, since Hemi has a base fee (D-005). `receipt_timeout_secs: 60`, because the brief expects stalled RPCs and the default of 30 is tight for Hemi's roughly 12-second blocks. It was first 120 and was lowered so that a `settlement_pending` answer (D-016) arrives within the seller SDK's 90-second facilitator timeout (`DEFAULT_TIMEOUT_MS = 9e4` in `@x402/core` 2.29.0).
 - RPCs are dRPC first and the Hemi public RPC second. Both are fanned out, not tried in order (P-2), so the public RPC is throttled to 4 requests per second to stay under ~300 per minute.
 - EIP-2612 gas sponsoring stays off. No MVP asset settles through Permit2 with EIP-2612 (D-001).
 - Keys are separate per chain, `FACILITATOR_TESTNET_PRIVATE_KEY` and `FACILITATOR_MAINNET_PRIVATE_KEY`, so a testnet key never signs on mainnet. `facilitator/config.testnet.json` runs testnet alone until the mainnet contracts exist (D-001).

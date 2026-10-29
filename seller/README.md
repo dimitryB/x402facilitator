@@ -12,7 +12,7 @@ curl -i 'http://localhost:4021/echo?hello=hemi'     # 402 with a PAYMENT-REQUIRE
 | Variable | Default | Meaning |
 |------|------|------|
 | `SELLER_PAY_TO` | required | Address that receives the payments |
-| `FACILITATOR_URL` | `http://localhost:8080` | The facilitator (`docker compose up` at the repo root) |
+| `FACILITATOR_URL` | `http://localhost:8080` | The facilitator; see "Run it" in the root README for the fork recipe and the per-network configs |
 | `SELLER_NETWORKS` | `eip155:743111` | Comma-separated networks to accept; add `eip155:43111` for mainnet (`testnet` and `mainnet` also work) |
 | `SELLER_BTC_AMOUNT` | `1` | Price in the BTC asset, in satoshis. 1 sat is about $0.001 at ~$100k/BTC |
 | `PORT` | `4021` | Listen port |

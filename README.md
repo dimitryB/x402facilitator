@@ -86,7 +86,7 @@ x402-rs refuses to start if any configured chain lacks Permit2, the x402 exact p
 ```bash
 # Local forks, works now. Primaries point at a dead port; fallbacks at the forks.
 scripts/fork.sh up
-docker compose -f docker-compose.yml -f docker-compose.fork.yml up
+docker compose -f docker-compose.yml -f docker-compose.fork.yml up -d
 curl -s localhost:8080/supported | jq      # lists eip155:743111 and eip155:43111, scheme exact
 
 # Live networks: needs the contracts on each configured chain.
@@ -154,7 +154,7 @@ Until Hemi is in the SDK's default assets ([`sdk-patch/`](sdk-patch/)), price wi
 | Mainnet USDC.e | `{"assetTransferMethod": "eip3009", "name": "Bridged USDC (Stargate)", "version": "2"}` |
 | hemiBTC, testnet USDC.e, hBTC | `{"assetTransferMethod": "permit2"}` |
 
-The seller SDK checks the facilitator's `/supported` at startup and refuses to serve a network the facilitator does not list. Keep the SDK's default facilitator timeout (90 s) or raise it. Lowering it below the facilitator's 60-second receipt timeout would cut off a `settlement_pending` answer.
+The seller SDK checks the facilitator's `/supported` at startup and refuses to serve a network the facilitator does not list. A rejected `/verify` comes back from this facilitator as HTTP 400 with the §9 code in the body. The stock TS client surfaces it as a `VerifyError`, so the seller's 402 `error` reads `"<code>: <message>"` rather than the bare code; the spec does not fix the status code. Keep the SDK's default facilitator timeout (90 s) or raise it. Lowering it below the facilitator's 60-second receipt timeout would cut off a `settlement_pending` answer.
 
 ## For buyers: approving Permit2 (or not)
 
@@ -181,8 +181,18 @@ scripts/testnet-run.sh
 
 It needs two funded wallets:
 
-- **Facilitator/deployer:** about 0.001 testnet ETH. It deploys the three contracts (about 0.000005 ETH, D-005) and pays settlement gas.
-- **Buyer:** about 0.0001 ETH for its two one-time approvals, at least 0.001 USDC.e and at least 1 sat of hBTC. Testnet USDC.e and hBTC come through the [Hemi tunnel](https://app.hemi.xyz/en/tunnel/?networkType=testnet).
+- **Facilitator/deployer:** about 0.001 testnet ETH. It deploys the three contracts (about 0.0000048 ETH in the `contracts/deploy.sh testnet` simulation) and pays settlement gas.
+- **Buyer:** about 0.0001 ETH for its two one-time approvals, at least 0.001 USDC.e and at least 1 sat of hBTC.
+
+Where the funds come from, all through the Hemi Portal tunnel in testnet mode (https://app.hemi.xyz/en/tunnel/?networkType=testnet):
+
+| Asset | Path | Wait |
+|------|------|------|
+| Testnet ETH | Sepolia ETH, from any Sepolia faucet, tunneled Sepolia → Hemi testnet | minutes |
+| Testnet USDC.e `0xD479…6443` | Sepolia token `0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` (the token list's `bridgeInfo`), tunneled Sepolia → Hemi testnet | minutes |
+| Testnet hBTC `0x36Ab…fAe7` | Bitcoin testnet coins (Hemi's docs point to a tBTC faucet) deposited through the Bitcoin tunnel | about 1 hour for 6 Bitcoin confirmations, sometimes plus a manual vault confirmation |
+
+hBTC has no Sepolia route. A Hemi-testnet transfer from an existing holder is the fast alternative.
 
 Then run:
 
