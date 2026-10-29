@@ -620,7 +620,17 @@ $ curl -s https://mempool.space/testnet/api/tx/6d1e2ea41e126bbeb6077feec0c6eb417
 # The OP_RETURN holds the recipient's EVM address as ASCII hex. It was confirmed at 2025-12-12T16:41:10Z, and hBTC minted on Hemi was 1990000.
 ```
 
-- **Fee:** 2,000,000 sats in, 1,990,000 minted, so 0.5%. Hemi's docs give a minimum of 0.0001 BTC and six Bitcoin confirmations.
+- **Fee:** at least 10,000 sats per deposit. That deposit put in 2,000,000 sats and minted 1,990,000, and the other 2026 deposit put in 1,000,000 and minted 990,000. Both match the vault config's minimum deposit fee:
+
+  ```
+  $ cast call 0x321774F8950d6B0E14BC2728b14F8E659548900a 'vaultConfig()(address)' --rpc-url https://testnet.rpc.hemi.network/rpc   # vault 6, which took the deposit
+  0xe247931fe161e6f796C39c216692A51050804dDd
+  $ cast call 0xe247…4dDd 'getMinDepositFeeSats()(uint256)' / 'getMinDepositFeeBasisPoints()(uint256)' / 'getMaxDepositFeeBasisPoints()(uint256)'
+  10000    20    200
+  ```
+
+- **Minimum:** the Portal's minimum deposit on testnet is 0.01 BTC, as seen in the Portal on 2026-10-29. Hemi's docs say 0.0001 BTC, which would mint nothing after the 10,000-sat fee. Six Bitcoin confirmations are needed.
+- **Faucet:** coinfaucet.eu's testnet3 faucet (`https://coinfaucet.eu/en/btc-testnet/`, hCaptcha) was paying on 2026-10-29; its address `tb1qerzrlxcfu24davlur5sqmgzzgsal6wusda40er` sent six testnet3 transactions that day. A claim is about 0.003 BTC, so 0.01 BTC takes several. bitcoinfaucet.uo1.net and testnet.help now pay testnet4, which the tunnel does not watch. Hemi testnet's Bitcoin view was at testnet3 height 5,223,072, two blocks behind the testnet3 tip.
 - **Claim:** the mint is not automatic on testnet. The depositor's own EVM address sent `confirmDeposit`, nine months after the Bitcoin transaction confirmed.
 - **Activity:** the vault manager's history shows two confirmed deposits in 2026, both from that one address. The tunnel works, but it is barely used.
 

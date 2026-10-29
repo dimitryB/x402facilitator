@@ -199,7 +199,7 @@ Where the funds come from (D-017):
 |------|------|------|
 | Testnet ETH | Ethereum Sepolia ETH from any Sepolia faucet, tunneled to Hemi testnet in the [Hemi Portal](https://app.hemi.xyz/en/tunnel/?networkType=testnet) | minutes |
 | Testnet USDC.e `0xD479…6443` | Aave's Sepolia test USDC `0x94a9…E4C8`, which Aave's open faucet mints, tunneled to Hemi testnet. `scripts/testnet-fund-usdc.sh --go` does both from the buyer and needs about 0.001 Ethereum Sepolia ETH there. By hand: app.aave.com/faucet in testnet mode, then the Portal. Circle's Sepolia USDC is a different token and does not work. Or swap a little Hemi testnet ETH on Hemi testnet's Uniswap V3 WETH/USDC.e pool, which is how this buyer was funded (D-017) | minutes |
-| Testnet hBTC `0x36Ab…fAe7` | Bitcoin **testnet3** coins, deposited through the Portal's Bitcoin tunnel with UniSat set to "Bitcoin Testnet", then claimed | over an hour |
+| Testnet hBTC `0x36Ab…fAe7` | Bitcoin **testnet3** coins from [coinfaucet.eu's testnet3 faucet](https://coinfaucet.eu/en/btc-testnet/), at least 0.01 BTC, deposited through the Portal's Bitcoin tunnel with UniSat set to "Bitcoin Testnet", then claimed | over an hour, plus the faucet claims |
 
 For USDC.e, the funding script sends nothing without `--go`. Without a flag it checks the route on-chain and prints what is missing:
 
@@ -212,7 +212,7 @@ The Sepolia transactions need Ethereum Sepolia ETH; Hemi testnet ETH cannot pay 
 hBTC needs more care:
 
 - **Network:** the tunnel watches Bitcoin testnet3. Many faucets now pay out testnet4, and those coins never reach the tunnel. Hemi's docs point to coinfaucet.eu.
-- **Amounts:** the minimum deposit is 0.0001 BTC, and the last testnet deposit paid a 0.5% fee. One payment needs 1 sat.
+- **Amounts:** the Portal's minimum deposit on testnet is 0.01 BTC, although Hemi's docs say 0.0001 BTC. The vault charges at least 10,000 sats per deposit. A faucet claim is smaller than 0.01 BTC, so several claims have to be pooled first. One payment needs 1 sat.
 - **Claim:** after six Bitcoin confirmations, the depositor's EVM wallet must send the claim, `confirmDeposit`, from the Portal. Nothing is minted until it does, and it costs a little Hemi testnet ETH.
 - **Reliability:** the testnet tunnel is barely used, with two claimed deposits in 2026. If a claim fails, Hemi's Discord is the fallback for a few sats.
 
