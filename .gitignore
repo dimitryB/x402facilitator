@@ -6,7 +6,7 @@ dist/
 # Foundry
 contracts/out/
 contracts/cache/
-contracts/broadcast/*/dry-run/
+contracts/broadcast/**/dry-run/
 # Secrets
 .env
 .env.*
