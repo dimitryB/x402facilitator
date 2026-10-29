@@ -1,0 +1,130 @@
+From b97b2605f2199962efa26b070c55e80b037237a0 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 01:42:08 -0400
+Subject: [PATCH 14/14] eip155: report a Permit2 spender other than the exact
+ proxy as invalid_payload
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+assert_offchain_valid reported a permit whose spender is not the x402 exact
+proxy as RecipientMismatch, i.e. invalid_exact_evm_payload_recipient_mismatch.
+The spender never receives funds: the proxy is what binds the transfer to the
+witness's recipient, so another spender makes the payload unusable, which x402
+v2 §9 calls invalid_payload ("Payment payload is malformed or contains invalid
+data").
+
+The spender is now checked by assert_exact_proxy_spender, before the
+signature: the signature's EIP-712 hash is built with the proxy as spender, so
+checking the signature first reported such a payload as an invalid signature
+rather than for what is wrong with it. The TS reference facilitator also checks
+the spender before the signature (permit2.ts).
+---
+ .../v2_eip155_exact/facilitator/permit2.rs    | 66 +++++++++++++++++--
+ 1 file changed, 61 insertions(+), 5 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+index 83755b6..08adbf3 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+@@ -35,7 +35,9 @@ pub async fn verify_permit2_payment<P: Eip155MetaTransactionProvider + ChainProv
+     payment_payload: &Permit2PaymentPayload,
+     payment_requirements: &Permit2PaymentRequirements,
+ ) -> Result<v2::VerifyResponse, Eip155ExactError> {
+-    // 0. The signature is the payer's (x402 exact EVM, Permit2 verification step 1)
++    // 0. The permit names the x402 exact proxy as spender, and its signature is the payer's
++    //    (x402 exact EVM, Permit2 verification step 1)
++    assert_exact_proxy_spender(payment_payload)?;
+     assert_permit2_signed_by_payer(provider.inner(), provider.chain(), payment_payload).await?;
+ 
+     // 1. Verify offchain constraints
+@@ -83,7 +85,9 @@ where
+     P: Eip155MetaTransactionProvider<Error = E> + ChainProviderOps,
+     Eip155ExactError: From<E>,
+ {
+-    // 0. The signature is the payer's (x402 exact EVM, Permit2 verification step 1)
++    // 0. The permit names the x402 exact proxy as spender, and its signature is the payer's
++    //    (x402 exact EVM, Permit2 verification step 1)
++    assert_exact_proxy_spender(payment_payload)?;
+     assert_permit2_signed_by_payer(provider.inner(), provider.chain(), payment_payload).await?;
+ 
+     // 1. Verify offchain constraints
+@@ -149,6 +153,24 @@ where
+ }
+ 
+ #[cfg_attr(feature = "telemetry", instrument(skip_all, err))]
++/// The permit must name the x402 exact proxy as its spender: the proxy is what binds the transfer to
++/// the witness's recipient. Any other spender is a malformed payload, x402 v2 §9 `invalid_payload`
++/// ("contains invalid data"); it is not a recipient mismatch, since the spender never receives funds.
++/// Checked before the signature, whose EIP-712 hash is built with the proxy as spender, so that such a
++/// payload is reported for what is wrong with it rather than as an invalid signature (as the TS
++/// reference facilitator does, `permit2.ts`).
++pub fn assert_exact_proxy_spender(
++    payment_payload: &Permit2PaymentPayload,
++) -> Result<(), PaymentVerificationError> {
++    let spender = payment_payload.payload.permit_2_authorization.spender.0;
++    if spender != EXACT_PERMIT2_PROXY_ADDRESS {
++        return Err(PaymentVerificationError::InvalidFormat(format!(
++            "Permit2 spender {spender} is not the x402 exact proxy {EXACT_PERMIT2_PROXY_ADDRESS}"
++        )));
++    }
++    Ok(())
++}
++
+ pub fn assert_offchain_valid(
+     payment_payload: &Permit2PaymentPayload,
+     payment_requirements: &Permit2PaymentRequirements,
+@@ -159,9 +181,7 @@ pub fn assert_offchain_valid(
+ 
+     // Spender must be the x402ExactPermit2Proxy contract address
+     let authorization = &payload.permit_2_authorization;
+-    if authorization.spender.0 != EXACT_PERMIT2_PROXY_ADDRESS {
+-        return Err(PaymentVerificationError::RecipientMismatch);
+-    }
++    assert_exact_proxy_spender(payment_payload)?;
+ 
+     // Correct recipient
+     let witness = &authorization.witness;
+@@ -678,6 +698,42 @@ mod tests {
+         }
+     }
+ 
++    fn permit2_payload(spender: &str) -> Permit2PaymentPayload {
++        let requirements = serde_json::json!({
++            "scheme": "exact", "network": "eip155:43111", "amount": "10",
++            "asset": "0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28",
++            "payTo": "0x000000000000000000000000000000000000dEaD", "maxTimeoutSeconds": 300,
++            "extra": {"assetTransferMethod": "permit2"}
++        });
++        serde_json::from_value(serde_json::json!({
++            "x402Version": 2,
++            "accepted": requirements,
++            "payload": {
++                "signature": format!("0x{}1b", "11".repeat(64)),
++                "permit2Authorization": {
++                    "from": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
++                    "permitted": {"token": "0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28", "amount": "10"},
++                    "spender": spender, "nonce": "1", "deadline": "9999999999",
++                    "witness": {"to": "0x000000000000000000000000000000000000dEaD", "validAfter": "0"}
++                }
++            }
++        }))
++        .unwrap()
++    }
++
++    #[test]
++    fn a_spender_other_than_the_exact_proxy_is_an_invalid_payload() {
++        use x402_types::proto::{AsPaymentProblem, ErrorReason};
++        let proxy = EXACT_PERMIT2_PROXY_ADDRESS.to_string();
++        assert!(assert_exact_proxy_spender(&permit2_payload(&proxy)).is_ok());
++        let other = permit2_payload("0x000000000000000000000000000000000000bEEF");
++        let error = assert_exact_proxy_spender(&other).unwrap_err();
++        assert_eq!(
++            error.as_payment_problem().reason(),
++            ErrorReason::InvalidPayload
++        );
++    }
++
+     #[test]
+     fn permit2_nonce_position_matches_permit2_bitmap_layout() {
+         assert_eq!(

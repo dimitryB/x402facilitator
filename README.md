@@ -2,7 +2,7 @@
 
 An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hemi mainnet (`eip155:43111`) and Hemi testnet (`eip155:743111`) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint.
 
-It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and thirteen small patches that make its error responses match the x402 v2 spec. The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
+It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and fourteen small patches that make its error responses match the x402 v2 spec. The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
 **Status:** built and tested end to end on local forks of both Hemi chains. The live testnet run is scripted but waits for testnet funds. Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
 
@@ -98,7 +98,7 @@ docker compose up                                          # both chains (config
 
 If a contract or key is missing, the container exits with the reason. A missing contract shows as `Contract at address … does not exist`. An empty `FACILITATOR_*_PRIVATE_KEY` shows as `Invalid evm private key: invalid string length`. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently.
 
-The image, `hemi-x402-facilitator:e75adda-hemi.4`, is x402-rs at commit `e75adda` plus thirteen small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it. The build fetches x402-rs from GitHub, the crates from crates.io and the pinned `rust:1.93-trixie` image (about 2.2 GB), then compiles for about 2 minutes on a 4-CPU machine. Add `--build` after changing a patch. Forks also need the Hemi public RPCs to be reachable.
+The image, `hemi-x402-facilitator:e75adda-hemi.5`, is x402-rs at commit `e75adda` plus fourteen small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it. The build fetches x402-rs from GitHub, the crates from crates.io and the pinned `rust:1.93-trixie` image (about 2.2 GB), then compiles for about 2 minutes on a 4-CPU machine. Add `--build` after changing a patch. Forks also need the Hemi public RPCs to be reachable.
 
 Stock x402-rs does not return the x402 v2 spec's error shapes. The patches fix that:
 
@@ -112,6 +112,7 @@ Stock x402-rs does not return the x402 v2 spec's error shapes. The patches fix t
 - **Spec codes everywhere:** expired or early authorizations, recipient mismatch, wrong asset, malformed bodies and failed simulations return the spec's §9 codes.
 - **One settlement per authorization:** while a settle is pending, `/verify` of the same authorization is refused. A retry of the identical settle returns the same tx hash. The first retry after it is mined gets the success, and every later settle is a replay. One payment cannot pay for two requests.
 - **Protocol version:** a missing or unsupported `x402Version` returns `invalid_x402_version`.
+- **Permit2 spender:** a Permit2 payload whose spender is not the x402 exact proxy returns `invalid_payload`.
 
 None of them changes where funds go. The exact-amount patch narrows what is accepted. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) and D-016 explain each one. The unpatched stock image is kept, by digest, in a comment in `docker-compose.yml`.
 
@@ -269,7 +270,7 @@ Latest results (2026-10-29), against a no-cache build of the image:
 
 | Suite | Result |
 |------|------|
-| `npm test -w tests` | 8 files, 82 tests passed, 0 failed (100 s) |
+| `npm test -w tests` | 8 files, 86 tests passed, 0 failed (106 s) |
 | `forge test` | 17 passed, 0 failed |
 | `buyer/demo-fork.sh` | all four payments settled; payTo received exactly the price each time |
 
@@ -291,7 +292,7 @@ Latest results (2026-10-29), against a no-cache build of the image:
 - **Mainnet USDC.e and EIP-3009:** the testnet has no EIP-3009 token, so that path is proven only on a local fork of mainnet until a mainnet payment runs.
 - **Explorer verification:** expected to be a partial match at best for the proxy, because its original build embedded metadata (`contracts/README.md`).
 - **Mainnet explorer:** blocked from the machine that ran the spike. Mainnet token addresses rest on Hemi's token list and on-chain reads (D-002, Q-1).
-- **Combined failures:** when one payload fails several checks, the code reported can differ from `scheme_exact_evm.md`'s listed order. Single-failure cases, which the Definition of done covers, follow the spec. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) ("Check order") records the chosen order and the test that pins it.
+- **Combined failures:** when one payload fails several checks, the code reported follows the TS reference facilitator, not the order written in `scheme_exact_evm.md`. Checks that need no RPC (recipient, validity window, exact amount, token, Permit2 spender) run before the allowance and balance reads. So an expired payment from an unfunded payer gets `…_valid_before`, not `insufficient_funds`. Single-failure cases, which the Definition of done covers, return the spec's code. `tests/e2e/04b-payload-checks.test.ts` ("combined failures") pins the behaviour. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) ("Check order") cites the reference line by line and lists the two places this facilitator differs from it.
 - **Nonce gap after a timeout:** after `settlement_pending`, the facilitator keeps that tx's nonce, so a tx that may still mine is never replaced. If the tx is later dropped from every mempool, later settles on that chain queue behind the gap. To recover, restart the facilitator, which re-reads the nonce from the chain.
 - **Charged but not served:** if a settle goes `settlement_pending` and the stock seller's single automatic retry is also still pending, the seller refuses the request. The payment can still mine later, so the buyer is charged without being served. To reconcile, look up the `transaction` hash from the `settlement_pending` answer; the seller logs it. The same payment header is then refused as a replay.
 - **Facilitator memory:** pending-settlement records live in memory. A facilitator restart forgets them, after which a pending authorization is judged by the chain alone.

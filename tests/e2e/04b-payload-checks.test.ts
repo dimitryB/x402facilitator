@@ -10,6 +10,7 @@
  * | not valid yet (validAfter in future)   | invalid_exact_evm_payload_authorization_valid_after      |
  * | pays someone other than payTo          | invalid_exact_evm_payload_recipient_mismatch             |
  * | Permit2 permit for another token       | invalid_payload                                          |
+ * | Permit2 spender other than the proxy   | invalid_payload                                          |
  * | body is not JSON / names no network    | invalid_payload                                          |
  * | no or unserved top-level x402Version   | invalid_x402_version                                     |
  *
@@ -24,6 +25,7 @@ import { describe, expect, it } from "vitest";
 import type { LocalAccount } from "viem";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { btcAsset, MAINNET, usdcAsset, type HemiAsset, type HemiNetwork } from "@hemi-x402/shared";
+import { ensurePermit2Approval, fundEth, fundToken } from "../lib/chain";
 import { postRaw, record, settle, verify } from "../lib/facilitator";
 import { freshAccount, freshAddress, requirementsFor, resign, signPayment } from "../lib/payments";
 import { SPEC_INVALID_SIGNATURE, settleFailureViolations, verifyFailureViolations, type SpecErrorCode } from "../lib/spec";
@@ -170,4 +172,79 @@ describe("an x402 version the facilitator does not serve", () => {
       expect(s.body).toMatchObject({ success: false, errorReason: "invalid_x402_version", transaction: "" });
     }
   });
+});
+
+/**
+ * A Permit2 spender other than the x402 exact proxy is a malformed payload, §9 `invalid_payload`
+ * (facilitator/x402-rs/patches 0014). hemi.4 called it a recipient mismatch, or, for an EOA payer, an
+ * invalid signature. It is checked before the signature, as in the TS reference (permit2.ts).
+ */
+describe("Permit2 spender other than the x402 exact proxy", () => {
+  it("a permit signed for another spender is invalid_payload", async () => {
+    const payer = freshAccount();
+    const signed = await signPayment(payer, requirementsFor(MAINNET, btcAsset(MAINNET), freshAddress(), 10n));
+    const payment = await resign(payer, signed, a => {
+      a.spender = freshAddress();
+    });
+    await expectRejected("spender is not the proxy: Permit2", payment, payment.accepted, "invalid_payload", payer);
+  });
+});
+
+/**
+ * Combined failures: a payload that is wrong off-chain AND cannot be paid on chain. The facilitator
+ * reports the off-chain failure, like the TS reference facilitator (see facilitator/x402-rs/README.md,
+ * "Check order"): expiry, amount and recipient are checked before the payer's allowance and balance.
+ * scheme_exact_evm.md lists allowance and balance first, so this pins the deliberate difference.
+ */
+describe("combined failures: the off-chain check is reported, not allowance or balance", () => {
+  const expired = { maxTimeoutSeconds: 1 };
+  const cases: {
+    name: string;
+    method: Method;
+    setup: (payer: LocalAccount, m: Method) => Promise<void>;
+  }[] = [
+    {
+      name: "Permit2, funded but never approved",
+      method: METHODS[1]!,
+      setup: async (payer, m) => fundToken(m.network, m.asset, payer.address, 1_000_000n),
+    },
+    {
+      name: "Permit2, approved but unfunded",
+      method: METHODS[1]!,
+      setup: async (payer, m) => {
+        await fundEth(m.network, payer.address);
+        await ensurePermit2Approval(m.network, payer, m.asset, m.amount);
+      },
+    },
+    { name: "EIP-3009, unfunded", method: METHODS[0]!, setup: async () => {} },
+  ];
+
+  for (const c of cases) {
+    const m = c.method;
+    describe(c.name, () => {
+      const payer = freshAccount();
+      const sign = (amount: bigint, extra: Partial<PaymentRequirements> = {}) =>
+        signPayment(payer, { ...requirementsFor(m.network, m.asset, freshAddress(), amount), ...extra });
+
+      it("+ expired: valid_before; + over-payment: value_mismatch; + wrong recipient: recipient_mismatch", async () => {
+        await c.setup(payer, m);
+        const expiredPayment = await sign(m.amount, expired);
+        await expectRejected(
+          `${c.name} + expired`,
+          expiredPayment,
+          expiredPayment.accepted,
+          "invalid_exact_evm_payload_authorization_valid_before",
+          payer,
+        );
+        const [over, overRequirements] = presentedAs(await sign(m.amount * 5n), { amount: m.amount.toString() });
+        await expectRejected(`${c.name} + over-payment`, over, overRequirements, "invalid_exact_evm_payload_authorization_value_mismatch", payer);
+        const [elsewhere, elsewhereRequirements] = presentedAs(await sign(m.amount), { payTo: freshAddress() });
+        await expectRejected(`${c.name} + wrong recipient`, elsewhere, elsewhereRequirements, "invalid_exact_evm_payload_recipient_mismatch", payer);
+        // Control: the same payer with a correct payload gets the on-chain reason.
+        const fine = await sign(m.amount);
+        const v = await verify(fine, fine.accepted);
+        expect(v.body.invalidReason).toBe(c.name.includes("never approved") ? "permit2_allowance_required" : "insufficient_funds");
+      });
+    });
+  }
 });

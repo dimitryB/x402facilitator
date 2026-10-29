@@ -1,7 +1,7 @@
 From fe0a2c4156d804418d40e284025b66a671369967 Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 22:53:53 -0400
-Subject: [PATCH 05/13] eip155: report a replayed authorization as
+Subject: [PATCH 05/14] eip155: report a replayed authorization as
  invalid_transaction_state
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

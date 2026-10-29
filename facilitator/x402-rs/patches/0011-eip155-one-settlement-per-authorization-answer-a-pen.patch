@@ -1,7 +1,7 @@
 From 34659c789328682f788fd0f4bcae0f428a4c5c2d Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 00:22:12 -0400
-Subject: [PATCH 11/13] eip155: one settlement per authorization; answer a
+Subject: [PATCH 11/14] eip155: one settlement per authorization; answer a
  pending one's retry from its transaction
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

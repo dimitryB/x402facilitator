@@ -45,6 +45,7 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0011](patches/0011-eip155-one-settlement-per-authorization-answer-a-pen.patch) | a retried `settlement_pending` settle is settled again from scratch; `/verify` accepts a payment whose settle is pending; a mined revert loses its hash | §9 `settlement_pending`, §5.3.2 |
 | [0012](patches/0012-eip155-validate-EIP-6492-signatures-first-ignore-a-w.patch) | EIP-6492 signatures skip the signature-first rule; `/settle` sends a caller-chosen factory call without validating the signature | scheme_exact_evm.md step 1, §9 |
 | [0013](patches/0013-facilitator-local-report-a-missing-or-unserved-x402-.patch) | a missing or unserved `x402Version` is reported as `invalid_network` | §9 `invalid_x402_version` |
+| [0014](patches/0014-eip155-report-a-Permit2-spender-other-than-the-exact.patch) | a Permit2 spender other than the exact proxy is reported as a recipient mismatch (or an invalid signature) | §9 `invalid_payload` |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -60,8 +61,9 @@ validAfter, token/network, simulation (Phase 3). The patched facilitator, on bot
 
 | Step | EIP-3009 | Permit2 |
 |------|------|------|
-| 1 | `accepted` equals the requirements; network | **signature** |
-| 2 | **signature** | `accepted` equals the requirements; spender; recipient; deadline and validAfter; exact amount; token |
+| 1 | `accepted` equals the requirements; network | spender is the x402 exact proxy (`invalid_payload`) |
+| 2 | **signature** | **signature** |
+| 2b | | `accepted` equals the requirements; recipient; deadline and validAfter; exact amount; token |
 | 3 | recipient; validity window; exact amount | **allowance** (412 `permit2_allowance_required`) |
 | 4 | **balance** (`insufficient_funds`) | **balance** (`insufficient_funds`) |
 | 5 | simulation (verify) or send (settle) | simulation (verify) or send (settle) |
@@ -85,10 +87,58 @@ The **signature check** reads nothing from the chain unless it needs to:
 As a result, an unfunded, unapproved payer with a bad signature gets `invalid_exact_evm_payload_signature`.
 Stock x402-rs answered `insufficient_funds` or `permit2_allowance_required` there.
 
-One departure from the spec's numbering remains. The **off-chain checks** run before the on-chain
-allowance and balance reads, although the spec lists them after: requirements match, spender, recipient,
-validity window, amount and token. They need no RPC. So a payload that is both expired and unfunded is
-reported as expired. The TS reference facilitator orders them the same way.
+### Decision: off-chain checks before allowance and balance
+
+This is a deliberate departure from the spec text, and it matches the TS reference facilitator.
+
+**What the spec says.** `scheme_exact_evm.md` puts the on-chain reads right after the signature:
+
+- Permit2 (Phase 3): signature, then allowance, then balance, and only then amount, deadline/validAfter
+  and token.
+- EIP-3009 (Phase 2): signature, then balance, then amount and validity window.
+
+**What we do.** The facilitator runs the off-chain checks first, as listed in the table above, because
+that is what the TS reference facilitator does (x402-foundation/x402 `e4a0868`,
+`typescript/packages/mechanisms/evm/src/`):
+
+- `exact/facilitator/eip3009.ts`: signature at 151–243; recipient at 247–257, `validBefore` at 259–270,
+  `validAfter` at 272–282 and the exact amount at 284–294. Only then comes the simulation (308–331).
+  If the simulation fails, the balance is read by `diagnoseEip3009SimulationFailure`
+  (`exact/facilitator/eip3009-utils.ts` 161–238, balance at 224–228).
+- `exact/facilitator/permit2.ts`: spender at 119–128, recipient at 130–138, deadline at 140–147,
+  `validAfter` at 149–155, exact amount at 157–166 and token at 168–174. The signature follows at
+  199–221, then the simulation (306–311). If the simulation fails, balance and allowance are read by
+  `diagnosePermit2SimulationFailure` (`shared/permit2.ts` 372–428: balance at 410–415, then allowance at
+  417–422).
+
+**Why.**
+
+- Clients see the same reason from this facilitator and the reference.
+- The off-chain checks need no RPC, so a payload that is wrong anyway costs nothing to reject.
+- The off-chain reason is the one the payer can act on. An expired or mis-priced payment must be
+  re-signed, and approving Permit2 or topping up the balance would not make it valid.
+
+**What this means for combined failures.** A payload that is wrong off-chain and also unfunded or
+unapproved gets the off-chain code:
+
+- Permit2 with no allowance, or approved but unfunded, and also expired: `…_valid_before`. The spec text
+  gives `permit2_allowance_required` or `insufficient_funds`.
+- The same with an over-payment: `…_value_mismatch`.
+- EIP-3009, unfunded, and also expired, over-paying or with a wrong recipient: the off-chain code.
+- `tests/e2e/04b-payload-checks.test.ts` pins all of these ("combined failures"). It also pins the control
+  case: with a correct payload, the same payers get `permit2_allowance_required` / `insufficient_funds`.
+
+**Where we differ from the reference, and why.**
+
+- *Signature position for Permit2.* The reference checks the Permit2 signature after the other off-chain
+  checks. Here the signature comes right after the spender, as spec step 1 has it, and as both the spec
+  and the reference do for EIP-3009. So a Permit2 payload with a bad signature that is also, say,
+  expired is reported as an invalid signature here. The reference reports it as expired.
+- *Allowance before balance.* When both are missing, the reference's failure diagnosis reads the balance
+  first (`shared/permit2.ts` 410–415, before the allowance at 417–422) and answers
+  `permit2_insufficient_balance`. Here the allowance
+  comes first (412 `permit2_allowance_required`), as the spec orders steps 2 and 3. That was an explicit
+  decision for 0004.
 
 ## Error codes after the patches
 
@@ -110,6 +160,7 @@ exact handler, where §9 has a scheme-specific code.
 | `TransactionSimulation`, other simulation reverts | `invalid_transaction_state` | §9: "Blockchain transaction failed or was rejected": the transfer fails on chain (generic) |
 | a mined settlement that reverted | `invalid_transaction_state`, with its hash | same, and §5.3.2: a broadcast transaction is reported (0011) |
 | `AssetMismatch` | `invalid_payload` | the payload authorizes another token than the requirements ask for: "contains invalid data" (generic) |
+| Permit2 spender other than the x402 exact proxy | `invalid_payload` | the spender never receives funds, so it is not a recipient mismatch; the payload is unusable (0014) |
 | `InvalidFormat`, a body that is not JSON, a v2 request naming no network | `invalid_payload` | §9: "malformed or contains invalid data" (generic) |
 | `AcceptedRequirementsMismatch` | `invalid_payment_requirements` | the requirements sent are not the ones the payload accepted; §9: "requirements object is invalid" (generic) |
 | `ChainIdMismatch`, `UnsupportedChain` | `invalid_network` | §9: "network is not supported" (generic) |
@@ -121,7 +172,7 @@ exact handler, where §9 has a scheme-specific code.
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.4` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.5` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -136,7 +187,7 @@ silicon), with the base images already pulled:
 - Cold build: 114 s for hemi.1. Of that, 57 s compiles the dependency graph and 12 s rebuilds after the
   patches.
 - `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
-  113 s for hemi.3, 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches).
+  113 s for hemi.3, 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches), 113 s for hemi.5 (57.8 s dependencies, 11.9 s after the patches).
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -159,7 +210,7 @@ cargo test -p x402-types -p x402-facilitator-local -p x402-chain-eip155 \
 ```
 
 Every patch was checked one by one: `cargo fmt --check`, `cargo clippy --tests -D warnings`, and the
-tests, with 36 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
+tests, with 37 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
 the built image on anvil forks.
 
 ## The one non-spec field: `invalidReasonDetails`
@@ -714,6 +765,27 @@ After (HTTP 400): `{"isValid":false,"invalidReason":"invalid_x402_version","inva
 > **Title:** Missing or unsupported `x402Version` is reported as `invalid_network`; x402 v2 §9 has `invalid_x402_version`
 >
 > A request with top-level `x402Version: 1` (to a v2-only facilitator) or none at all gets `invalid_network` "Unsupported chain", although the network is served. This PR checks the version first: `VerifyRequest::x402_version` reads it, `SchemeRegistry::supports_version` tells whether any handler serves it, and a missing or unserved version gets `invalid_x402_version`. It also adds `SchemeRegistry::with_handler` for registries built by hand. Unit tests cover v1, a missing version and `{}`.
+</details>
+
+### 0014 eip155: report a Permit2 spender other than the exact proxy as `invalid_payload`
+
+- **The bug.** `assert_offchain_valid` mapped a permit whose spender is not the x402 exact proxy to
+  `RecipientMismatch`, i.e. `invalid_exact_evm_payload_recipient_mismatch`. For an EOA payer the
+  signature-first rule (0003) answered first, with an invalid signature, because the signature's EIP-712
+  hash is built with the proxy as spender.
+- **The fix.** `assert_exact_proxy_spender` runs before the signature check and reports `invalid_payload`.
+  The spender never receives funds: the proxy is what binds the transfer to the witness's recipient, so
+  another spender makes the payload unusable. The TS reference also checks the spender first
+  (`permit2.ts` 119–128), with its own code `invalid_permit2_spender`. §9 has no spender code, so this
+  facilitator uses `invalid_payload`.
+
+e2e: a permit re-signed with a random spender gets 400 `invalid_payload` from `/verify` and `/settle`.
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** Permit2: a spender other than the exact proxy is reported as a recipient mismatch
+>
+> `assert_offchain_valid` returns `RecipientMismatch` for a permit whose spender is not `EXACT_PERMIT2_PROXY_ADDRESS`, and since the EIP-712 hash is built with the proxy as spender, a payload signed for another spender usually fails earlier as an invalid signature. The spender is not the recipient; another spender makes the payload unusable. This PR adds `assert_exact_proxy_spender`, run before the signature check (as the TS reference does), reporting `InvalidFormat`, i.e. x402 v2 §9 `invalid_payload`. Unit test included.
 </details>
 
 ## What these patches do not change

@@ -1,7 +1,7 @@
 From fd13be890b60e32302f0486ef607d90a95e9a8c6 Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 23:37:51 -0400
-Subject: [PATCH 07/13] facilitator-local: report a request for an unsupported
+Subject: [PATCH 07/14] facilitator-local: report a request for an unsupported
  network as invalid_network
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

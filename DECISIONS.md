@@ -463,7 +463,7 @@ Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return 
 
 The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
 
-No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.4`. Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.5`. Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
 
 | Patch | Change |
 |------|------|
@@ -480,6 +480,7 @@ No config setting changes any of this, so the facilitator is now built from `fac
 | 0011 | One settlement per authorization, keyed by chain, payer and nonce. While a settle is pending, `/verify` of the authorization and any other settle carrying it return `invalid_transaction_state`. An identical retry gets the same hash while pending. The first retry after mining claims the success and removes the record in the same locked step; later settles are replays. A revert returns `invalid_transaction_state` with the hash |
 | 0012 | EIP-6492 signatures are validated with the validator's `isValidSigWithSideEffects` (`eth_call`) before balance, allowance or any send. A wrapper around the payer's own EOA signature is ignored, so no factory call is made |
 | 0013 | A missing or unsupported top-level `x402Version` returns `invalid_x402_version` |
+| 0014 | A Permit2 spender other than the exact proxy returns `invalid_payload`, checked before the signature |
 
 hemi.1 had patches 0001 to 0005. A fresh-context critic then found three more gaps:
 
@@ -494,7 +495,12 @@ hemi.2 fixes all three. A second critic pass on hemi.2 found four more:
 - **Codes:** several codes were not in §9.
 - **Retries:** the SDK's automatic retry after `settlement_pending` was handled as a fresh settle.
 
-hemi.3 (0008 to 0011) fixes these. A third critic pass on hemi.3 found that the first version of 0011 answered success to every repeat of a payload whose settle had gone pending, so one payment could pay for several requests. hemi.4 reworks 0011 to allow one settlement per authorization. It also adds 0012, after the critic found EIP-6492 signatures skipped the signature-first check and `/settle` would make an unvalidated factory call. 0013 maps the protocol version. The receipt timeout also dropped to 60 s, under the seller SDK's 90 s facilitator timeout, so a stock seller receives `settlement_pending` (D-013 config).
+hemi.3 (0008 to 0011) fixes these. A third critic pass on hemi.3 found that the first version of 0011 answered success to every repeat of a payload whose settle had gone pending, so one payment could pay for several requests. hemi.4 reworks 0011 to allow one settlement per authorization. It also adds 0012, after the critic found EIP-6492 signatures skipped the signature-first check and `/settle` would make an unvalidated factory call. 0013 maps the protocol version. A fourth critic pass on hemi.4 found no failing item and no in-repo major issue. hemi.5 adds 0014 for the spender and settles the check order for combined failures.
+
+Check order, decided in hemi.5: the off-chain checks (recipient, validity window, exact amount, token, Permit2 spender) run before the allowance and balance reads. That matches the TS reference facilitator at `e4a0868`. It checks recipient, `validBefore`, `validAfter` and exact amount before simulating, and reads balance or allowance only to diagnose a failed simulation (`exact/facilitator/eip3009.ts` 245–331, `exact/facilitator/permit2.ts` 119–174 and 306–311, `shared/permit2.ts` 372–428). It is not the order written in `scheme_exact_evm.md`. The off-chain reason is chosen because it needs no RPC call, and because it is the one the payer can act on: an expired or mis-priced payment must be re-signed, which approving or topping up won't fix. Single-failure cases are unaffected. Two deliberate differences from the reference remain:
+
+- **Permit2 signature position:** the signature is checked right after the spender, as the spec's step 1 says.
+- **Allowance before balance:** when both are missing, allowance is checked first and returns 412 `permit2_allowance_required` (spec order, patch 0004). The reference diagnoses the balance first. The receipt timeout also dropped to 60 s, under the seller SDK's 90 s facilitator timeout, so a stock seller receives `settlement_pending` (D-013 config).
 
 - **Replay code:** a replay is reported as `invalid_transaction_state`. §9 has no replay code, and its definition ("Blockchain transaction failed or was rejected") fits. The TS reference facilitator also uses it as its default for failed settlements.
 - **`settlement_pending` is HTTP 200:** the TS reference facilitator returns it the same way, and x402-rs's own client reads the body only on 200, 400 and 412.
@@ -505,9 +511,9 @@ hemi.3 (0008 to 0011) fixes these. A third critic pass on hemi.3 found that the 
 - **EIP-6492 deployment:** a counterfactual wallet deployed during settle is untested end to end, because the forks have no wallet factory.
 - **Build:** base images are pinned by digest, and each patch is applied with `git apply --check`, so upstream drift fails the build. A no-cache build takes about 115 s on the workstation (Colima, 4 CPUs). The image is 170 MB.
 
-Verified on 2026-10-29 against a no-cache hemi.4 build (115 s):
+Verified on 2026-10-29 against a no-cache hemi.5 build (114 s):
 
-- **e2e suite:** 8 files, 82 tests passed, with dead primary RPCs and no expected-failure markers.
+- **e2e suite:** 8 files, 86 tests passed, with dead primary RPCs and no expected-failure markers.
 - **Rust checks:** `cargo fmt`, `clippy -D warnings` and the unit tests pass at each patch commit.
 - **Demo:** `buyer/demo-fork.sh` settles all four asset and network pairs, and the seller logs a `/verify` before each `/settle`.
 
