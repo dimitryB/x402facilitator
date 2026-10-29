@@ -375,6 +375,32 @@ Impact on the facilitator: verification reads and nonce reads are correct. Settl
 
 Impact on forks: an unpinned anvil fork of dRPC testnet would start ~2.9M blocks back. `scripts/fork.sh` defaults to the public RPCs and falls back to dRPC on testnet only with a pinned block.
 
+## D-016. Facilitator image: x402-rs e75adda plus five spec-conformance patches
+
+This supersedes the image choice in D-013. The config in D-013 is unchanged.
+
+Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return the x402 v2 spec's error shapes. The Definition of done requires them for a failed signature and an insufficient balance:
+
+| Case | Stock x402-rs | Spec (`specs/x402-specification-v2.md` §5.3.2, §5.4.2, §9) |
+|------|------|------|
+| Bad EOA signature (both methods) | HTTP 500 `unexpected_error`; the revert text is in the details | `invalid_exact_evm_payload_signature` |
+| Any error body | `"payer": ""`, and on settle `"network": ""` | the payer's address (or omitted); CAIP-2 network required |
+| Permit2 settle, insufficient balance | HTTP 500 `unexpected_error` (`TRANSFER_FROM_FAILED`) | `insufficient_funds` |
+| Permit2, no allowance and no balance | 412 or 400 at random, because the reads race | 412 allowance-required first (scheme_exact_evm.md) |
+| Replay | HTTP 500 `unexpected_error` | a §9 code |
+
+The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
+
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus five patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.1`. Each patch is small, unit-tested and written to go upstream. None changes what is settled or to whom; they change which error is returned, with which fields, and when. `facilitator/x402-rs/README.md` has the per-patch detail and draft upstream texts. Nothing has been published.
+
+- **Replay code:** a replay is reported as `invalid_transaction_state`. §9 has no replay code, and its definition ("Blockchain transaction failed or was rejected") fits. The TS reference facilitator also uses it as its default for failed settlements.
+- **Build:** the builder and runtime base images are pinned by digest. Each patch is applied with `git apply --check`, so upstream drift fails the build.
+- **Build time:** a no-cache build took 112 s on the workstation (Colima, 4 CPUs). The image is 170 MB.
+
+Verified on 2026-10-29: the e2e suite passes 43 of 43 against this image, with dead primary RPCs and no expected-failure markers. `buyer/demo-fork.sh` settles all four asset and network pairs, and the seller logs a `/verify` before each `/settle`.
+
+The alternative was the stock image with the deviations documented. It was rejected because it fails a Definition-of-done item. The TypeScript facilitator fallback in the brief is for cases where the Rust config cannot express what Hemi needs. This gap is not Hemi-specific, and a patch keeps the Rust facilitator the brief chose.
+
 ### Open questions
 
 - Q-1. Cross-check the mainnet token addresses on `explorer.hemi.xyz` from a network that isn't blocked (D-002). They currently rest on Hemi's token list and on-chain `name`/`symbol` reads.

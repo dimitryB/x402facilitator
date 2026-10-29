@@ -1,0 +1,456 @@
+From 116f7e816e0106b0ebe2b1d6ae0cc01d4d98a479 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 22:50:11 -0400
+Subject: [PATCH 2/5] facilitator-local: fill payer and network in error
+ responses, use spec codes
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Error bodies of /verify and /settle hardcoded "payer": "" and
+"network": "", and reported every on-chain or transport failure as the
+non-spec code unexpected_error. x402 v2 requires network (§5.3.2, a CAIP-2 id),
+describes payer as the payer's address (§5.3.2, §5.4.2), names the
+human-readable field invalidMessage (§5.4.2) and lists unexpected_verify_error
+and unexpected_settle_error (§9).
+
+- FacilitatorLocalError carries an ErrorContext with the request's network and
+  the payer, which scheme handlers can now report through the new
+  X402SchemeFacilitator::payer (default: none, and payer is then omitted).
+- VerifyRequest::network reads the network as the request writes it.
+- The EIP-155 v2 exact handler reports the authorization's from address.
+- /verify errors add invalidMessage (invalidReasonDetails stays for existing
+  clients); unexpected_error becomes unexpected_verify_error or
+  unexpected_settle_error depending on the endpoint.
+
+HTTP status codes are unchanged.
+---
+ .../src/v2_eip155_exact/facilitator/mod.rs    |  17 ++
+ .../src/facilitator_local.rs                  |  67 +++++--
+ crates/x402-facilitator-local/src/handlers.rs | 168 ++++++++++++++----
+ crates/x402-types/src/proto/mod.rs            |  30 ++++
+ crates/x402-types/src/scheme/mod.rs           |   9 +
+ 5 files changed, 236 insertions(+), 55 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
+index 65cafd3..e5ff63a 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
+@@ -220,6 +220,23 @@ where
+         Ok(settle_response.into())
+     }
+ 
++    fn payer(&self, request: &proto::VerifyRequest) -> Option<String> {
++        match types::FacilitatorVerifyRequest::try_from(request.clone()).ok()? {
++            types::FacilitatorVerifyRequest::Eip3009 {
++                payment_payload, ..
++            } => Some(payment_payload.payload.authorization.from.to_string()),
++            types::FacilitatorVerifyRequest::Permit2 {
++                payment_payload, ..
++            } => Some(
++                payment_payload
++                    .payload
++                    .permit_2_authorization
++                    .from
++                    .to_string(),
++            ),
++        }
++    }
++
+     async fn supported(&self) -> Result<proto::SupportedResponse, X402SchemeFacilitatorError> {
+         let chain_id = self.provider.chain_id();
+         let mut extensions = vec![];
+diff --git a/crates/x402-facilitator-local/src/facilitator_local.rs b/crates/x402-facilitator-local/src/facilitator_local.rs
+index 2780048..19992b1 100644
+--- a/crates/x402-facilitator-local/src/facilitator_local.rs
++++ b/crates/x402-facilitator-local/src/facilitator_local.rs
+@@ -92,16 +92,19 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
+         &self,
+         request: &proto::VerifyRequest,
+     ) -> Result<proto::VerifyResponse, Self::Error> {
++        let context = ErrorContext::from_request(request);
+         let handler = request
+             .scheme_handler_slug()
+             .and_then(|slug| self.handlers.by_slug(&slug))
+-            .ok_or(FacilitatorLocalError::Verification(
+-                PaymentVerificationError::UnsupportedScheme.into(),
+-            ))?;
+-        let response = handler
+-            .verify(request)
+-            .await
+-            .map_err(FacilitatorLocalError::Verification)?;
++            .ok_or_else(|| {
++                FacilitatorLocalError::Verification(
++                    PaymentVerificationError::UnsupportedScheme.into(),
++                    context.clone(),
++                )
++            })?;
++        let response = handler.verify(request).await.map_err(|error| {
++            FacilitatorLocalError::Verification(error, context.with_payer(handler.payer(request)))
++        })?;
+         Ok(response)
+     }
+ 
+@@ -109,16 +112,19 @@ impl Facilitator for FacilitatorLocal<SchemeRegistry> {
+         &self,
+         request: &proto::SettleRequest,
+     ) -> Result<proto::SettleResponse, Self::Error> {
++        let context = ErrorContext::from_request(request);
+         let handler = request
+             .scheme_handler_slug()
+             .and_then(|slug| self.handlers.by_slug(&slug))
+-            .ok_or(FacilitatorLocalError::Settlement(
+-                PaymentVerificationError::UnsupportedScheme.into(),
+-            ))?;
+-        let response = handler
+-            .settle(request)
+-            .await
+-            .map_err(FacilitatorLocalError::Settlement)?;
++            .ok_or_else(|| {
++                FacilitatorLocalError::Settlement(
++                    PaymentVerificationError::UnsupportedScheme.into(),
++                    context.clone(),
++                )
++            })?;
++        let response = handler.settle(request).await.map_err(|error| {
++            FacilitatorLocalError::Settlement(error, context.with_payer(handler.payer(request)))
++        })?;
+         Ok(response)
+     }
+ 
+@@ -155,12 +161,37 @@ pub enum FacilitatorLocalError {
+     ///
+     /// This error occurs when the scheme handler fails to verify a payment,
+     /// typically due to invalid signatures, unsupported schemes, or insufficient funds.
+-    #[error(transparent)]
+-    Verification(X402SchemeFacilitatorError),
++    #[error("{0}")]
++    Verification(X402SchemeFacilitatorError, ErrorContext),
+     /// Payment settlement failed.
+     ///
+     /// This error occurs when the scheme handler fails to settle a payment on-chain,
+     /// typically due to transaction failures or network issues.
+-    #[error(transparent)]
+-    Settlement(X402SchemeFacilitatorError),
++    #[error("{0}")]
++    Settlement(X402SchemeFacilitatorError, ErrorContext),
++}
++
++/// What a failed request says about itself, echoed in the error response
++/// (`payer` and `network`, x402 v2 §5.3.2 and §5.4.2).
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++pub struct ErrorContext {
++    /// The payer named in the request, if its scheme handler can read it.
++    pub payer: Option<String>,
++    /// The network the request is for, as written in the request.
++    pub network: Option<String>,
++}
++
++impl ErrorContext {
++    /// Context known before a scheme handler is chosen: the request's network.
++    pub fn from_request(request: &proto::VerifyRequest) -> Self {
++        Self {
++            payer: None,
++            network: request.network(),
++        }
++    }
++
++    /// The same context, with the payer reported by the scheme handler.
++    pub fn with_payer(self, payer: Option<String>) -> Self {
++        Self { payer, ..self }
++    }
+ }
+diff --git a/crates/x402-facilitator-local/src/handlers.rs b/crates/x402-facilitator-local/src/handlers.rs
+index 483b0e9..5bde4d9 100644
+--- a/crates/x402-facilitator-local/src/handlers.rs
++++ b/crates/x402-facilitator-local/src/handlers.rs
+@@ -14,7 +14,7 @@ use axum::http::StatusCode;
+ use axum::response::Response;
+ use axum::routing::{get, post};
+ use axum::{Json, Router, response::IntoResponse};
+-use serde::{Deserialize, Serialize};
++use serde::Serialize;
+ use serde_json::json;
+ use x402_types::facilitator::Facilitator;
+ use x402_types::proto;
+@@ -211,16 +211,21 @@ where
+     }
+ }
+ 
+-#[derive(Serialize, Deserialize)]
++/// `/verify` error body (x402 v2 §5.4.2, §7.1).
++#[derive(Serialize)]
+ #[serde(rename_all = "camelCase")]
+ struct VerificationErrorResponse<'a> {
+     is_valid: bool,
+     invalid_reason: ErrorReason,
++    invalid_message: &'a str,
++    /// Same text as `invalidMessage`, kept for clients of earlier x402-rs versions.
+     invalid_reason_details: &'a str,
+-    payer: &'a str,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    payer: Option<&'a str>,
+ }
+ 
+-#[derive(Serialize, Deserialize)]
++/// `/settle` error body (x402 v2 §5.3.2, §7.2).
++#[derive(Serialize)]
+ #[serde(rename_all = "camelCase")]
+ struct SettlementErrorResponse<'a> {
+     success: bool,
+@@ -228,31 +233,45 @@ struct SettlementErrorResponse<'a> {
+     transaction: &'a str,
+     error_reason: ErrorReason,
+     error_message: &'a str,
+-    payer: &'a str,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    payer: Option<&'a str>,
++}
++
++/// x402 v2 §9 has no generic `unexpected_error`; it names the endpoint that failed.
++fn spec_reason(reason: ErrorReason, unexpected: ErrorReason) -> ErrorReason {
++    match reason {
++        ErrorReason::UnexpectedError => unexpected,
++        reason => reason,
++    }
+ }
+ 
+ impl AsJsonValue for FacilitatorLocalError {
+     fn as_json_value(&self) -> Result<serde_json::Value, serde_json::Error> {
+         match self {
+-            FacilitatorLocalError::Verification(scheme_handler_error) => {
++            FacilitatorLocalError::Verification(scheme_handler_error, context) => {
+                 let problem = scheme_handler_error.as_payment_problem();
+                 let verification_error_response = VerificationErrorResponse {
+                     is_valid: false,
+-                    invalid_reason: problem.reason(),
++                    invalid_reason: spec_reason(
++                        problem.reason(),
++                        ErrorReason::UnexpectedVerifyError,
++                    ),
++                    invalid_message: problem.details(),
+                     invalid_reason_details: problem.details(),
+-                    payer: "",
++                    payer: context.payer.as_deref(),
+                 };
+                 serde_json::to_value(verification_error_response)
+             }
+-            FacilitatorLocalError::Settlement(scheme_handler_error) => {
++            FacilitatorLocalError::Settlement(scheme_handler_error, context) => {
+                 let problem = scheme_handler_error.as_payment_problem();
+                 let settlement_error_response = SettlementErrorResponse {
+                     success: false,
+-                    network: "",
++                    // Required by §5.3.2; empty only if the request named no network at all.
++                    network: context.network.as_deref().unwrap_or(""),
+                     transaction: "",
+-                    error_reason: problem.reason(),
++                    error_reason: spec_reason(problem.reason(), ErrorReason::UnexpectedSettleError),
+                     error_message: problem.details(),
+-                    payer: "",
++                    payer: context.payer.as_deref(),
+                 };
+                 serde_json::to_value(settlement_error_response)
+             }
+@@ -262,31 +281,12 @@ impl AsJsonValue for FacilitatorLocalError {
+ 
+ impl IntoResponse for FacilitatorLocalError {
+     fn into_response(self) -> Response {
+-        match self {
+-            FacilitatorLocalError::Verification(scheme_handler_error) => {
+-                let problem = scheme_handler_error.as_payment_problem();
+-                let verification_error_response = VerificationErrorResponse {
+-                    is_valid: false,
+-                    invalid_reason: problem.reason(),
+-                    invalid_reason_details: problem.details(),
+-                    payer: "",
+-                };
+-                let status_code = scheme_error_to_status_code(&scheme_handler_error);
+-                (status_code, Json(verification_error_response)).into_response()
+-            }
+-            FacilitatorLocalError::Settlement(scheme_handler_error) => {
+-                let problem = scheme_handler_error.as_payment_problem();
+-                let settlement_error_response = SettlementErrorResponse {
+-                    success: false,
+-                    network: "",
+-                    transaction: "",
+-                    error_reason: problem.reason(),
+-                    error_message: problem.details(),
+-                    payer: "",
+-                };
+-                let status_code = scheme_error_to_status_code(&scheme_handler_error);
+-                (status_code, Json(settlement_error_response)).into_response()
+-            }
++        let (FacilitatorLocalError::Verification(scheme_handler_error, _)
++        | FacilitatorLocalError::Settlement(scheme_handler_error, _)) = &self;
++        let status_code = scheme_error_to_status_code(scheme_handler_error);
++        match self.as_json_value() {
++            Ok(body) => (status_code, Json(body)).into_response(),
++            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+         }
+     }
+ }
+@@ -303,3 +303,97 @@ fn scheme_error_to_status_code(error: &X402SchemeFacilitatorError) -> StatusCode
+         X402SchemeFacilitatorError::OnchainFailure(_) => StatusCode::INTERNAL_SERVER_ERROR,
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::facilitator_local::ErrorContext;
++
++    const PAYER: &str = "0x90F79bf6EB2c4f870365E785982E1f101E93b906";
++
++    fn context() -> ErrorContext {
++        ErrorContext {
++            payer: Some(PAYER.to_string()),
++            network: Some("eip155:43111".to_string()),
++        }
++    }
++
++    #[test]
++    fn verify_error_carries_payer_and_spec_message() {
++        let error = FacilitatorLocalError::Verification(
++            PaymentVerificationError::InsufficientFunds.into(),
++            context(),
++        );
++        let body = error.as_json_value().unwrap();
++        let message = "Onchain balance is not enough to cover the payment amount";
++        assert_eq!(
++            body,
++            json!({
++                "isValid": false,
++                "invalidReason": "insufficient_funds",
++                "invalidMessage": message,
++                "invalidReasonDetails": message,
++                "payer": PAYER,
++            })
++        );
++    }
++
++    #[test]
++    fn settle_error_carries_network_and_payer() {
++        let error = FacilitatorLocalError::Settlement(
++            PaymentVerificationError::InsufficientFunds.into(),
++            context(),
++        );
++        let body = error.as_json_value().unwrap();
++        assert_eq!(body["success"], json!(false));
++        assert_eq!(body["errorReason"], json!("insufficient_funds"));
++        assert_eq!(body["network"], json!("eip155:43111"));
++        assert_eq!(body["transaction"], json!(""));
++        assert_eq!(body["payer"], json!(PAYER));
++    }
++
++    #[test]
++    fn unknown_payer_is_omitted() {
++        let error = FacilitatorLocalError::Verification(
++            PaymentVerificationError::UnsupportedScheme.into(),
++            ErrorContext::default(),
++        );
++        let body = error.as_json_value().unwrap();
++        assert!(body.get("payer").is_none(), "{body}");
++    }
++
++    #[test]
++    fn unexpected_errors_name_the_endpoint() {
++        let onchain = || X402SchemeFacilitatorError::OnchainFailure("rpc down".to_string());
++        let verify = FacilitatorLocalError::Verification(onchain(), context());
++        assert_eq!(
++            verify.as_json_value().unwrap()["invalidReason"],
++            json!("unexpected_verify_error")
++        );
++        let settle = FacilitatorLocalError::Settlement(onchain(), context());
++        assert_eq!(
++            settle.as_json_value().unwrap()["errorReason"],
++            json!("unexpected_settle_error")
++        );
++    }
++
++    #[test]
++    fn status_codes_are_unchanged() {
++        let status = |e: FacilitatorLocalError| e.into_response().status();
++        let allowance = PaymentVerificationError::InsufficientAllowance.into();
++        assert_eq!(
++            status(FacilitatorLocalError::Verification(allowance, context())),
++            StatusCode::PRECONDITION_FAILED
++        );
++        let funds = PaymentVerificationError::InsufficientFunds.into();
++        assert_eq!(
++            status(FacilitatorLocalError::Settlement(funds, context())),
++            StatusCode::BAD_REQUEST
++        );
++        let onchain = X402SchemeFacilitatorError::OnchainFailure("x".to_string());
++        assert_eq!(
++            status(FacilitatorLocalError::Settlement(onchain, context())),
++            StatusCode::INTERNAL_SERVER_ERROR
++        );
++    }
++}
+diff --git a/crates/x402-types/src/proto/mod.rs b/crates/x402-types/src/proto/mod.rs
+index b7397f2..af1e832 100644
+--- a/crates/x402-types/src/proto/mod.rs
++++ b/crates/x402-types/src/proto/mod.rs
+@@ -150,6 +150,20 @@ impl VerifyRequest {
+         self.0.get()
+     }
+ 
++    /// Returns the network the request is for, as the request writes it:
++    /// `paymentPayload.accepted.network` (v2, a CAIP-2 chain id) or
++    /// `paymentPayload.network` (v1, a network name).
++    pub fn network(&self) -> Option<String> {
++        let value: serde_json::Value = serde_json::from_str(self.as_str()).ok()?;
++        let payload = value.get("paymentPayload")?;
++        payload
++            .get("accepted")
++            .and_then(|accepted| accepted.get("network"))
++            .or_else(|| payload.get("network"))?
++            .as_str()
++            .map(str::to_owned)
++    }
++
+     /// Extracts the scheme handler slug from the request.
+     ///
+     /// This determines which scheme handler should process this payment
+@@ -488,4 +502,20 @@ mod tests {
+             ErrorReason::InvalidTransactionState
+         );
+     }
++
++    fn request(json: &str) -> VerifyRequest {
++        serde_json::from_str(json).unwrap()
++    }
++
++    #[test]
++    fn network_is_read_from_v2_and_v1_requests() {
++        let v2 = request(
++            r#"{"x402Version":2,"paymentPayload":{"accepted":{"network":"eip155:43111"}}}"#,
++        );
++        assert_eq!(v2.network().as_deref(), Some("eip155:43111"));
++        let v1 = request(r#"{"x402Version":1,"paymentPayload":{"network":"base-sepolia"}}"#);
++        assert_eq!(v1.network().as_deref(), Some("base-sepolia"));
++        let none = request(r#"{"x402Version":2,"paymentPayload":{}}"#);
++        assert_eq!(none.network(), None);
++    }
+ }
+diff --git a/crates/x402-types/src/scheme/mod.rs b/crates/x402-types/src/scheme/mod.rs
+index 97e3925..3d5fd30 100644
+--- a/crates/x402-types/src/scheme/mod.rs
++++ b/crates/x402-types/src/scheme/mod.rs
+@@ -68,6 +68,15 @@ pub trait X402SchemeFacilitator: Send + Sync {
+ 
+     /// Returns the payment methods supported by this handler.
+     async fn supported(&self) -> Result<proto::SupportedResponse, X402SchemeFacilitatorError>;
++
++    /// Returns the payer named in `request`, if this handler can read it.
++    ///
++    /// Used to fill `payer` in `/verify` and `/settle` error responses
++    /// (x402 v2 §5.3.2, §5.4.2). The default knows no payer, and the field is then omitted.
++    fn payer(&self, request: &proto::VerifyRequest) -> Option<String> {
++        let _ = request;
++        None
++    }
+ }
+ 
+ /// Marker trait for types that are both identifiable and buildable.

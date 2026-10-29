@@ -96,7 +96,7 @@ pay mainnet usdc "$MAINNET_RPC"
 pay mainnet btc "$MAINNET_RPC"
 
 log "seller settlement log"
-grep -E '^\[seller\] (settled|settle failed|verify rejected)' "$FORK_STATE_DIR/seller.log" || true
+grep -E '^\[seller\] (verified|settled|settle failed|verify rejected)' "$FORK_STATE_DIR/seller.log" || true
 
 log "payTo $PAY_TO balances on the forks"
 for pair in "eip155:743111 $TESTNET_RPC" "eip155:43111 $MAINNET_RPC"; do

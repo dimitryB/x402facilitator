@@ -1,0 +1,165 @@
+From 7093235b34c6abe03d4547c1980a8d8120b51e69 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 22:52:10 -0400
+Subject: [PATCH 4/5] eip155: check Permit2 allowance before balance, and
+ re-check both on settle
+
+x402 (scheme_exact_evm.md, Permit2 verification steps 2 and 3) checks the
+payer's Permit2 allowance before its balance, and answers a missing allowance
+with 412 permit2_allowance_required. The verifier ran both reads with
+tokio::try_join!, so a payer with neither got whichever error came back first:
+the same payload alternated between 412 permit2_allowance_required and 400
+insufficient_funds from call to call.
+
+- assert_onchain_allowance_and_balance still runs both reads concurrently but
+  evaluates the allowance first, which makes the answer deterministic.
+- settle_permit2_payment now runs the same on-chain checks before sending
+  (balance only with an EIP-2612 permit, which grants the allowance in the same
+  transaction), like the EIP-3009 settle does. An unfunded payer now gets
+  insufficient_funds instead of a failed gas estimate reported as an
+  unexpected error. Settlement itself is unchanged.
+---
+ .../v2_eip155_exact/facilitator/permit2.rs    | 96 +++++++++++++++++--
+ 1 file changed, 87 insertions(+), 9 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+index 8f1c8e6..3bfc9ab 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+@@ -81,13 +81,22 @@ where
+     // Check if the client provided EIP-2612 gas-sponsoring extension data
+     let eip2612_gas_sponsoring_payload = payment_payload.eip2612_gas_sponsoring();
+ 
+-    // 2. Try settle (with or without EIP-2612 permit)
++    // 2. Re-check allowance and balance on chain, as the EIP-3009 settle does, so that an
++    //    unfunded or unapproved payer gets insufficient_funds / permit2_allowance_required
++    //    instead of a failed gas estimate.
++    let authorization = &payment_payload.payload.permit_2_authorization;
++    let token_contract = IERC20::new(payment_payload.accepted.asset.0, provider.inner());
++    let required_amount = payment_payload.accepted.amount;
++
++    // 3. Try settle (with or without EIP-2612 permit)
+     let tx_hash = if let Some(eip2612_gas_sponsoring_payload) = &eip2612_gas_sponsoring_payload {
+         // Reject EIP-2612 gas sponsoring if not enabled in config
+         if !eip2612_gas_sponsoring {
+             return Err(PaymentVerificationError::eip2612_gas_sponsoring_not_enabled().into());
+         }
+         eip2612::assert_eip2612_offchain_valid(eip2612_gas_sponsoring_payload, payment_payload)?;
++        // The EIP-2612 permit grants the Permit2 allowance in the same transaction.
++        assert_onchain_balance(&token_contract, authorization.from.0, required_amount).await?;
+         eip2612::settle_exact_permit2_with_eip2612(
+             provider,
+             payment_payload,
+@@ -95,10 +104,15 @@ where
+         )
+         .await?
+     } else {
++        assert_onchain_allowance_and_balance(
++            &token_contract,
++            authorization.from.0,
++            required_amount,
++        )
++        .await?;
+         settle_exact_permit2(provider, payment_payload).await?
+     };
+ 
+-    let authorization = &payment_payload.payload.permit_2_authorization;
+     let payer = authorization.from;
+     let network = &payment_payload.accepted.network;
+ 
+@@ -370,6 +384,24 @@ pub async fn assert_onchain_balance<P: Provider>(
+     Ok(())
+ }
+ 
++/// Checks the payer's Permit2 allowance, then its balance, in the order x402 prescribes
++/// (`scheme_exact_evm.md`, Permit2 verification steps 2 and 3).
++///
++/// Both reads run concurrently, but the allowance result is evaluated first, so a payer with
++/// neither gets `permit2_allowance_required` every time instead of whichever read returned first.
++pub async fn assert_onchain_allowance_and_balance<P: Provider>(
++    token_contract: &IERC20::IERC20Instance<P>,
++    payer: Address,
++    required_amount: U256,
++) -> Result<(), Eip155ExactError> {
++    let (allowance, balance) = tokio::join!(
++        assert_onchain_allowance(token_contract, payer, required_amount),
++        assert_onchain_balance(token_contract, payer, required_amount),
++    );
++    allowance?;
++    balance
++}
++
+ #[cfg_attr(feature = "telemetry", instrument(skip_all, err))]
+ pub async fn assert_onchain_exact_permit2<P: Provider>(
+     provider: &P,
+@@ -382,13 +414,9 @@ pub async fn assert_onchain_exact_permit2<P: Provider>(
+ 
+     let token_contract = IERC20::new(asset_address, provider);
+ 
+-    // Allowance from payer to Permit2 contract is enough
+-    let onchain_allowance_fut =
+-        assert_onchain_allowance(&token_contract, authorization.from.0, required_amount);
+-    // User balance is enough
+-    let onchain_balance_fut =
+-        assert_onchain_balance(&token_contract, authorization.from.0, required_amount);
+-    tokio::try_join!(onchain_allowance_fut, onchain_balance_fut)?;
++    // Allowance from payer to Permit2 contract is enough, then user balance is enough
++    assert_onchain_allowance_and_balance(&token_contract, authorization.from.0, required_amount)
++        .await?;
+ 
+     // ... and below is a check if we can do the settle
+ 
+@@ -520,3 +548,53 @@ where
+ 
+     execute_permit2_settlement(provider, payer, structured_signature, build_call).await
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use alloy_provider::ProviderBuilder;
++    use alloy_transport::mock::Asserter;
++
++    /// ABI-encoded uint256, as an eth_call result.
++    fn word(value: U256) -> Bytes {
++        Bytes::from(value.to_be_bytes::<32>())
++    }
++
++    async fn check(allowance: U256, balance: U256) -> Result<(), Eip155ExactError> {
++        let asserter = Asserter::new();
++        // Requests are answered in the order they are sent: allowance first, then balance.
++        asserter.push_success(&word(allowance));
++        asserter.push_success(&word(balance));
++        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
++        let token = IERC20::new(Address::repeat_byte(0x22), &provider);
++        assert_onchain_allowance_and_balance(&token, Address::repeat_byte(0x11), U256::from(10))
++            .await
++    }
++
++    fn reason(result: Result<(), Eip155ExactError>) -> Option<&'static str> {
++        match result {
++            Ok(()) => None,
++            Err(Eip155ExactError::PaymentVerification(
++                PaymentVerificationError::InsufficientAllowance,
++            )) => Some("allowance"),
++            Err(Eip155ExactError::PaymentVerification(
++                PaymentVerificationError::InsufficientFunds,
++            )) => Some("balance"),
++            Err(e) => panic!("unexpected error: {e:?}"),
++        }
++    }
++
++    #[tokio::test]
++    async fn allowance_is_reported_before_balance() {
++        assert_eq!(
++            reason(check(U256::ZERO, U256::ZERO).await),
++            Some("allowance")
++        );
++        assert_eq!(
++            reason(check(U256::ZERO, U256::MAX).await),
++            Some("allowance")
++        );
++        assert_eq!(reason(check(U256::MAX, U256::ZERO).await), Some("balance"));
++        assert_eq!(reason(check(U256::MAX, U256::MAX).await), None);
++    }
++}
