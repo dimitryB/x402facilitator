@@ -8,12 +8,19 @@ export interface HttpResult<T = Record<string, unknown>> {
   body: T;
 }
 
-async function call<T>(method: "GET" | "POST", path: string, body?: unknown, raw?: string): Promise<HttpResult<T>> {
+async function call<T>(
+  method: "GET" | "POST",
+  path: string,
+  body?: unknown,
+  raw?: string,
+  signal?: AbortSignal,
+): Promise<HttpResult<T>> {
   const payload = raw ?? (body === undefined ? undefined : JSON.stringify(body));
   const res = await fetch(`${FACILITATOR_URL}${path}`, {
     method,
     headers: payload === undefined ? undefined : { "content-type": "application/json" },
     body: payload,
+    signal,
   });
   const text = await res.text();
   let parsed: T;
@@ -47,8 +54,19 @@ export function verify(paymentPayload: PaymentPayload, paymentRequirements: Paym
   return call<Record<string, unknown>>("POST", "/verify", request(paymentPayload, paymentRequirements));
 }
 
-export function settle(paymentPayload: PaymentPayload, paymentRequirements: PaymentRequirements) {
-  return call<Record<string, unknown>>("POST", "/settle", request(paymentPayload, paymentRequirements));
+/** `signal` lets a test hang up before the answer arrives, as a client that disconnects would. */
+export function settle(
+  paymentPayload: PaymentPayload,
+  paymentRequirements: PaymentRequirements,
+  options: { signal?: AbortSignal } = {},
+) {
+  return call<Record<string, unknown>>(
+    "POST",
+    "/settle",
+    request(paymentPayload, paymentRequirements),
+    undefined,
+    options.signal,
+  );
 }
 
 /** Append a response to .scratch/fork-tests/observed-responses.jsonl so a run leaves evidence behind. */

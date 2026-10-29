@@ -1,7 +1,8 @@
 /**
  * DoD: "... an insufficient-balance case ... return[s] the spec's error shapes".
  *
- * A fresh account funded with ETH only signs a valid payment with the stock client.
+ * A fresh account funded with ETH, and with no tokens or with half the price, signs a valid payment with
+ * the stock client.
  * Spec: specs/x402-specification-v2.md §9 `insufficient_funds`: "Client does not have enough tokens to
  * complete the payment", with the §7.1 / §7.2 error examples using exactly that code; field rules per
  * §5.4.2 / §5.3.2. scheme_exact_evm.md: EIP-3009 Phase 2 step 2 and Permit2 Phase 3 step 3 check balance.
@@ -39,8 +40,15 @@ const METHODS: Method[] = [
   { method: "Permit2", network: TESTNET, asset: usdcAsset(TESTNET), amount: 1_000n },
 ];
 
-for (const m of METHODS) {
-  describe(`insufficient balance, ${m.method} (${m.asset.symbol} on ${m.network})`, () => {
+/** What the payer holds: nothing at all, or half the price (the balance check is not just "non-zero"). */
+const BALANCES = [
+  { label: "no tokens", of: (_amount: bigint) => 0n },
+  { label: "half the price", of: (amount: bigint) => amount / 2n },
+];
+
+for (const m of METHODS) for (const b of BALANCES) {
+  describe(`insufficient balance (${b.label}), ${m.method} (${m.asset.symbol} on ${m.network})`, () => {
+    const balance = b.of(m.amount);
     let poor: LocalAccount;
     const payTo = freshAddress();
     let requirements: PaymentRequirements;
@@ -54,7 +62,8 @@ for (const m of METHODS) {
         // The one-time approval a Permit2 buyer sends; it costs ETH, which is all this account has.
         expect(await ensurePermit2Approval(m.network, poor, m.asset, m.amount)).not.toBeNull();
       }
-      expect(await tokenBalance(m.network, m.asset, poor.address)).toBe(0n);
+      if (balance > 0n) await fundToken(m.network, m.asset, poor.address, balance);
+      expect(await tokenBalance(m.network, m.asset, poor.address)).toBe(balance);
       requirements = requirementsFor(m.network, m.asset, payTo, m.amount);
       payment = await signPayment(poor, requirements);
       before = await snapshot(m.network, m.asset, poor.address, payTo);
@@ -62,7 +71,7 @@ for (const m of METHODS) {
 
     it(`/verify answers isValid false, "${SPEC_INSUFFICIENT_FUNDS}", in the spec's §7.1 shape`, async () => {
       const res = await verify(payment, requirements);
-      record(`verify insufficient balance: ${m.method}`, res);
+      record(`verify insufficient balance (${b.label}): ${m.method}`, res);
       expect(verifyFailureViolations(res.body, { reason: SPEC_INSUFFICIENT_FUNDS, payer: poor.address })).toEqual([]);
       expect(res.body.payer).toBe(poor.address);
       expect(res.status).toBe(400);
@@ -70,7 +79,7 @@ for (const m of METHODS) {
 
     it(`/settle answers success false, "${SPEC_INSUFFICIENT_FUNDS}", in the spec's §7.2 shape; nothing moves`, async () => {
       const res = await settle(payment, requirements);
-      record(`settle insufficient balance: ${m.method}`, res);
+      record(`settle insufficient balance (${b.label}): ${m.method}`, res);
       expect(
         settleFailureViolations(res.body, {
           reasons: [SPEC_INSUFFICIENT_FUNDS],

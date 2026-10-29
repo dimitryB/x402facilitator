@@ -13,9 +13,10 @@ how a payment is settled. What they change:
   EIP-1271 answer, then allowance before balance (0003, 0004, 0008);
 - what may be settled: the exact scheme now settles only the exact required amount and rejects an
   over-authorization, which stock x402-rs settled in full (0010);
-- transaction handling in two places: after a broadcast transaction's receipt times out, the signer's
-  nonce is kept instead of reset (0006); and each payment authorization is settled at most once at a
-  time, with a retry of a pending settle answered from its transaction rather than sending another (0011);
+- transaction handling in three places: after a broadcast transaction's receipt times out, the signer's
+  nonce is kept instead of reset (0006); each payment authorization is settled at most once at a time,
+  with a retry of a pending settle answered from its transaction rather than sending another (0011); and
+  a settlement runs to its end even if the client disconnects, with every broadcast hash logged (0015);
 - what is sent at all: an EIP-6492 wallet deployment through Multicall3 is only sent after the EIP-6492
   validator accepted the signature, and a wrapper around the payer's own signature is never sent (0012).
 
@@ -46,6 +47,7 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0012](patches/0012-eip155-validate-EIP-6492-signatures-first-ignore-a-w.patch) | EIP-6492 signatures skip the signature-first rule; `/settle` sends a caller-chosen factory call without validating the signature | scheme_exact_evm.md step 1, §9 |
 | [0013](patches/0013-facilitator-local-report-a-missing-or-unserved-x402-.patch) | a missing or unserved `x402Version` is reported as `invalid_network` | §9 `invalid_x402_version` |
 | [0014](patches/0014-eip155-report-a-Permit2-spender-other-than-the-exact.patch) | a Permit2 spender other than the exact proxy is reported as a recipient mismatch (or an invalid signature) | §9 `invalid_payload` |
+| [0015](patches/0015-facilitator-local-finish-a-settlement-whose-client-d.patch) | a client that disconnects after the broadcast cancels the settlement: the transaction is still mined, but its record and hash are lost | §5.3.2, §9 `settlement_pending` |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -172,7 +174,7 @@ exact handler, where §9 has a scheme-specific code.
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.5` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.6` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -187,7 +189,8 @@ silicon), with the base images already pulled:
 - Cold build: 114 s for hemi.1. Of that, 57 s compiles the dependency graph and 12 s rebuilds after the
   patches.
 - `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
-  113 s for hemi.3, 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches), 113 s for hemi.5 (57.8 s dependencies, 11.9 s after the patches).
+  113 s for hemi.3; 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches); 113 s for hemi.5
+  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s).
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -210,7 +213,7 @@ cargo test -p x402-types -p x402-facilitator-local -p x402-chain-eip155 \
 ```
 
 Every patch was checked one by one: `cargo fmt --check`, `cargo clippy --tests -D warnings`, and the
-tests, with 37 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
+tests, with 38 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
 the built image on anvil forks.
 
 ## The one non-spec field: `invalidReasonDetails`
@@ -641,8 +644,11 @@ Under-payment gets the same code.
   - While it exists, `/verify` of that authorization is refused with `invalid_transaction_state`. So is
     `/settle` of any other request carrying it. The authorization is committed to a settlement and must
     not pay for anything else.
-  - A settle that ends in anything but `settlement_pending` drops the record when it returns. A drop
-    guard does this, so it also happens if the request is cancelled.
+  - A settle that ends in anything but `settlement_pending` drops the record when it ends, through a drop
+    guard. The guard fires when the settlement's future is dropped, so up to hemi.5 it also fired when
+    the client disconnected mid-settlement: hyper dropped the request, and with it the settlement, its
+    record and its hash, even after the broadcast. Since 0015 the settlement runs on its own task, which a
+    disconnect does not cancel, so the guard fires only when the settlement itself ends.
   - A retry of the very same request sends nothing and is answered from the receipt, as below.
   - Records live in memory, are bounded (10,000, oldest dropped first) and expire after 15 minutes.
 - **How a retry of the same request is answered** (same payload, signature and requirements):
@@ -668,6 +674,8 @@ Under-payment gets the same code.
     the chain alone.
   - If no client ever retries, the record expires after 15 minutes. Until then, `/verify` keeps refusing
     the authorization, which is spent by then anyway.
+  - A proxy or client timeout on `/settle` shorter than `receipt_timeout_secs` loses the response with
+    the hash, though not the record or the log line: see 0015.
 
 What the e2e suite checks (`06-settlement-pending.test.ts`, automine off, 5 s receipt timeout):
 
@@ -788,6 +796,88 @@ e2e: a permit re-signed with a random spender gets 400 `invalid_payload` from `/
 > `assert_offchain_valid` returns `RecipientMismatch` for a permit whose spender is not `EXACT_PERMIT2_PROXY_ADDRESS`, and since the EIP-712 hash is built with the proxy as spender, a payload signed for another spender usually fails earlier as an invalid signature. The spender is not the recipient; another spender makes the payload unusable. This PR adds `assert_exact_proxy_spender`, run before the signature check (as the TS reference does), reporting `InvalidFormat`, i.e. x402 v2 §9 `invalid_payload`. Unit test included.
 </details>
 
+### 0015 facilitator-local: finish a settlement whose client disconnected; log every broadcast
+
+- **The bug.** `post_settle` awaited the settlement inside the request's future. When the client
+  disconnects, or a proxy or client timeout in front of the facilitator gives up, hyper drops that future
+  and the settlement with it, wherever it was suspended. After the broadcast that is the receipt wait. The
+  transaction is still mined and pays out, but:
+  - 0011's drop guard removed the authorization's record, so `/verify` of the same payload called it valid
+    again while the transaction was unmined, and a retry was settled from scratch: it could send a second
+    transaction for the same authorization, which reverts once the first is mined;
+  - the hash was neither returned nor logged, so nobody could reconcile the payment.
+- **The fix.**
+  - `post_settle` runs `Facilitator::settle` on its own tokio task, in the request's tracing span, and
+    awaits its `JoinHandle`. A disconnect drops only the handle, which detaches the task: the settlement
+    runs to its end and its outcome is recorded as for any other request. That is the receipt, or 0011's
+    pending record naming the hash when the receipt does not arrive within `receipt_timeout_secs`. A
+    settlement task that panics is answered with 500 `unexpected_settle_error`.
+  - `send_transaction` (`chain/provider.rs`) logs every broadcast at info level before it waits for the
+    receipt (`Transaction broadcast tx=<hash> from=<signer> to=<contract>`), and logs a warning with the
+    hash when the receipt does not arrive (`Transaction receipt not available; settlement pending`).
+  - `/verify` stays in the request's future: it sends nothing.
+- **Timeouts in front of the facilitator.** Any proxy, load balancer or client timeout on `/settle` should
+  exceed `receipt_timeout_secs` (60 s in `facilitator/config*.json`), plus the few seconds the checks
+  before the broadcast take. With a shorter timeout the caller loses the response, and with it the hash,
+  although the settlement completes. The hash is then in the facilitator's log. A retry of the same request
+  is answered from it once the receipt wait has ended.
+- **Limits.**
+  - Between the hang-up and the end of the receipt wait the settlement is still running. `/verify` and an
+    identical `/settle` both get `invalid_transaction_state` ("A settlement of this payment authorization
+    is in progress"), without the hash. From the end of the wait, 0011's rules apply. The hash is not
+    written to the record at the moment of broadcast: that needs a hook in the provider, and the record
+    would then have to stop a retry from claiming the success while the original request is still waiting
+    for the same receipt.
+  - A shutdown or restart still ends a detached settlement: axum's graceful shutdown waits for open
+    connections, not for detached tasks. The pending record is in memory anyway (0011). The broadcast log
+    line is what survives.
+
+Before (hemi.5, i.e. patches 0001–0014), with automine off and `receipt_timeout_secs` 5: the client hangs up
+once the transaction is in the mempool, and `/verify` of the same payload then answers
+
+```json
+{"isValid":true,"payer":"0x90F79bf6EB2c4f870365E785982E1f101E93b906"}
+```
+
+while the transaction is unmined, and nothing in the log names it.
+
+After, same steps: `/verify` answers 400 `invalid_transaction_state` while the settlement waits for its
+receipt, then names the transaction:
+
+```json
+{"isValid":false,"invalidReason":"invalid_transaction_state","invalidMessage":"A settlement of this payment authorization is pending in transaction 0x91579799f47ad52d12e7c2031ce51b5529f411064f79dedb758ee02c5cf09cda","invalidReasonDetails":"A settlement of this payment authorization is pending in transaction 0x91579799f47ad52d12e7c2031ce51b5529f411064f79dedb758ee02c5cf09cda","payer":"0x90F79bf6EB2c4f870365E785982E1f101E93b906"}
+```
+
+and the log has these lines (spans shortened). The client hung up right after the first; the warning
+comes from the detached settlement, still in the request's span:
+
+```text
+06:38:40.673  INFO http_request{… uri=/settle …}:post_settle:settle{…}:…: x402_chain_eip155::chain::provider: Transaction broadcast tx=0x91579799f47ad52d12e7c2031ce51b5529f411064f79dedb758ee02c5cf09cda from=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC to=0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA
+06:38:46.076  WARN http_request{… uri=/settle …}:post_settle:settle{…}:…: x402_chain_eip155::chain::provider: Transaction receipt not available; settlement pending tx=0x91579799f47ad52d12e7c2031ce51b5529f411064f79dedb758ee02c5cf09cda error=transaction was not confirmed within the timeout
+```
+
+The e2e test (`06-settlement-pending.test.ts`, automine off, 5 s receipt timeout):
+
+1. `/settle` P; the test aborts the request once the facilitator's transaction H is in the fork's mempool,
+   well before the receipt timeout.
+2. `/verify` P → 400 `invalid_transaction_state` throughout, naming H once the receipt wait has ended.
+3. An identical `/settle` → `settlement_pending` H at once; the signer's pending nonce shows nothing new
+   was sent.
+4. One block is mined. A retry → `{"success":true,"transaction":H,…}`; the next settle is a replay.
+5. `payTo` was paid exactly once, and the facilitator's log has H on the broadcast line and on the
+   receipt warning.
+
+Against patches 0001–0014 the test fails at step 2: `/verify` answers `isValid: true`.
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** A `/settle` cancelled by a client disconnect loses a broadcast transaction
+>
+> `post_settle` awaits the settlement inside the request future. When the client disconnects (or a proxy timeout fires) while the settlement waits for its receipt, hyper drops the future and the settlement with it. The transaction is already broadcast and still pays out, but its hash is never returned or logged, so neither the client nor the operator can reconcile the payment, and any per-request state the settlement keeps is lost with it.
+>
+> This PR runs the settlement on its own task (instrumented with the request span) and awaits the `JoinHandle`, so a disconnect detaches the settlement instead of cancelling it; a panic in it is answered with 500 `unexpected_settle_error`. `Eip155ChainProvider::send_transaction` logs each broadcast hash at info level before waiting for the receipt, and a warning with the hash when the receipt is unavailable. `post_settle` now requires the state to be `Clone + Send + Sync + 'static`, as `routes()` already did. Unit test: a handler aborted in the middle of a settlement; the settlement still completes.
+</details>
+
 ## What these patches do not change
 
 - **v1 and `upto` keep x402-rs's own behaviour.** The changes specific to the v2 exact handler are:
@@ -796,7 +886,7 @@ e2e: a permit re-signed with a random spender gets 400 `invalid_payload` from `/
   - the exact amount;
   - the pending-settlement record;
   - EIP-6492 validation first.
-  The generic code mappings in `x402-types` apply to every chain.
+  The generic code mappings in `x402-types`, and 0015's settlement task, apply to every chain and scheme.
 - **Unknown payers are omitted.** v1 handlers and non-EVM chains don't implement `payer`, so their error
   bodies leave the field out. The spec allows that.
 - **`invalidReasonDetails` remains.** It is the one non-spec field, kept for compatibility (see above).

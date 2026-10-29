@@ -482,7 +482,7 @@ Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return 
 
 The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
 
-No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.5`. Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.6`. Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
 
 | Patch | Change |
 |------|------|
@@ -500,6 +500,7 @@ No config setting changes any of this, so the facilitator is now built from `fac
 | 0012 | EIP-6492 signatures are validated with the validator's `isValidSigWithSideEffects` (`eth_call`) before balance, allowance or any send. A wrapper around the payer's own EOA signature is ignored, so no factory call is made |
 | 0013 | A missing or unsupported top-level `x402Version` returns `invalid_x402_version` |
 | 0014 | A Permit2 spender other than the exact proxy returns `invalid_payload`, checked before the signature |
+| 0015 | `/settle` runs the settlement in a detached task, so a client disconnect cannot cancel it after broadcast. Every broadcast hash is logged at info |
 
 hemi.1 had patches 0001 to 0005. A fresh-context critic then found three more gaps:
 
@@ -516,7 +517,9 @@ hemi.2 fixes all three. A second critic pass on hemi.2 found four more:
 
 hemi.3 (0008 to 0011) fixes these. A third critic pass on hemi.3 found that the first version of 0011 answered success to every repeat of a payload whose settle had gone pending, so one payment could pay for several requests. hemi.4 reworks 0011 to allow one settlement per authorization. It also adds 0012, after the critic found EIP-6492 signatures skipped the signature-first check and `/settle` would make an unvalidated factory call. 0013 maps the protocol version. A fourth critic pass on hemi.4 found no failing item and no in-repo major issue. hemi.5 adds 0014 for the spender and settles the check order for combined failures.
 
-Check order, decided in hemi.5: the off-chain checks (recipient, validity window, exact amount, token, Permit2 spender) run before the allowance and balance reads. That matches the TS reference facilitator at `e4a0868`. It checks recipient, `validBefore`, `validAfter` and exact amount before simulating, and reads balance or allowance only to diagnose a failed simulation (`exact/facilitator/eip3009.ts` 245–331, `exact/facilitator/permit2.ts` 119–174 and 306–311, `shared/permit2.ts` 372–428). It is not the order written in `scheme_exact_evm.md`. The off-chain reason is chosen because it needs no RPC call, and because it is the one the payer can act on: an expired or mis-priced payment must be re-signed, which approving or topping up won't fix. Single-failure cases are unaffected. Two deliberate differences from the reference remain:
+Check order, decided in hemi.5: the off-chain checks (recipient, validity window, exact amount, token, Permit2 spender) run before the allowance and balance reads. That matches the TS reference facilitator at `e4a0868`. It checks recipient, `validBefore`, `validAfter` and exact amount before simulating, and reads balance or allowance only to diagnose a failed simulation (`exact/facilitator/eip3009.ts` 245–331, `exact/facilitator/permit2.ts` 119–174 and 306–311, `shared/permit2.ts` 372–428). It is not the order written in `scheme_exact_evm.md`. The off-chain reason is chosen because it needs no RPC call, and because it is the one the payer can act on: an expired or mis-priced payment must be re-signed, which approving or topping up won't fix. Single-failure cases are unaffected. A fifth critic pass on hemi.5 found that a client disconnect after broadcast dropped the pending record and lost the hash. `/verify` then accepted the same payload again. hemi.6 adds 0015, and an e2e test reproduces that scenario; the test fails on hemi.5.
+
+Two deliberate differences from the reference remain:
 
 - **Permit2 signature position:** the signature is checked right after the spender, as the spec's step 1 says.
 - **Allowance before balance:** when both are missing, allowance is checked first and returns 412 `permit2_allowance_required` (spec order, patch 0004). The reference diagnoses the balance first.
@@ -533,11 +536,12 @@ Other choices and known limits of the patch set:
 - **Limits of the pending record (0011):** An unclaimed record blocks `/verify` of its authorization for up to 15 minutes; by then the authorization is spent anyway.
 - **Verify-then-settle race:** two requests that both pass `/verify` before either settles can both reach a seller's handler, and only one settle succeeds. This is inherent to the x402 flow.
 - **EIP-6492 deployment:** a counterfactual wallet deployed during settle is untested end to end, because the forks have no wallet factory.
+- **After a disconnect:** until the original settlement's receipt wait ends (at most 60 s), retries get `invalid_transaction_state` ("in progress") without the hash. Writing the hash into the record at broadcast would need a provider hook, and care that a retry cannot claim the success while the original is still waiting. A shutdown also ends a detached settlement; the broadcast log line survives it.
 - **Build:** base images are pinned by digest, and each patch is applied with `git apply --check`, so upstream drift fails the build. A no-cache build takes about 115 s on the workstation (Colima, 4 CPUs). The image is 170 MB.
 
-Verified on 2026-10-29 against a no-cache hemi.5 build (114 s):
+Verified on 2026-10-29 against a no-cache hemi.6 build (114 s):
 
-- **e2e suite:** 8 files, 86 tests passed, with dead primary RPCs and no expected-failure markers.
+- **e2e suite:** 8 files, 96 tests passed, with dead primary RPCs and no expected-failure markers.
 - **Rust checks:** `cargo fmt`, `clippy -D warnings` and the unit tests pass at each patch commit.
 - **Demo:** `buyer/demo-fork.sh` settles all four asset and network pairs, and the seller logs a `/verify` before each `/settle`.
 

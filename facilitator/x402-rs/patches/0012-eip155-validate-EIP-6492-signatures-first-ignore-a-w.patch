@@ -1,7 +1,7 @@
 From 4f1166b8b82173b0afa12696ed093d3425360b66 Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 01:04:22 -0400
-Subject: [PATCH 12/14] eip155: validate EIP-6492 signatures first; ignore a
+Subject: [PATCH 12/15] eip155: validate EIP-6492 signatures first; ignore a
  wrapper around the payer's own signature
 
 EIP-6492-wrapped signatures skipped the signature-first rule of 0003: the

@@ -1,7 +1,7 @@
 From 225b48495dd7f5f2339fc201e47d3254c1b5a295 Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 22:48:23 -0400
-Subject: [PATCH 01/14] =?UTF-8?q?types:=20add=20x402=20v2=20=C2=A79=20erro?=
+Subject: [PATCH 01/15] =?UTF-8?q?types:=20add=20x402=20v2=20=C2=A79=20erro?=
  =?UTF-8?q?r=20codes=20to=20ErrorReason?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

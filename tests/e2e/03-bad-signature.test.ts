@@ -6,6 +6,8 @@
  *   - wrong key: a stock-client payload signed by another key, with `from` rewritten to the victim.
  * The victim (`from`) holds tokens and, for Permit2, has approved Permit2, so the signature is the
  * only thing wrong.
+ * Those run for EIP-3009 (USDC.e) and Permit2 (hemiBTC) on the mainnet fork, and for Permit2 (USDC.e) on
+ * the testnet fork; the blocks after them run on the mainnet fork.
  *
  * Spec: specs/schemes/exact/scheme_exact_evm.md, EIP-3009 Phase 2 step 1 and Permit2 Phase 3 step 1
  * ("Verify ... signature is valid and recovers to ... from"); specs/x402-specification-v2.md §9
@@ -28,7 +30,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { erc20Abi, getAddress, parseEventLogs, serializeErc6492Signature, type Hex, type LocalAccount } from "viem";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
-import { btcAsset, MAINNET, usdcAsset, type HemiAsset, type HemiNetwork } from "@hemi-x402/shared";
+import { btcAsset, MAINNET, TESTNET, usdcAsset, type HemiAsset, type HemiNetwork } from "@hemi-x402/shared";
 import {
   ensurePermit2Approval,
   fundEth,
@@ -63,8 +65,13 @@ const METHODS: Method[] = [
   { method: "EIP-3009", network: MAINNET, asset: usdcAsset(MAINNET), amount: 1_000n },
   { method: "Permit2", network: MAINNET, asset: btcAsset(MAINNET), amount: 10n },
 ];
+/** The first block also runs on the testnet fork, which the facilitator serves with its own signer. */
+const METHODS_BOTH_NETWORKS: Method[] = [
+  ...METHODS,
+  { method: "Permit2", network: TESTNET, asset: usdcAsset(TESTNET), amount: 1_000n },
+];
 
-for (const m of METHODS) {
+for (const m of METHODS_BOTH_NETWORKS) {
   describe(`bad signature, ${m.method} (${m.asset.symbol} on ${m.network})`, () => {
     let victim: LocalAccount;
     let attacker: LocalAccount;

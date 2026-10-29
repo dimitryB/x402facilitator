@@ -1,7 +1,7 @@
 From be4a8647e299b432dff4488e1c1a8c50600c9e05 Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 00:19:31 -0400
-Subject: [PATCH 09/14] =?UTF-8?q?errors:=20report=20the=20remaining=20fail?=
+Subject: [PATCH 09/15] =?UTF-8?q?errors:=20report=20the=20remaining=20fail?=
  =?UTF-8?q?ures=20with=20x402=20v2=20=C2=A79=20codes,=20and=20answer=20unr?=
  =?UTF-8?q?eadable=20bodies=20in=20JSON?=
 MIME-Version: 1.0

@@ -1,7 +1,7 @@
 From 976b933c0af81401097fd0cd514cc41fc13ed9f2 Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 22:52:10 -0400
-Subject: [PATCH 04/14] eip155: check Permit2 allowance before balance, and
+Subject: [PATCH 04/15] eip155: check Permit2 allowance before balance, and
  re-check both on settle
 
 x402 (scheme_exact_evm.md, Permit2 verification steps 2 and 3) checks the
