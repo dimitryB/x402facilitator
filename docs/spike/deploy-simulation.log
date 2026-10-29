@@ -1,0 +1,33 @@
+# Read-only simulation: eth_call to the deterministic deployer with <salt><initcode>. Returns the 20-byte address on success. No transaction is sent.
+### mainnet
+$ cast call 0x4e59b44847b379578588920cA78FbF26c0B4956C $(cat contracts/deploy-data/permit2.calldata.hex) --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+$ cast estimate 0x4e59b44847b379578588920cA78FbF26c0B4956C <same calldata> --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+$ cast call 0x4e59b44847b379578588920cA78FbF26c0B4956C $(cat contracts/deploy-data/validator6492.calldata.hex) --rpc-url https://rpc.hemi.network/rpc
+0xdacd51a54883eb67d95faeb2bbfdc4a9a6bd2a3b
+$ cast estimate 0x4e59b44847b379578588920cA78FbF26c0B4956C <same calldata> --rpc-url https://rpc.hemi.network/rpc
+579233
+$ cast call 0x4e59b44847b379578588920cA78FbF26c0B4956C $(cat contracts/deploy-data/exact-proxy.calldata.hex) --rpc-url https://rpc.hemi.network/rpc
+0x402085c248eea27d92e8b30b2c58ed07f9e20001
+$ cast estimate 0x4e59b44847b379578588920cA78FbF26c0B4956C <same calldata> --rpc-url https://rpc.hemi.network/rpc
+722776
+$ cast gas-price --rpc-url https://rpc.hemi.network/rpc
+1000252
+
+### testnet
+$ cast call 0x4e59b44847b379578588920cA78FbF26c0B4956C $(cat contracts/deploy-data/permit2.calldata.hex) --rpc-url https://testnet.rpc.hemi.network/rpc
+0x000000000022d473030f116ddee9f6b43ac78ba3
+$ cast estimate 0x4e59b44847b379578588920cA78FbF26c0B4956C <same calldata> --rpc-url https://testnet.rpc.hemi.network/rpc
+2060220
+$ cast call 0x4e59b44847b379578588920cA78FbF26c0B4956C $(cat contracts/deploy-data/validator6492.calldata.hex) --rpc-url https://testnet.rpc.hemi.network/rpc
+0xdacd51a54883eb67d95faeb2bbfdc4a9a6bd2a3b
+$ cast estimate 0x4e59b44847b379578588920cA78FbF26c0B4956C <same calldata> --rpc-url https://testnet.rpc.hemi.network/rpc
+579233
+$ cast call 0x4e59b44847b379578588920cA78FbF26c0B4956C $(cat contracts/deploy-data/exact-proxy.calldata.hex) --rpc-url https://testnet.rpc.hemi.network/rpc
+0x402085c248eea27d92e8b30b2c58ed07f9e20001
+$ cast estimate 0x4e59b44847b379578588920cA78FbF26c0B4956C <same calldata> --rpc-url https://testnet.rpc.hemi.network/rpc
+722776
+$ cast gas-price --rpc-url https://testnet.rpc.hemi.network/rpc
+1000254
+

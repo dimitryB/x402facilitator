@@ -1,0 +1,20 @@
+### mainnet
+$ cast code 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12 --rpc-url https://rpc.hemi.network/rpc  # size shown
+bytes=8415
+
+$ cast call 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12 'getLastHeader()((uint32,bytes32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://rpc.hemi.network/rpc
+(973622 [9.736e5], 0x00000000000000000001f2dc3f0fed055da48b9c4f6882e5e6e9bcea811aa1de, 0x0000000000000000000000000000000000000000000000000000000020006000, 0x000000000000000000002d63710953e243aab5d31f10d05118fb693a6a4fc32a, 47272054330508127029871240988359071216824514677887036960365702853618981260942 [4.727e76], 1793236498 [1.793e9], 386007187 [3.86e8])
+
+$ cast code 0x0000000000000000000000000000000000000044 --rpc-url https://rpc.hemi.network/rpc
+0x
+
+### testnet
+$ cast code 0xeC9fa5daC1118963933e1A675a4EEA0009b7f215 --rpc-url https://testnet.rpc.hemi.network/rpc  # size shown
+bytes=10266
+
+$ cast call 0xeC9fa5daC1118963933e1A675a4EEA0009b7f215 'getLastHeader()((uint32,bytes32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+
+$ cast code 0x0000000000000000000000000000000000000044 --rpc-url https://testnet.rpc.hemi.network/rpc
+0x
+

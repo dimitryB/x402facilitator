@@ -1,23 +1,313 @@
 # Decisions
 
-Each entry records what was checked, the exact command run and its output. Entries marked "verify" in the brief's shared context get one entry each.
+Each entry records what was checked, the exact command run and its output. Entries marked "verify" in the brief's shared context get one entry each. Full, unedited transcripts of every spike command are in [docs/spike/](docs/spike/). Each can be regenerated read-only with `scripts/spike.sh mainnet|testnet`, which sends no transactions.
 
-## Spike status: not run (2026-10-28)
+All spike entries ran on 2026-10-29 (UTC) from the local workstation with Foundry `cast 1.8.6`. Mainnet height was 5614307 and testnet height was 7093964.
 
-The checks below could not be run. From both the cloud session and the local workspace VM, every Hemi RPC (`rpc.hemi.network`, `testnet.rpc.hemi.network`, `hemi.drpc.org`, `hemi-testnet.drpc.org`) returns `403 from proxy after CONNECT`. The explorer also refuses automated requests. The block is the session's egress allowlist; nothing on Hemi has been observed. The spike result will be entry D-001.
+## Verify items: results
 
-### Verify items still open
+| Item | Mainnet (eip155:43111) | Testnet (eip155:743111) | Entry |
+|------|------|------|------|
+| RPCs answer with the right chain id | yes, all four | yes | D-002 |
+| Deterministic deployer `0x4e59…956C` | present | present | D-003 |
+| Permit2 at canonical `0x0000…8BA3` | present, genuine | **absent** | D-004 |
+| x402 exact proxy at `0x4020…0001` | **absent** | **absent** | D-005 |
+| EIP-6492 validator at `0xdAcD…2a3B` (required by x402-rs at startup) | **absent** | **absent** | D-006 |
+| Multicall3 at `0xcA11…CA11` | present, genuine | present, genuine | D-006 |
+| USDC.e address | `0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA` | `0xD47971C7F5B1067d25cd45d30b2c9eb60de96443` | D-007 |
+| hemiBTC address | `0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28` | none; tunnel BTC is hBTC `0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7` | D-008 |
+| USDC.e implements EIP-3009 | **yes** | **no** | D-009 |
+| USDC.e implements EIP-2612 | **yes** | **no** | D-010 |
+| hemiBTC / hBTC implements EIP-3009 or EIP-2612 | no | no | D-011 |
+| hBK contract and precompiles (phase 2) | contract live; precompiles per docs | contract present, `getLastHeader` reverts | D-012 |
 
-| Item | Mainnet | Testnet |
-|------|---------|---------|
-| Deterministic deployer at `0x4e59b44847b379578588920cA78FbF26c0B4956C` | not run | not run |
-| Permit2 at canonical `0x000000000022D473030F116dDEE9F6B43aC78BA3` | not run | not run |
-| Exact proxy already at `0x402085c248EeA27D92E8b30b2C58ed07f9E20001` | not run | not run |
-| USDC.e address (explorer or tunnel UI only) | not run | not run |
-| hemiBTC address (explorer or tunnel UI only) | not run | not run |
-| USDC.e implements EIP-3009 `transferWithAuthorization` | not run | not run |
-| USDC.e implements EIP-2612 `permit` | not run | not run |
-| hBK precompile addresses and ABI (phase 2 only) | not run | not run |
+## D-001. Spike result: transfer method per asset and network
+
+| Asset | Network | Transfer method | Buyer needs ETH on Hemi? |
+|------|------|------|------|
+| USDC.e | mainnet | `exact` with EIP-3009 `transferWithAuthorization` | No |
+| hemiBTC | mainnet | `exact` with Permit2 through the x402 exact proxy | Yes, once, for `approve(Permit2)` |
+| USDC.e | testnet | `exact` with Permit2 | Yes, once |
+| hBTC (testnet stand-in for hemiBTC) | testnet | `exact` with Permit2 | Yes, once |
+
+Facts behind the table:
+
+- Mainnet USDC.e is Circle's FiatToken v2.2 behind a FiatTokenProxy (D-009, D-010). Its EIP-712 domain is name `Bridged USDC (Stargate)` and version `2`, and both must go in `extra` of the payment requirements.
+- Testnet USDC.e is a different contract, a plain tunnel-bridged ERC-20 with no EIP-3009 and no EIP-2612. The testnet therefore cannot exercise the mainnet USDC.e path. The EIP-3009 path is tested against a local anvil fork of Hemi mainnet instead (see D-013).
+- Mainnet USDC.e supports EIP-2612, but it settles through EIP-3009, so the facilitator's EIP-2612 gas-sponsoring extension is never needed for the MVP's assets. hemiBTC and both testnet tokens lack EIP-2612. x402-rs at `e75adda` implements only the EIP-2612 sponsoring extension, not the TS SDK's ERC-20 approval sponsoring, so those buyers send one on-chain `approve(Permit2)`.
+
+What must be deployed before stock x402-rs will start a chain. `assert_contracts_exists` in `chain/provider.rs:446` refuses to start a chain unless the validator, Permit2 and the exact proxy all have code.
+
+| Contract | Mainnet | Testnet | How |
+|------|------|------|------|
+| Permit2 | already there | deploy | replay Uniswap's original CREATE2 call to `0x4e59…` (D-004) |
+| EIP-6492 validator | deploy | deploy | replay x402-rs's original CREATE2 call (D-006) |
+| x402 exact proxy | deploy | deploy | reference repo's committed initCode via `0x4e59…` (D-005) |
+
+Every deployment lands at the canonical address, so stock x402-rs, stock TS buyers and the stock proxy all work with no fork. Mainnet deployments wait for an explicit go. The estimated cost is in D-005.
+
+## D-002. RPC reachability and the local network
+
+```
+$ curl -sS -X POST -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' <url>
+https://rpc.hemi.network/rpc          {"jsonrpc":"2.0","id":1,"result":"0xa867"}     # 43111
+https://testnet.rpc.hemi.network/rpc  {"jsonrpc":"2.0","id":1,"result":"0xb56c7"}    # 743111
+https://hemi.drpc.org                 {"id":1,"jsonrpc":"2.0","result":"0xa867"}
+https://hemi-testnet.drpc.org         {"id":1,"jsonrpc":"2.0","result":"0xb56c7"}
+```
+
+The earlier `403 from proxy` block was specific to the cloud session; from this workstation all four RPCs answer. The workstation's ISP blocks `explorer.hemi.xyz` and `ethereum-rpc.publicnode.com`, while `testnet.explorer.hemi.xyz` on the same Cloudflare IPs works:
+
+```
+$ curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' http://explorer.hemi.xyz/
+302 https://<the ISP's warning page>?url=http://explorer.hemi.xyz/&token=<redacted>
+$ curl -sv https://explorer.hemi.xyz/
+* LibreSSL/3.3.6: error:1404B42E:SSL routines:ST_CONNECT:tlsv1 alert protocol version
+```
+
+Mainnet token addresses therefore come from Hemi's token list (D-007), not the mainnet explorer. Ethereum reads use `https://eth.drpc.org`.
+
+## D-003. Deterministic deployer
+
+```
+$ cast code 0x4e59b44847b379578588920cA78FbF26c0B4956C --rpc-url https://rpc.hemi.network/rpc
+0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3
+$ cast code 0x4e59b44847b379578588920cA78FbF26c0B4956C --rpc-url https://testnet.rpc.hemi.network/rpc
+0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3
+```
+
+Present on both networks with the standard Arachnid runtime code.
+
+## D-004. Permit2
+
+Mainnet: present and genuine.
+
+```
+$ cast code 0x000000000022D473030F116dDEE9F6B43aC78BA3 --rpc-url https://rpc.hemi.network/rpc   # size and keccak shown
+bytes=9152 keccak=0x30002d17c268825d175caba993df71c34b30048f344b2ba63705a3063fa4743a
+$ cast call 0x000000000022D473030F116dDEE9F6B43aC78BA3 "DOMAIN_SEPARATOR()(bytes32)" --rpc-url https://rpc.hemi.network/rpc
+0x1bfbbf0056b6ec1bbca73ea788b4a65c034128fd6543621be486785424550c8f
+# expected: keccak(abi.encode(keccak("EIP712Domain(string name,uint256 chainId,address verifyingContract)"), keccak("Permit2"), 43111, 0x0000…8BA3))
+0x1bfbbf0056b6ec1bbca73ea788b4a65c034128fd6543621be486785424550c8f
+```
+
+Byte identity against Ethereum mainnet Permit2, with its two immutables (`_CACHED_CHAIN_ID`, `_CACHED_DOMAIN_SEPARATOR`) swapped for Hemi's values:
+
+```
+eth   bytes=9152 keccak=0xc67d1657868aa5146eaf24fb879fb1fdec3d2d493b3683a61c9c2f4fb2851131 DOMAIN_SEPARATOR=0x866a5aba21966af95d6c7ab78eb2b2fc913915c28be3b9aa07cc04ff903e3f28
+eth code with Hemi immutables keccak=0x30002d17c268825d175caba993df71c34b30048f344b2ba63705a3063fa4743a
+hemi  code                        keccak=0x30002d17c268825d175caba993df71c34b30048f344b2ba63705a3063fa4743a
+RESULT: identical to Ethereum Permit2 modulo chain-specific immutables
+```
+
+Testnet: absent.
+
+```
+$ cast code 0x000000000022D473030F116dDEE9F6B43aC78BA3 --rpc-url https://testnet.rpc.hemi.network/rpc
+0x
+```
+
+The deployer exists on testnet (D-003), so Permit2 goes to the canonical address by replaying Uniswap's original deployment calldata. That calldata is `<salt><initcode>` sent to `0x4e59…`, taken from Ethereum tx `0xf2f1fe96c16ee674bb7fcee166be52465a418927d124f5f1d231b36eae65d377`, whose creator Blockscout reports as `0x4e59…`. It is committed as `contracts/deploy-data/permit2.calldata.hex`.
+
+```
+$ cast tx 0xf2f1fe96…d377 --rpc-url https://eth.drpc.org --json | jq .data.input   # split into salt + initcode
+permit2 salt=0x0000000000000000000000000000000000000000d3af2663da51c10215000000 initcodeHash=0xe2be1e05eedf35dacd66c65c862f8150ff9ab4b6b24b9bbe62be71b6b16cf0f8
+$ cast create2 --deployer 0x4e59b44847b379578588920cA78FbF26c0B4956C --salt 0x…d3af2663da51c10215000000 --init-code-hash 0xe2be1e05…f0f8
+0x000000000022D473030F116dDEE9F6B43aC78BA3
+$ cast call 0x4e59b44847b379578588920cA78FbF26c0B4956C $(cat contracts/deploy-data/permit2.calldata.hex) --rpc-url https://testnet.rpc.hemi.network/rpc   # simulation, no tx
+0x000000000022d473030f116ddee9f6b43ac78ba3
+$ cast estimate … --rpc-url https://testnet.rpc.hemi.network/rpc
+2060220
+```
+
+## D-005. x402 exact Permit2 proxy
+
+```
+$ cast code 0x402085c248EeA27D92E8b30b2C58ed07f9E20001 --rpc-url https://rpc.hemi.network/rpc
+0x
+$ cast code 0x402085c248EeA27D92E8b30b2C58ed07f9E20001 --rpc-url https://testnet.rpc.hemi.network/rpc
+0x
+```
+
+Absent on both. It is deployed from the reference repo's committed initCode (`x402-foundation/x402@e4a0868:contracts/evm/script/data/exact-proxy-initcode.hex`) with the reference salt. The initCode embeds canonical Permit2 as its constructor argument.
+
+```
+proxy initcodeHash=0xe774d1d5a07218946ab54efe010b300481478b86861bb17d69c98a57f68a604c   # equals EXACT_INIT_CODE_HASH in Deploy.s.sol
+$ cast create2 --deployer 0x4e59…956C --salt 0x0000000000000000000000000000000000000000000000003000000007263b0e --init-code-hash 0xe774d1d5…604c
+0x402085c248EeA27D92E8b30b2C58ed07f9E20001
+$ cast call 0x4e59b44847b379578588920cA78FbF26c0B4956C $(cat contracts/deploy-data/exact-proxy.calldata.hex) --rpc-url https://rpc.hemi.network/rpc   # simulation, no tx
+0x402085c248eea27d92e8b30b2c58ed07f9e20001
+$ cast call … --rpc-url https://testnet.rpc.hemi.network/rpc
+0x402085c248eea27d92e8b30b2c58ed07f9e20001
+$ cast estimate …  (both networks)
+722776
+```
+
+The proxy is compiled for `evm_version = "cancun"`. The successful simulation on both networks shows Hemi executes its creation code.
+
+Mainnet cost estimate for the two missing contracts, from [docs/spike/mainnet-deploy-cost.log](docs/spike/mainnet-deploy-cost.log). Hemi runs the OP Stack GasPriceOracle with Ecotone and Fjord active.
+
+| Item | Validator | Exact proxy |
+|------|------|------|
+| L2 gas (estimate) | 579233 | 722776 |
+| L1 data fee (`getL1Fee`) | 2.51e12 wei | 2.93e12 wei |
+| L2 gas price at the time | ~1.0e6 wei | ~1.0e6 wei |
+| Total | ~3.1e12 wei | ~3.6e12 wei |
+
+That is about 0.0000067 ETH for both.
+
+## D-006. EIP-6492 validator and Multicall3
+
+x402-rs requires a validator at `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` on every EIP-155 chain at startup (`REQUIRED_CONTRACT_ADDRESSES` in `chain/provider.rs:38`). It calls the validator only for EIP-6492 counterfactual-wallet signatures. Multicall3 is used to deploy counterfactual wallets during settle.
+
+```
+$ cast code 0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B --rpc-url https://rpc.hemi.network/rpc
+0x (empty)
+$ cast code 0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B --rpc-url https://testnet.rpc.hemi.network/rpc
+0x (empty)
+$ cast code 0xcA11bde05977b3631167028862bE2a173976CA11 --rpc-url <each Hemi RPC>   # size and keccak shown
+bytes=3808 keccak=0xd5c15df687b16f2ff992fc8d767b4216323184a2bbc6ee2f9c398c318e770891   # both networks
+ethereum reference: 0xcA11…CA11 bytes=3808 keccak=0xd5c15df687b16f2ff992fc8d767b4216323184a2bbc6ee2f9c398c318e770891
+ethereum reference: 0xdAcD…2a3B bytes=2376 keccak=0x9b83857bbb34de3ba755156ba9bee06532be5ff539bf5de301a28606c76d6cab
+```
+
+On Ethereum, Blockscout reports the validator's creator as `0x4e59…`, from tx `0x9970736352969c9b39f1b9ebe2668f0e89900c4d68f38891696314cf89f227c9`. Its salt is ASCII `x402`. Replaying that calldata, committed as `contracts/deploy-data/validator6492.calldata.hex`, lands on the same address:
+
+```
+validator salt=0x7834303200000000000000000000000000000000000000000000000000000000 initcodeHash=0x8a457240279c04f74154e0e10ecbeb78d2f2a8b68f5fb09658da494d89bb475e
+$ cast create2 --deployer 0x4e59…956C --salt 0x78343032… --init-code-hash 0x8a457240…475e
+0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B
+$ cast call 0x4e59b44847b379578588920cA78FbF26c0B4956C $(cat contracts/deploy-data/validator6492.calldata.hex) --rpc-url <each Hemi RPC>   # simulation, no tx
+0xdacd51a54883eb67d95faeb2bbfdc4a9a6bd2a3b   # both networks
+$ cast estimate …
+579233
+```
+
+The x402 upto proxy `0x4020A4f3…0002` is also absent on both networks; the upto scheme is out of scope.
+
+## D-007. USDC.e addresses
+
+Source: Hemi's token list, which feeds the tunnel UI. It is `hemilabs/token-list@7a326ac4bf501e9205e0580625c9932fa8955f63` (2026-10-23, package `@hemilabs/token-list` 4.2.0), file `src/hemi.tokenlist.json`. The mainnet explorer is blocked locally (D-002); the testnet explorer agrees with the list.
+
+```
+$ curl -sS https://raw.githubusercontent.com/hemilabs/token-list/7a326ac4…/src/hemi.tokenlist.json | jq -c '.tokens[] | select(.symbol=="USDC.e")'
+{"chainId":43111,"symbol":"USDC.e","name":"Bridged USDC (Stargate)","address":"0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA","decimals":6,…}
+{"chainId":743111,"symbol":"USDC.e","name":"USDC.e","address":"0xD47971C7F5B1067d25cd45d30b2c9eb60de96443","decimals":6,"extensions":{"bridgeInfo":{"11155111":{"tokenAddress":"0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8"}}}}
+$ curl -sS 'https://testnet.explorer.hemi.xyz/api/v2/tokens?q=USDC' | jq -c '.items[0]'
+{"address":"0xD47971C7F5B1067d25cd45d30b2c9eb60de96443","name":"USDC.e","symbol":"USDC.e","decimals":"6","holders":"206835","type":"ERC-20"}
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA "name()(string)" / "symbol()(string)" / "decimals()(uint8)" --rpc-url https://rpc.hemi.network/rpc
+"Bridged USDC (Stargate)"  "USDC.e"  6
+$ cast call 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 … --rpc-url https://testnet.rpc.hemi.network/rpc
+"USDC.e"  "USDC.e"  6
+```
+
+The testnet USDC.e is tunneled from Sepolia, not bridged by Stargate.
+
+## D-008. hemiBTC addresses
+
+```
+$ jq -c '.tokens[] | select(.symbol=="hemiBTC")' hemi.tokenlist.json     # same pinned token list
+{"chainId":43111,"symbol":"hemiBTC","name":"Hemi Bitcoin","address":"0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28","decimals":8,…}
+$ jq -c '.tokens[] | select(.chainId==743111) | {symbol,name,address,decimals}' hemi.tokenlist.json
+{"symbol":"WETH",…} {"symbol":"hBTC","name":"HemiBitcoin","address":"0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7","decimals":8} {"symbol":"USDT.e",…} {"symbol":"rUSDC-hemi",…} {"symbol":"USDC.e",…} {"symbol":"hDAI",…}
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 name/symbol/decimals --rpc-url https://rpc.hemi.network/rpc
+"Hemi Bitcoin"  "hemiBTC"  8
+$ cast call 0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7 name/symbol/decimals --rpc-url https://testnet.rpc.hemi.network/rpc
+"HemiBitcoin"  "hBTC"  8
+```
+
+hemiBTC has no testnet deployment in the token list. A testnet explorer search for "hemiBTC" returns eight look-alike contracts with 2 to 5 holders each; none is canonical. The testnet stand-in is the tunnel's BTC representation, hBTC `0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7`, as the brief allows. Both are 8-decimal, Permit2-only tokens (D-011).
+
+## D-009. USDC.e and EIP-3009
+
+The probe calls each function with `validAfter = validBefore = 0`. If the function exists, it fails a time check with a revert reason. A missing function reverts with empty data, exactly like the control call `definitelyNotAFunction_x402()`.
+
+Mainnet: implemented, in both the `(v,r,s)` and the `bytes signature` variants (FiatToken v2.2).
+
+```
+$ cast storage 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA 0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3 --rpc-url https://rpc.hemi.network/rpc   # FiatTokenProxy implementation slot
+0x0000000000000000000000004f5f42799d1e01662b629ede265baea223e9f9c7
+$ cast call 0xad11…5afA "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)" 0x…dEaD 0x…dEaD 1 0 0 0x00…00 27 0x00…00 0x00…00 --rpc-url https://rpc.hemi.network/rpc
+Error: execution reverted: FiatTokenV2: authorization is expired
+$ cast call 0xad11…5afA "transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)" 0x…dEaD 0x…dEaD 1 0 0 0x00…00 0x --rpc-url https://rpc.hemi.network/rpc
+Error: execution reverted: FiatTokenV2: authorization is expired
+$ cast call 0xad11…5afA "authorizationState(address,bytes32)(bool)" 0x…dEaD 0x00…00 --rpc-url https://rpc.hemi.network/rpc
+false
+$ cast call 0xad11…5afA "definitelyNotAFunction_x402()" --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+# selector scan of implementation 0x4f5f42799d1e01662b629ede265baea223e9f9c7 (bytes=23464)
+PRESENT e3ee160e transferWithAuthorization(v,r,s)   PRESENT cf092995 transferWithAuthorization(bytes)
+PRESENT ef55bec6 receiveWithAuthorization(v,r,s)    PRESENT e94a0102 authorizationState(address,bytes32)
+```
+
+Testnet: not implemented. Every probe reverts with empty data, like the control, and the selectors are absent from the runtime code. The contract is not a proxy; both the EIP-1967 and the FiatToken implementation slots are zero.
+
+```
+$ cast call 0xD479…6443 "transferWithAuthorization(…v,r,s)" … --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+$ cast call 0xD479…6443 "definitelyNotAFunction_x402()" --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+# selector scan of 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 (bytes=5544)
+PRESENT a9059cbb transfer [control]   PRESENT 095ea7b3 approve [control]
+absent  e3ee160e  absent cf092995  absent ef55bec6  absent e94a0102
+```
+
+## D-010. USDC.e and EIP-2612
+
+The test is stricter, per P-3. It requires `DOMAIN_SEPARATOR()` to match the domain recomputed from `name()` and `version()`, `nonces(address)` to answer, and `permit` to fail a deadline check with a revert reason.
+
+Mainnet: implemented.
+
+```
+$ cast call 0xad11…5afA "version()(string)" --rpc-url https://rpc.hemi.network/rpc
+"2"
+$ cast call 0xad11…5afA "DOMAIN_SEPARATOR()(bytes32)" --rpc-url https://rpc.hemi.network/rpc
+0x6fe49ef2438be116233a7505f2b997466e49631ac8e197a2f1f208108d598a11
+# expected for name="Bridged USDC (Stargate)" version="2" chainId=43111 verifyingContract=0xad11…5afA
+0x6fe49ef2438be116233a7505f2b997466e49631ac8e197a2f1f208108d598a11
+$ cast call 0xad11…5afA "nonces(address)(uint256)" 0x…dEaD --rpc-url https://rpc.hemi.network/rpc
+0
+$ cast call 0xad11…5afA "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)" 0x…dEaD 0x…dEaD 1 0 27 0x00…00 0x00…00 --rpc-url https://rpc.hemi.network/rpc
+Error: execution reverted: FiatTokenV2: permit is expired
+# selector scan: PRESENT d505accf permit   PRESENT 7ecebe00 nonces   PRESENT 3644e515 DOMAIN_SEPARATOR
+```
+
+The matching domain separator also confirms the EIP-712 name and version that EIP-3009 signatures must use. `eip712Domain()` (EIP-5267) is not implemented, so the SDK cannot discover these values and the seller must send them in `extra`.
+
+Testnet: not implemented. `DOMAIN_SEPARATOR()`, `nonces(address)`, `permit(…)`, `version()` and `eip712Domain()` all revert with empty data, and the selectors `d505accf`, `7ecebe00` and `3644e515` are absent from the runtime code.
+
+## D-011. hemiBTC (mainnet) and hBTC (testnet): neither standard
+
+The brief assumed this; it is now confirmed. Both tokens are small non-proxy ERC-20s, 2098 and 2097 bytes, with zero EIP-1967 slots. For both, every EIP-3009 and EIP-2612 probe reverts with empty data, like the control. The selector scan finds `transfer` and `approve` but none of `e3ee160e cf092995 ef55bec6 e94a0102 d505accf 7ecebe00 3644e515`. Full output is in `docs/spike/mainnet.log` and `docs/spike/testnet.log`. Both go through Permit2.
+
+## D-012. hBK contract and precompiles (phase 2 only)
+
+Source: `hemilabs/docs@61aced77175307475fea525d864496b95a21e913`, pages `building-bitcoin-apps/hemi-bitcoin-kit-hbk/hbk-smart-contract.md` and `building-bitcoin-apps/hemi-virtual-machine-hvm/feature-summary.md`.
+
+- hBK contract: mainnet `0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12`, testnet `0xeC9fa5daC1118963933e1A675a4EEA0009b7f215`.
+- Precompiles ("Phase 0"): `0x40` BtcBalAddr, `0x41` BtcUtxosAddrList, `0x42` BtcTxByTxid, `0x43` BtxTxConfirmations, `0x44` BtcLastHeader, `0x45` BtcHeaderN, `0x46` BtcAddrToScript.
+- ABI: the `IBitcoinKit` interface on the hBK page (`getBitcoinAddressBalance`, `getUTXOsForBitcoinAddress`, `getTransactionByTxId`, `getTransactionInputsByTxId`, `getTransactionOutputsByTxId`, `getTxConfirmations`, `getLastHeader`, `getHeaderN`).
+
+```
+$ cast code 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12 --rpc-url https://rpc.hemi.network/rpc   # size shown
+bytes=8415
+$ cast call 0x7007…8F12 'getLastHeader()((uint32,bytes32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://rpc.hemi.network/rpc
+(973622 [9.736e5], 0x00000000000000000001f2dc3f0fed055da48b9c4f6882e5e6e9bcea811aa1de, …)
+$ cast code 0xeC9fa5daC1118963933e1A675a4EEA0009b7f215 --rpc-url https://testnet.rpc.hemi.network/rpc   # size shown
+bytes=10266
+$ cast call 0xeC9f…f215 'getLastHeader()(…)' --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+$ cast code 0x0000000000000000000000000000000000000044 --rpc-url <either>
+0x
+```
+
+On mainnet, hBK returns a current Bitcoin height (973622) and a block hash. The tuple shape used here is a guess from the docs, so only the first two fields are meaningful. On testnet the same call reverts. Precompiles show empty `cast code`, as precompiles always do. This is not investigated further, since phase 2 is out of scope; it is an open question below.
+
+### Open questions
+
+- Q-1. Cross-check the mainnet token addresses on `explorer.hemi.xyz` from a network that isn't blocked (D-002). They currently rest on Hemi's token list and on-chain `name`/`symbol` reads.
+- Q-2. Why the testnet hBK `getLastHeader()` reverts (D-012). Phase 2.
+
 
 ## Pre-spike context: what the reference code requires
 

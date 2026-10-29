@@ -1,0 +1,11 @@
+$ cast code 0x420000000000000000000000000000000000000F --rpc-url https://rpc.hemi.network/rpc | wc -c
+    4121
+$ cast call 0x420000000000000000000000000000000000000F 'getL1Fee(bytes)(uint256)' <validator6492 calldata> --rpc-url https://rpc.hemi.network/rpc
+2508606466519 [2.508e12]
+$ cast call 0x420000000000000000000000000000000000000F 'getL1Fee(bytes)(uint256)' <exact-proxy calldata> --rpc-url https://rpc.hemi.network/rpc
+2926473809594 [2.926e12]
+$ cast call 0x420000000000000000000000000000000000000F 'isEcotone()(bool)' / 'isFjord()(bool)'
+true
+true
+$ cast base-fee --rpc-url https://rpc.hemi.network/rpc
+252
