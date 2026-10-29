@@ -8,7 +8,7 @@
 import express from "express";
 import { getAddress, isAddress } from "viem";
 import { HTTPFacilitatorClient, type RouteConfig } from "@x402/core/server";
-import type { AssetAmount } from "@x402/core/types";
+import { SettleError, type AssetAmount } from "@x402/core/types";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { btcAsset, parseNetwork, usdcAsset, type HemiAsset, type HemiNetwork } from "@hemi-x402/shared";
@@ -64,6 +64,11 @@ const resourceServer = new x402ResourceServer(new HTTPFacilitatorClient({ url: f
       console.warn(`[seller] verify rejected (${requirements.network} ${requirements.asset}): ${result.invalidReason} ${result.invalidMessage ?? ""}`);
     }
   })
+  // This facilitator answers a rejected /verify with HTTP 400, which the SDK raises as a
+  // VerifyError; it reaches onVerifyFailure, not onAfterVerify (README "For sellers").
+  .onVerifyFailure(async ({ error, requirements }) => {
+    console.warn(`[seller] verify rejected (${requirements.network} ${requirements.asset}): ${error.message}`);
+  })
   .onAfterSettle(async ({ result, requirements }) => {
     console.log(
       `[seller] settled ${requirements.amount} of ${requirements.asset} on ${result.network} ` +
@@ -71,7 +76,11 @@ const resourceServer = new x402ResourceServer(new HTTPFacilitatorClient({ url: f
     );
   })
   .onSettleFailure(async ({ error, requirements }) => {
-    console.error(`[seller] settle failed (${requirements.network} ${requirements.asset}): ${error.message}`);
+    // A settlement_pending answer carries the broadcast tx hash; log it so the payment can be
+    // reconciled if it mines after the request was refused (README "Limits and open items").
+    const tx = error instanceof SettleError && error.transaction ? ` tx ${error.transaction}` : "";
+    const reason = error instanceof SettleError && error.errorReason ? ` [${error.errorReason}]` : "";
+    console.error(`[seller] settle failed (${requirements.network} ${requirements.asset})${reason}: ${error.message}${tx}`);
   });
 for (const network of networks) resourceServer.register(network, new ExactEvmScheme());
 

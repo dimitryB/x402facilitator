@@ -2,7 +2,7 @@
 
 An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hemi mainnet (`eip155:43111`) and Hemi testnet (`eip155:743111`) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint.
 
-It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and thirteen small patches that make its checks and error responses match the x402 v2 spec. The patches don't change what is settled or to whom (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
+It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and thirteen small patches that make its error responses match the x402 v2 spec. The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
 **Status:** built and tested end to end on local forks of both Hemi chains. The live testnet run is scripted but waits for testnet funds. Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
 
@@ -88,6 +88,7 @@ x402-rs refuses to start if any configured chain lacks Permit2, the x402 exact p
 scripts/fork.sh up
 docker compose -f docker-compose.yml -f docker-compose.fork.yml up -d
 curl -s localhost:8080/supported | jq      # lists eip155:743111 and eip155:43111, scheme exact
+docker compose -f docker-compose.yml -f docker-compose.fork.yml down && scripts/fork.sh down   # teardown
 
 # Live networks: needs the contracts on each configured chain.
 FACILITATOR_CONFIG=config.testnet.json docker compose up   # testnet only: after the testnet deployment
@@ -97,7 +98,7 @@ docker compose up                                          # both chains (config
 
 If a contract or key is missing, the container exits with the reason. A missing contract shows as `Contract at address … does not exist`. An empty `FACILITATOR_*_PRIVATE_KEY` shows as `Invalid evm private key: invalid string length`. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently.
 
-The image, `hemi-x402-facilitator:e75adda-hemi.4`, is x402-rs at commit `e75adda` plus thirteen small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it, which takes about 2 minutes; add `--build` after changing a patch.
+The image, `hemi-x402-facilitator:e75adda-hemi.4`, is x402-rs at commit `e75adda` plus thirteen small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it. The build fetches x402-rs from GitHub, the crates from crates.io and the pinned `rust:1.93-trixie` image (about 2.2 GB), then compiles for about 2 minutes on a 4-CPU machine. Add `--build` after changing a patch. Forks also need the Hemi public RPCs to be reachable.
 
 Stock x402-rs does not return the x402 v2 spec's error shapes. The patches fix that:
 
@@ -137,7 +138,7 @@ Read the two settlement paths and the config; neither path routes tokens through
   `to` is the witness the payer signed, and Permit2 pays exactly that address. The proxy has two entry points, `settle` and `settleWithPermit`. Both go through this `_settle`; `settleWithPermit` first submits the payer's own EIP-2612 permit to Permit2. The proxy has no owner and no withdraw function ([`x402ExactPermit2Proxy.sol`](contracts/src/x402/x402ExactPermit2Proxy.sol)).
 - **Config.** The facilitator's only key is a gas signer per chain ([`facilitator/config.json`](facilitator/config.json)). Nothing in it, or in the x402-rs settle code, sets a recipient.
 
-The tests check this on every settle. The receipt's only `Transfer` log goes payer to payTo, and the signer and the proxy hold zero tokens before and after.
+The settle tests in `tests/e2e/02-settle.test.ts` check this for each of the four assets. The receipt's only `Transfer` log goes payer to payTo, and the signer and the proxy hold zero tokens before and after.
 
 ## For sellers: point your server at this facilitator
 
@@ -170,6 +171,8 @@ npm run pay -w buyer -- --asset usdc --network testnet
 npm run pay -w buyer -- --asset btc  --network testnet
 ```
 
+These pay a live seller through a live facilitator, so they work only after the testnet deployment, with both running. `scripts/testnet-run.sh --go` does all of that. For a local run, use `buyer/demo-fork.sh`.
+
 The buyer prints the settlement tx hash and its explorer link. [`buyer/README.md`](buyer/README.md) lists every option.
 
 ## Testnet run
@@ -190,7 +193,7 @@ Where the funds come from, all through the Hemi Portal tunnel in testnet mode (h
 | Asset | Path | Wait |
 |------|------|------|
 | Testnet ETH | Sepolia ETH, from any Sepolia faucet, tunneled Sepolia → Hemi testnet | minutes |
-| Testnet USDC.e `0xD479…6443` | Sepolia token `0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` (the token list's `bridgeInfo`), tunneled Sepolia → Hemi testnet | minutes |
+| Testnet USDC.e `0xD479…6443` | A transfer from an existing Hemi-testnet holder; the explorer shows about 206k. Or tunnel Sepolia token `0x94a9D9AC8a22534E3FaCa9F4e7F2E2cf85d5E4C8` (the token list's `bridgeInfo`) from Sepolia. Its `mint` is owner-only, so the Sepolia side also has to come from a holder | minutes |
 | Testnet hBTC `0x36Ab…fAe7` | Bitcoin testnet coins (Hemi's docs point to a tBTC faucet) deposited through the Bitcoin tunnel | about 1 hour for 6 Bitcoin confirmations, sometimes plus a manual vault confirmation |
 
 hBTC has no Sepolia route. A Hemi-testnet transfer from an existing holder is the fast alternative.
@@ -288,6 +291,9 @@ Latest results (2026-10-29), against a no-cache build of the image:
 - **Mainnet USDC.e and EIP-3009:** the testnet has no EIP-3009 token, so that path is proven only on a local fork of mainnet until a mainnet payment runs.
 - **Explorer verification:** expected to be a partial match at best for the proxy, because its original build embedded metadata (`contracts/README.md`).
 - **Mainnet explorer:** blocked from the machine that ran the spike. Mainnet token addresses rest on Hemi's token list and on-chain reads (D-002, Q-1).
+- **Combined failures:** when one payload fails several checks, the code reported can differ from `scheme_exact_evm.md`'s listed order. Single-failure cases, which the Definition of done covers, follow the spec. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) ("Check order") records the chosen order and the test that pins it.
+- **Nonce gap after a timeout:** after `settlement_pending`, the facilitator keeps that tx's nonce, so a tx that may still mine is never replaced. If the tx is later dropped from every mempool, later settles on that chain queue behind the gap. To recover, restart the facilitator, which re-reads the nonce from the chain.
+- **Charged but not served:** if a settle goes `settlement_pending` and the stock seller's single automatic retry is also still pending, the seller refuses the request. The payment can still mine later, so the buyer is charged without being served. To reconcile, look up the `transaction` hash from the `settlement_pending` answer; the seller logs it. The same payment header is then refused as a replay.
 - **Facilitator memory:** pending-settlement records live in memory. A facilitator restart forgets them, after which a pending authorization is judged by the chain alone.
 - **Verify-then-settle race:** two requests carrying the same payment header that both pass `/verify` before either settles can both reach the seller's handler; only one settle succeeds. This is inherent to the x402 verify, handler, settle flow, not specific to this facilitator.
 - **EIP-6492 deployment path:** a counterfactual wallet that is deployed during settle is untested end to end. The forks have no wallet factory, so only rejection and the plain-wallet shortcut are tested.
