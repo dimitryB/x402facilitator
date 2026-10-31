@@ -446,7 +446,7 @@ All four payments were checked end to end on local forks with `buyer/demo-fork.s
 
 ## D-015. RPC behaviour: fan-out confirmed, dRPC testnet reports a stale block number
 
-P-2 is confirmed against alloy-transport 2.0.5, the version in x402-rs's `Cargo.lock`. `FallbackLayer` sends every read to all configured RPCs in parallel and takes the first success; only the `*Sync` send methods are exempt. In an experiment with two logging anvil forks as primary and fallback and no rate limits, 5 verifies produced 5 `eth_call`s on each. With this repo's limits (20/s and 4/s), the throttled public RPC sees fewer calls, because a queued copy is dropped once the other RPC answers. When the primary is dead, all traffic runs through the public RPC at up to 4 requests per second.
+P-2 is confirmed against alloy-transport 2.0.5, the version in x402-rs's `Cargo.lock`. `FallbackLayer` sends every read to all configured RPCs in parallel and takes the first success; only the `*Sync` send methods are exempt. That made `eth_sendRawTransaction` a fan-out too, which patch 0021 ends (D-019). In an experiment with two logging anvil forks as primary and fallback and no rate limits, 5 verifies produced 5 `eth_call`s on each. With this repo's limits (20/s and 4/s), the throttled public RPC sees fewer calls, because a queued copy is dropped once the other RPC answers. When the primary is dead, all traffic runs through the public RPC at up to 4 requests per second.
 
 dRPC's free-tier testnet endpoint answers `eth_blockNumber` from a stale backend, while its `eth_getBlockByNumber("latest")` and `eth_call` are current:
 
@@ -483,7 +483,7 @@ Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return 
 
 The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
 
-No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.8` (hemi.7 until patch 0019, D-018). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.9` (hemi.7 until patch 0019, D-018; hemi.8 until patches 0020 and 0021, D-019). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
 
 | Patch | Change |
 |------|------|
@@ -506,6 +506,8 @@ No config setting changes any of this, so the facilitator is now built from `fac
 | 0017 | A missing top-level `x402Version`, or a `paymentPayload.x402Version` that contradicts it, returns `invalid_x402_version` |
 | 0018 | HTTP status codes follow the TS reference facilitator: 200 for every verdict on a readable request, 400 only for an unreadable one, 500 for unexpected failures |
 | 0019 | On EIP-1559 chains a settlement tips at least the node's `eth_maxPriorityFeePerGas`, so it is mined after tip-less blocks (hemi.8, D-018) |
+| 0020 | A settle owns its record: no other settle can overwrite or delete it. A running settle's record neither expires nor is evicted, and the 10,000 cap applies to kept records only (hemi.9, D-019) |
+| 0021 | `eth_sendRawTransaction` goes to one RPC at a time, moving on only if that RPC cannot be reached (hemi.9, D-019) |
 
 hemi.1 had patches 0001 to 0005. A fresh-context critic then found three more gaps:
 
@@ -544,13 +546,15 @@ Other choices and known limits of the patch set:
 - **After a disconnect:** until the original settlement's receipt wait ends (at most 60 s), retries get `invalid_transaction_state` ("in progress") without the hash. After that, the first identical retry claims the hash (0016). Two narrow gaps remain. A client that disconnects in the instant between the settlement's "is the caller still waiting" check and the response being written loses that success. A shutdown ends a detached settlement. The broadcast log line survives both.
 - **Known gaps found by the seventh critic and left as limits:**
   - **Ambiguous send:** if the node accepts a send but its response is lost, the hash goes unlogged and the nonce is reset.
-  - **Eviction:** the 10,000-record cap evicts the oldest records first, including real pending ones.
+  - **Eviction:** the 10,000-record cap evicts the oldest records first, including real pending ones. Since hemi.9 this applies to kept records only, and only another kept record pushes one out (D-019).
   - **Stock-seller claims:** a kept success can be claimed only by a direct `/settle` caller, never by a stock seller, which always verifies first.
 
   None of these allows a double charge, because the payer's on-chain nonce still guards the payment. Each is listed in README "Limits and open items".
 - **Build:** base images are pinned by digest, and each patch is applied with `git apply --check`, so upstream drift fails the build. A no-cache build takes about 115 s on the workstation (Colima, 4 CPUs). The image is 170 MB.
 
 hemi.8 adds patch 0019 (D-018). On 2026-10-29 its no-cache build took 119 s, and the e2e suite passed: 10 files, 103 tests.
+
+hemi.9 adds patches 0020 and 0021 (D-019). On 2026-10-30 a build that reused the cached dependency layer took 20 s, and the e2e suite passed: 11 files, 104 tests. No no-cache build was run, because the workstation's Docker disk was full.
 
 Verified on 2026-10-29 against a no-cache hemi.7 build (113 s):
 
@@ -707,6 +711,41 @@ The alternative was `eip1559: false`, which needs no image change, since `eth_ga
 - Q-1. Cross-check the mainnet token addresses on `explorer.hemi.xyz` from a network that isn't blocked (D-002). They currently rest on Hemi's token list and on-chain `name`/`symbol`/`decimals` reads. On 2026-10-29 a retry from this workstation still hit the TLS block, and no alternative mainnet explorer host resolved (`hemi.blockscout.com` and `hemi.explorer.caldera.xyz` return 404; `explorer.hemi.network` does not resolve). Needs someone on another network: `curl -sS 'https://explorer.hemi.xyz/api/v2/tokens?q=USDC.e'` and `?q=hemiBTC`.
 - Q-2. Why the testnet hBK contract's `getLastHeader()` reverts while precompile `0x44` answers (D-012): likely a different hBK release or ABI on testnet. Phase 2.
 
+
+## D-019. External review on 2026-10-30: record ownership, reachability, testnet runner
+
+An outside review found six issues, and verifying the fixes exposed a seventh. Each was checked against the code before being fixed.
+
+**Record ownership (patch 0020, hemi.9).** Eviction could remove a running settle's record, and its guard would then overwrite or delete the record of a later settle of the same authorization. A retry could receive success with another request's hash. A test of the store at the default capacity reproduced this; the full exploit over HTTP was not run. `facilitator/x402-rs/README.md` has the detail.
+
+The first design refused new settles when the store was full. It was dropped because 10,000 queued garbage requests would then have blocked every real settlement. Instead the cap applies only to kept records, and running records are bounded by their tasks. The first version enforced the cap in `begin`, and a unit test showed that one running settle could still push out a kept record, so it moved to `keep`.
+
+**Reachability.** Compose published the port on every interface, and `/settle` has no authentication, so any reachable caller could spend the signer's gas on self-payments. `FACILITATOR_BIND` now defaults to `127.0.0.1`. The config's `"host": "0.0.0.0"` stays, because it is the address inside the container. A wider binding needs authentication or rate limits in front, which this repo does not provide (README "Limits and open items").
+
+**Testnet runner.**
+
+- It shared the Compose project of a plain `docker compose up`, so `up` could replace a mainnet facilitator and `down` could remove it. It now uses the project `hemi-x402-testnet-run`.
+- `/health` on a taken seller port satisfied its readiness check, so it could pay another seller's `payTo` and still record `SELLER_PAY_TO` in `docs/testnet-run.md`. It now refuses a taken port before sending anything, and compares the seller's `payTo`, network and facilitator before paying. The seller also now exits on a listen error: Express 5 passes it to the `listen` callback, which logged "listening".
+- Balance checks failed above 2^63-1 wei, about 9.2 ETH, and reported the wallet as unfunded. They now compare decimal strings. `scripts/testnet-fund-usdc.sh` had the same overflow, reachable with an unlimited allowance, and has the same fix.
+
+**SDK docs.** `sdk-patch/README.md` still said testnet payments could not settle. `sdk-patch/PR.md` already recorded the deployment.
+
+**Found while verifying: parallel broadcast (patch 0021, hemi.9).** `buyer/demo-fork.sh` failed intermittently. `FallbackLayer` runs only `eth_sendRawTransactionSync` and `eth_sendTransactionSync` one transport at a time, so `eth_sendRawTransaction` went to every RPC at once. The first response wins, and a JSON-RPC error counts as a response. The demo points primary and fallback at one anvil fork, so one copy was mined and the other rejected. When the rejection answered first, the send failed, the nonce cache was reset, and the bitmap read reported `invalid_transaction_state`, although the transfer went through. The payer was charged and the seller refused service.
+
+| Setup | Failed demo runs | Failed sends |
+|------|------|------|
+| hemi.8, both RPCs on one fork | 3 of 10 | |
+| hemi.9 without 0021, both RPCs on one fork | 5 of 10 | 8 of 76 across these two rows |
+| hemi.9 without 0021, dead primary, one live RPC | 0 of 12 | 0 of 48 |
+| hemi.9, both RPCs on one fork | 0 of 20 | 0 of 80 |
+
+Patch 0021 makes `eth_sendRawTransaction` a sequential method. It goes to the best-ranked RPC and moves on only if that RPC cannot be reached. The alternative was to keep both copies and treat a duplicate rejection as success. It was rejected because telling a duplicate from a real rejection means reading each node's error text.
+
+The cost is that one node has to forward the transaction, and its rejection stands. A dropped transaction ends in `settlement_pending`, which a retry can reconcile; a mined settlement reported as failed could not be reconciled. Whether the race ever happened on the live RPCs, where two different nodes answer, was not measured.
+
+The e2e suite could not see this, because its primary RPC is dead and only one RPC ever answered. `08-one-broadcast.test.ts` now runs with two live RPCs behind recording proxies. It counted the wrong number of broadcasts on the image without 0021.
+
+**Verification of all seven fixes.** `cargo fmt`, `clippy -D warnings` and the unit tests pass on the final tree. Removing the sequential method fails a unit test, and so does removing each part of 0020. The series was replayed from `e75adda` and gives the same tree. The runner's checks ran in a sandbox with stubbed `cast`, `docker` and `npm`, which sent nothing. No live `testnet-run.sh --go` was run, so neither 0020 nor 0021 has been exercised on a live network.
 
 ## Pre-spike context: what the reference code requires
 

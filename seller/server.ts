@@ -107,7 +107,8 @@ app.get("/echo", (req, res) => {
   res.json({ echo: req.query, timestamp: new Date().toISOString() });
 });
 
-app.listen(port, () => {
+app.listen(port, error => {
+  if (error) fail(`cannot listen on port ${port}: ${error.message}`);
   console.log(`[seller] listening on http://localhost:${port}  facilitator ${facilitatorUrl}  payTo ${payTo}`);
   for (const a of accepts as { network: string; price: AssetAmount }[]) {
     console.log(`[seller]   ${a.network}  ${a.price.amount} of ${a.price.asset}  ${JSON.stringify(a.price.extra)}`);

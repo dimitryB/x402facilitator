@@ -24,6 +24,11 @@ L2_USDC=$(jq -r '.networks["eip155:743111"].assets["USDC.e"].address' shared/hem
 die() { printf 'testnet-fund-usdc: %s\n' "$*" >&2; exit 1; }
 lc() { tr '[:upper:]' '[:lower:]' <<<"$1"; }
 num() { awk '{print $1}'; }                          # strip cast's " [1e7]" suffix
+# a >= b for decimal integers of any size: bash integers end at 2^63-1, and an allowance can be 2^256-1.
+ge() {
+  [[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ ]] || return 1
+  if [ ${#1} -ne ${#2} ]; then [ ${#1} -gt ${#2} ]; else ! [[ $1 < $2 ]]; fi
+}
 [ -n "${BUYER_PRIVATE_KEY:-}" ] || die "BUYER_PRIVATE_KEY is not set (see .env.example)"
 [ "$(cast chain-id --rpc-url "$SEPOLIA_RPC")" = 11155111 ] || die "$SEPOLIA_RPC is not Ethereum Sepolia"
 [ "$(cast chain-id --rpc-url "$HEMI_RPC")" = 743111 ] || die "$HEMI_RPC is not Hemi testnet"
@@ -51,7 +56,7 @@ need=$(( 400000 * gp * 2 ))                          # mint + approve + deposit,
 echo "route:  Sepolia USDC $L1_USDC -> bridge $L1_BRIDGE -> Hemi testnet USDC.e $L2_USDC"
 echo "buyer   $BUYER  Sepolia ETH=$(cast from-wei "$eth")  Sepolia USDC=$l1"
 echo "to      $TO  Hemi USDC.e=$l2 (base units)  amount=$AMOUNT"
-[ "$eth" -ge "$need" ] || {
+ge "$eth" "$need" || {
   echo "MISSING: send >= $(cast from-wei $need) Ethereum Sepolia ETH (chain 11155111) to $BUYER"
   [ "${1:-}" = --go ] && die "fund the buyer on Ethereum Sepolia first"; exit 1; }
 [ "${1:-}" = --go ] || { echo "Route and balance OK. Re-run with --go."; exit 0; }
@@ -67,9 +72,9 @@ send() { # label, cast send args...
   esac
 }
 
-[ "$l1" -ge "$AMOUNT" ] || send "faucet mint" "$FAUCET" 'mint(address,address,uint256)' "$L1_USDC" "$BUYER" "$AMOUNT"
+ge "$l1" "$AMOUNT" || send "faucet mint" "$FAUCET" 'mint(address,address,uint256)' "$L1_USDC" "$BUYER" "$AMOUNT"
 allow=$(cast call "$L1_USDC" 'allowance(address,address)(uint256)' "$BUYER" "$L1_BRIDGE" --rpc-url "$SEPOLIA_RPC" | num)
-[ "$allow" -ge "$AMOUNT" ] || send "approve bridge" "$L1_USDC" 'approve(address,uint256)' "$L1_BRIDGE" "$AMOUNT"
+ge "$allow" "$AMOUNT" || send "approve bridge" "$L1_USDC" 'approve(address,uint256)' "$L1_BRIDGE" "$AMOUNT"
 send "tunnel deposit" "$L1_BRIDGE" 'depositERC20To(address,address,address,uint256,uint32,bytes)' \
   "$L1_USDC" "$L2_USDC" "$TO" "$AMOUNT" "$MIN_GAS_LIMIT" 0x
 

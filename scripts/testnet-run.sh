@@ -10,10 +10,15 @@
 #
 # Reads .env: FACILITATOR_TESTNET_PRIVATE_KEY (deploys contracts and pays settlement gas),
 # BUYER_PRIVATE_KEY, SELLER_PAY_TO. Testnet only; this script never touches mainnet.
+#
+# It stops before sending anything if FACILITATOR_PORT or SELLER_PORT (default 8080, 4021) is in use.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 [ -f .env ] && { set -a; . ./.env; set +a; }
+# Its own Compose project: `up` and `down` below must not replace or remove a facilitator started
+# from this checkout with plain `docker compose`, such as the README's mainnet deployment.
+export COMPOSE_PROJECT_NAME=hemi-x402-testnet-run
 
 RPC=${HEMI_TESTNET_RPC_FALLBACK:-https://testnet.rpc.hemi.network/rpc}
 EXPLORER=https://testnet.explorer.hemi.xyz
@@ -37,6 +42,11 @@ done
 FAC=$(cast wallet address "$FACILITATOR_TESTNET_PRIVATE_KEY")
 BUYER=$(cast wallet address "$BUYER_PRIVATE_KEY")
 bal() { cast call "$1" 'balanceOf(address)(uint256)' "$2" --rpc-url "$RPC" | awk '{print $1}'; }
+# a >= b for decimal integers of any size: bash integers end at 2^63-1 wei, about 9.2 ETH.
+ge() {
+  [[ $1 =~ ^[0-9]+$ && $2 =~ ^[0-9]+$ ]] || return 1
+  if [ ${#1} -ne ${#2} ]; then [ ${#1} -gt ${#2} ]; else ! [[ $1 < $2 ]]; fi
+}
 
 # Minimums: deployment is ~4.8M gas and each settle ~100k gas at ~0.001 gwei; approvals ~50k gas.
 NEED_FAC_WEI=1000000000000000      # 0.001 ETH
@@ -50,12 +60,19 @@ echo "facilitator/deployer $FAC  ETH=$(cast from-wei "$fac_eth")"
 echo "buyer                $BUYER  ETH=$(cast from-wei "$buyer_eth")  USDC.e=$buyer_usdc  hBTC=$buyer_hbtc (base units)"
 echo "seller payTo         $SELLER_PAY_TO"
 missing=0
-[ "$fac_eth" -ge $NEED_FAC_WEI ] || { echo "MISSING: send >= 0.001 testnet ETH to $FAC"; missing=1; }
-[ "$buyer_eth" -ge $NEED_BUYER_WEI ] || { echo "MISSING: send >= 0.0001 testnet ETH to $BUYER (for the one-time approve(Permit2) per token)"; missing=1; }
-! wants usdc || [ "$buyer_usdc" -ge $NEED_USDC ] || { echo "MISSING: send >= 0.001 testnet USDC.e ($USDC) to $BUYER (scripts/testnet-fund-usdc.sh mints and tunnels it)"; missing=1; }
-! wants btc || [ "$buyer_hbtc" -ge $NEED_HBTC ] || { echo "MISSING: send >= 1 sat of testnet hBTC ($HBTC) to $BUYER (Bitcoin testnet3 via the Bitcoin tunnel; see README)"; missing=1; }
+ge "$fac_eth" $NEED_FAC_WEI || { echo "MISSING: send >= 0.001 testnet ETH to $FAC"; missing=1; }
+ge "$buyer_eth" $NEED_BUYER_WEI || { echo "MISSING: send >= 0.0001 testnet ETH to $BUYER (for the one-time approve(Permit2) per token)"; missing=1; }
+! wants usdc || ge "$buyer_usdc" $NEED_USDC || { echo "MISSING: send >= 0.001 testnet USDC.e ($USDC) to $BUYER (scripts/testnet-fund-usdc.sh mints and tunnels it)"; missing=1; }
+! wants btc || ge "$buyer_hbtc" $NEED_HBTC || { echo "MISSING: send >= 1 sat of testnet hBTC ($HBTC) to $BUYER (Bitcoin testnet3 via the Bitcoin tunnel; see README)"; missing=1; }
 [ "${1:-}" = --go ] || { [ $missing = 0 ] && echo "Balances OK for: $ASSETS. Re-run with --go."; exit $missing; }
 [ $missing = 0 ] || die "fund the addresses above first"
+
+# A taken port would leave this run talking to whatever listens there, and a seller with another
+# payTo would be paid. The seller is checked again once it runs (step 3).
+port_taken() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null || (exec 3<>"/dev/tcp/::1/$1") 2>/dev/null; }
+for port in "$FPORT" "$SPORT"; do
+  ! port_taken "$port" || die "port $port is in use; stop what listens there, or set FACILITATOR_PORT or SELLER_PORT"
+done
 
 cleanup() {
   [ -n "${SELLER_PID:-}" ] && kill "$SELLER_PID" 2>/dev/null || true
@@ -71,7 +88,7 @@ DEPLOYER_PRIVATE_KEY=$FACILITATOR_TESTNET_PRIVATE_KEY contracts/deploy.sh testne
 contracts/verify.sh testnet 2>&1 | tee "$LOGDIR/verify.log" || echo "(verification is best effort; see contracts/README.md)"
 
 echo "== 2. facilitator (testnet config)"
-FACILITATOR_CONFIG=config.testnet.json FACILITATOR_PORT=$FPORT docker compose up -d
+FACILITATOR_CONFIG=config.testnet.json FACILITATOR_BIND=127.0.0.1 FACILITATOR_PORT=$FPORT docker compose up -d
 for _ in $(seq 1 60); do curl -sf "localhost:$FPORT/supported" >/dev/null && break; sleep 2; done
 curl -sS "localhost:$FPORT/supported" | tee "$LOGDIR/supported.json" | jq -c '.kinds[] | {network, scheme}'
 
@@ -79,7 +96,17 @@ echo "== 3. seller"
 FACILITATOR_URL=http://localhost:$FPORT SELLER_NETWORKS=eip155:743111 PORT=$SPORT \
   npm run start -w seller > "$LOGDIR/seller.log" 2>&1 &
 SELLER_PID=$!
-for _ in $(seq 1 30); do curl -sf "localhost:$SPORT/health" >/dev/null && break; sleep 1; done
+health=
+for _ in $(seq 1 30); do
+  kill -0 "$SELLER_PID" 2>/dev/null || die "the seller exited; see $LOGDIR/seller.log"
+  health=$(curl -sf "localhost:$SPORT/health") && break
+  sleep 1
+done
+[ -n "$health" ] || die "the seller did not answer on port $SPORT; see $LOGDIR/seller.log"
+jq -e --arg payTo "$SELLER_PAY_TO" --arg facilitator "http://localhost:$FPORT" \
+  '(.payTo | ascii_downcase) == ($payTo | ascii_downcase)
+   and .networks == ["eip155:743111"] and .facilitator == $facilitator' <<<"$health" >/dev/null \
+  || die "the seller on port $SPORT is not this run's seller: $health"
 
 echo "== 4. payments"
 pay() { # asset

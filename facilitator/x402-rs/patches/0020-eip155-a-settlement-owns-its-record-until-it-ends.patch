@@ -1,0 +1,221 @@
+From 3b1614cadc81fd4d2359fb791164e0c4c6d3bfd3 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 20:57:16 -0400
+Subject: [PATCH] eip155: a settlement owns its record until it ends
+
+The guard of a settle found its record by authorization alone, and the
+oldest record went first when 10,000 were held, running or not. A flood of
+settles could therefore evict a running settle's record, and because a
+record is created before any check, those settles needed no valid
+signature. A later settle of the same authorization could then begin. The
+first settle's guard would write its transaction into that newer record,
+or delete it, so a retry of the other request could receive success with
+the first settle's hash, and a third settle could run alongside the second.
+
+- A record names the settle that began it. InFlight::keep and the guard's
+  drop act only on their own record.
+- A running settle's record neither expires nor is evicted. Running
+  records are bounded by the tasks that run them, so the capacity now
+  bounds kept records, and it is enforced when a record is kept. Requests
+  that are refused during their checks can no longer push anything out.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../v2_eip155_exact/facilitator/pending.rs    | 104 +++++++++++++++---
+ 1 file changed, 88 insertions(+), 16 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs
+index 1d92194..088697f 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/pending.rs
+@@ -21,10 +21,15 @@
+ //!   finds no record and is an ordinary replay (`invalid_transaction_state`). A reverted transaction
+ //!   removes the record as well.
+ //!
+-//! Records live in memory, are bounded and expire.
++//! Records live in memory. A record belongs to the settle that began it, which holds the only
++//! [`InFlight`] guard for it, so a settle can never change or remove another settle's record. While its
++//! settle runs a record neither expires nor is evicted: the authorization stays held, however many other
++//! settles run. Running records are bounded by the tasks that run them, so the capacity bounds the kept
++//! ones. Those expire, and the oldest go first when there are too many.
+ 
+ use alloy_primitives::{B256, TxHash, keccak256};
+ use std::collections::HashMap;
++use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::{Arc, Mutex, MutexGuard};
+ use std::time::{Duration, Instant};
+ 
+@@ -71,12 +76,15 @@ pub struct Record {
+     /// caller did not receive; `None` while the settle is still running.
+     pub transaction: Option<TxHash>,
+     since: Instant,
++    /// The settle that began this record: only its [`InFlight`] guard may change or remove it.
++    settle: u64,
+ }
+ 
+ /// In-memory, bounded and expiring map from payment authorization to its settlement.
+ #[derive(Debug, Clone)]
+ pub struct PendingSettlements {
+     records: Arc<Mutex<HashMap<B256, Record>>>,
++    next_settle: Arc<AtomicU64>,
+     ttl: Duration,
+     capacity: usize,
+ }
+@@ -88,25 +96,29 @@ impl Default for PendingSettlements {
+ }
+ 
+ impl PendingSettlements {
+-    /// How long a record is kept. Longer than any receipt timeout, and long enough for a client to
++    /// How long a kept record lasts. Longer than any receipt timeout, and long enough for a client to
+     /// retry; after that a retry is settled afresh (and fails on the spent nonce).
+     pub const DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
+-    /// At most this many records are kept; the oldest are dropped first.
++    /// At most this many records outlive their settle; the oldest are dropped first.
+     pub const DEFAULT_CAPACITY: usize = 10_000;
+ 
+     pub fn new(ttl: Duration, capacity: usize) -> Self {
+         Self {
+             records: Arc::new(Mutex::new(HashMap::new())),
++            next_settle: Arc::new(AtomicU64::new(0)),
+             ttl,
+             capacity: capacity.max(1),
+         }
+     }
+ 
+-    /// The records, with expired ones dropped.
++    /// The records, with expired ones dropped. Only a kept record expires: a running settle's record
++    /// holds its authorization until that settle ends.
+     fn records(&self) -> MutexGuard<'_, HashMap<B256, Record>> {
+         let mut records = self.records.lock().unwrap_or_else(|e| e.into_inner());
+         let now = Instant::now();
+-        records.retain(|_, record| now.duration_since(record.since) < self.ttl);
++        records.retain(|_, record| {
++            record.transaction.is_none() || now.duration_since(record.since) < self.ttl
++        });
+         records
+     }
+ 
+@@ -123,23 +135,21 @@ impl PendingSettlements {
+         if let Some(record) = records.get(&id) {
+             return Err(*record);
+         }
+-        if records.len() >= self.capacity
+-            && let Some(oldest) = records
+-                .iter()
+-                .min_by_key(|(_, record)| record.since)
+-                .map(|(id, _)| *id)
+-        {
+-            records.remove(&oldest);
+-        }
++        let settle = self.next_settle.fetch_add(1, Ordering::Relaxed);
+         records.insert(
+             id,
+             Record {
+                 request,
+                 transaction: None,
+                 since: Instant::now(),
++                settle,
+             },
+         );
+-        Ok(InFlight { store: self, id })
++        Ok(InFlight {
++            store: self,
++            id,
++            settle,
++        })
+     }
+ 
+     /// Removes the record of `id` if it still names `transaction`, and says whether it did. Only one
+@@ -163,13 +173,31 @@ impl PendingSettlements {
+ pub struct InFlight<'a> {
+     store: &'a PendingSettlements,
+     id: B256,
++    settle: u64,
+ }
+ 
+ impl InFlight<'_> {
+     /// The settle ended in `settlement_pending` with `transaction`, or in a success with `transaction`
+     /// that its caller did not receive: keep the record, now naming it, for a retry of the request.
+     pub fn keep(&self, transaction: TxHash) {
+-        if let Some(record) = self.store.records().get_mut(&self.id) {
++        let mut records = self.store.records();
++        let mine = |record: &Record| record.settle == self.settle;
++        if !records.get(&self.id).is_some_and(mine) {
++            return;
++        }
++        let kept = || {
++            records
++                .iter()
++                .filter(|(_, record)| record.transaction.is_some())
++        };
++        if kept().count() >= self.store.capacity
++            && let Some(oldest) = kept()
++                .min_by_key(|(_, record)| record.since)
++                .map(|(id, _)| *id)
++        {
++            records.remove(&oldest);
++        }
++        if let Some(record) = records.get_mut(&self.id) {
+             record.transaction = Some(transaction);
+         }
+     }
+@@ -180,7 +208,7 @@ impl Drop for InFlight<'_> {
+         let mut records = self.store.records();
+         if records
+             .get(&self.id)
+-            .is_some_and(|record| record.transaction.is_none())
++            .is_some_and(|record| record.settle == self.settle && record.transaction.is_none())
+         {
+             records.remove(&self.id);
+         }
+@@ -218,6 +246,50 @@ mod tests {
+         assert!(store.get(&ID).is_none());
+     }
+ 
++    #[test]
++    fn a_running_settlement_neither_expires_nor_is_evicted() {
++        let store = PendingSettlements::new(Duration::ZERO, 1);
++        let running = store.begin(ID, REQUEST).unwrap();
++        let others: Vec<_> = (2..=20u8)
++            .map(|i| store.begin(B256::repeat_byte(i), REQUEST).unwrap())
++            .collect();
++        assert_eq!(store.get(&ID).unwrap().transaction, None);
++        assert!(store.begin(ID, B256::repeat_byte(0xb1)).is_err());
++        drop(others);
++        drop(running);
++        assert!(store.get(&ID).is_none());
++    }
++
++    #[test]
++    fn running_settlements_do_not_push_out_a_kept_record() {
++        let store = PendingSettlements::new(Duration::from_secs(60), 1);
++        let tx = TxHash::repeat_byte(0xaa);
++        store.begin(ID, REQUEST).unwrap().keep(tx);
++        let others: Vec<_> = (2..=20u8)
++            .map(|i| store.begin(B256::repeat_byte(i), REQUEST).unwrap())
++            .collect();
++        assert_eq!(store.get(&ID).unwrap().transaction, Some(tx));
++        // Only another kept record makes it go.
++        others[0].keep(TxHash::repeat_byte(0xbb));
++        assert!(store.get(&ID).is_none());
++    }
++
++    #[test]
++    fn a_settle_cannot_touch_the_record_of_a_later_settle() {
++        let store = PendingSettlements::default();
++        let (tx, later) = (TxHash::repeat_byte(0xaa), B256::repeat_byte(0xb1));
++        let first = store.begin(ID, REQUEST).unwrap();
++        first.keep(tx);
++        assert!(store.claim(&ID, tx));
++        let second = store.begin(ID, later).unwrap();
++        first.keep(TxHash::repeat_byte(0xbb));
++        drop(first);
++        let record = store.get(&ID).unwrap();
++        assert_eq!((record.request, record.transaction), (later, None));
++        drop(second);
++        assert!(store.get(&ID).is_none());
++    }
++
+     #[test]
+     fn records_expire_and_the_oldest_goes_when_full() {
+         let expired = PendingSettlements::new(Duration::ZERO, 10);

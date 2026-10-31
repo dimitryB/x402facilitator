@@ -17,7 +17,10 @@ how a payment is settled. What they change:
   nonce is kept instead of reset (0006); each payment authorization is settled at most once at a time,
   with a retry of a pending settle answered from its transaction rather than sending another (0011); and
   a settlement runs to its end even if the client disconnects, with every broadcast hash logged (0015),
-  and a success nobody received is kept for the client's retry (0016);
+  and a success nobody received is kept for the client's retry (0016); each settle owns its record, so
+  no other settle can overwrite or delete it, and a running settle's record is never evicted (0020);
+- where a transaction goes: to one RPC at a time, moving on only if that RPC cannot be reached, instead
+  of a copy to every RPC (0021);
 - what is sent at all: an EIP-6492 wallet deployment through Multicall3 is only sent after the EIP-6492
   validator accepted the signature, and a wrapper around the payer's own signature is never sent (0012).
 
@@ -55,6 +58,8 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0017](patches/0017-facilitator-local-report-an-x402Version-the-payload-.patch) | a top-level `x402Version` that `paymentPayload.x402Version` contradicts is reported as `invalid_payload` | §9 `invalid_x402_version` |
 | [0018](patches/0018-facilitator-local-answer-a-rejected-payment-with-200.patch) | a rejected payment is answered with 400 (412 for a missing allowance), so a stock TS seller throws and reports `"<code>: <message>"`, and never answers 412 | TS reference facilitator; scheme_exact_evm.md Permit2 step 2 |
 | [0019](patches/0019-eip155-tip-at-least-the-node-s-suggested-priority-fe.patch) | after ten blocks without tips, a settlement tips 1 wei; Hemi testnet's sequencer never mines it, and it holds the signer's nonce and every later settlement | none: liveness (§9 `settlement_pending` is what the buyer sees) |
+| [0020](patches/0020-eip155-a-settlement-owns-its-record-until-it-ends.patch) | a flood of settles evicts a running settle's record; its guard then overwrites or deletes the record of a later settle of that authorization, so a retry can get success with another request's hash | §5.3.2, §9 `invalid_transaction_state` |
+| [0021](patches/0021-eip155-broadcast-a-transaction-to-one-RPC-at-a-time.patch) | with two RPCs a transaction is broadcast twice, and the rejection of the second copy can make a mined settlement look failed: the payer is charged and the seller refuses service | §5.3.2, §9 `invalid_transaction_state` |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -232,7 +237,7 @@ payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an a
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.8` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.9` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -271,7 +276,7 @@ cargo test -p x402-types -p x402-facilitator-local -p x402-chain-eip155 \
 ```
 
 Every patch was checked one by one: `cargo fmt --check`, `cargo clippy --tests -D warnings`, and the
-tests, with 41 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
+tests, with 51 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
 the built image on anvil forks.
 
 ## The one non-spec field: `invalidReasonDetails`
@@ -711,6 +716,7 @@ Under-payment gets the same code.
     disconnect does not cancel, so the guard fires only when the settlement itself ends.
   - A retry of the very same request sends nothing and is answered from the receipt, as below.
   - Records live in memory, are bounded (10,000, oldest dropped first) and expire after 15 minutes.
+    Since 0020 these limits apply only to records that outlive their settle.
 - **How a retry of the same request is answered** (same payload, signature and requirements):
   - not mined yet: `settlement_pending` with the same hash;
   - mined, for the first retry that sees it: success with the hash. That retry also removes the record,
@@ -1096,6 +1102,57 @@ approval, so alloy's estimate was the same (D-018).
 >
 > On EIP-1559 chains the facilitator relies on alloy's default fee estimate. When the last ten blocks carry no non-zero tips, which is common on quiet L2s where most blocks only hold the L1-info deposit, alloy falls back to a 1-wei tip. A sequencer with a minimum tip does not include such a transaction, so the settlement is never mined, the receipt times out, and the signer's nonce is stuck. This PR reads `eth_maxPriorityFeePerGas` alongside the estimate and uses it as a floor for the tip, keeping the estimate's base-fee headroom in the max fee. Nodes without the method keep the old behaviour. Observed on Hemi testnet (chain 743111), whose sequencer mines no tip below 1000000 wei, the value its node answers to `eth_maxPriorityFeePerGas`.
 </details>
+
+### 0020 eip155: a settlement owns its record until it ends
+
+**Problem.** A settle's guard found its record by authorization alone, and at 10,000 records the oldest
+was evicted whether its settle was still running or not. A record is created before any check, and a
+request with no token name or version then waits in the throttled RPC queue before its signature is
+read, so 10,000 live records take no valid signature and no gas. Once a running settle A was evicted, a
+settle B of the same authorization could begin. A's guard then acted on B's record:
+
+- `keep` wrote A's transaction into it, so a retry of B got success with A's hash. That retry is answered
+  from the record without any check, so B could even be a forged request.
+- The drop deleted it while B was running, so a third settle could run alongside B.
+
+`/verify` keeps a forged payload away from a stock seller. A correctly signed second request carries the
+same payer, nonce, recipient and amount, so no funds move wrongly, but one payment could be delivered
+twice. A store-level test reproduced both effects at the default capacity. The full exploit over HTTP was
+not run.
+
+**Change.** A record names the settle that began it, and `keep` and the drop act only on their own
+record. A running settle's record neither expires nor is evicted. Running records are bounded by the
+tasks that run them, so the capacity now bounds kept records, and it is enforced in `keep`. A settle
+refused during its checks can no longer push anything out.
+
+**Tests.** Unit tests: a running settlement neither expires nor is evicted; running settlements do not
+push out a kept record; a settle cannot touch the record of a later settle.
+
+### 0021 eip155: broadcast a transaction to one RPC at a time
+
+**Problem.** `FallbackLayer` sends a request to every RPC at once and returns the first response, and a
+JSON-RPC error counts as one. Only `eth_sendRawTransactionSync` and `eth_sendTransactionSync` are exempt,
+so with two RPCs `eth_sendRawTransaction` went out twice. The node that saw a copy second rejected it.
+When that rejection arrived first, the send failed although the other copy was mined. The nonce cache was
+reset, and the payment's nonce was by then spent, so the failure was reported as a replay
+(`invalid_transaction_state`). The payer was charged, and the seller refused service.
+
+Reads fanning out is harmless, so this stayed hidden. The e2e suite's primary RPC is dead, so only one RPC
+ever answered. `buyer/demo-fork.sh` points both RPCs at one fork, and it failed intermittently. DECISIONS
+D-019 has the measurements. The live RPCs were not measured.
+
+**Change.** `eth_sendRawTransaction` is a sequential method. It goes to the best-ranked RPC and moves on
+only if that RPC cannot be reached. Reads are unchanged.
+
+**Trade-off.** One copy of a transaction means one node has to forward it. A node's rejection is now the
+answer, even if the other RPC would have taken the transaction. A transaction whose node drops it ends in
+`settlement_pending`, which a retry can reconcile, where before a mined settlement could be reported as
+failed, which nothing could.
+
+**Tests.** Unit tests through alloy's mock transport, with RPCs that answer on a later poll: a transaction
+goes to one RPC and a read to all; a transaction moves on from an RPC it cannot reach; a node's rejection
+is not sent to another. e2e `08-one-broadcast.test.ts` puts a recording proxy on each of two live RPCs in
+front of one fork, settles three payments and counts the broadcasts. It fails without this patch.
 
 ## What these patches do not change
 

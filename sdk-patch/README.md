@@ -27,9 +27,9 @@ The patch targets `e4a086819f419e9395acbbdc1679fe6627029ff7` ("chore: version ty
 
 The facts behind these values are in [DECISIONS.md](../DECISIONS.md): D-001, D-007, D-009 and D-010.
 
-Two gaps to know about before relying on the patch:
+Two things to know before relying on the patch:
 
-- **Testnet payments can't settle yet.** The testnet default asset needs canonical Permit2 and the x402 exact Permit2 proxy on Hemi Testnet. Neither is deployed as of 2026-10-29.
+- **Testnet payments go through Permit2.** The testnet default asset needs canonical Permit2 and the x402 exact Permit2 proxy. Both were deployed on Hemi Testnet on 2026-10-29, and a USDC.e payment has settled there ([docs/testnet-run.md](../docs/testnet-run.md)). The payer sends one on-chain `approve(Permit2)` first.
 - **TypeScript only.** Upstream usually updates the Go and Python SDKs in the same PR. `PR.md` lists the matching files in those SDKs.
 
 ## Apply

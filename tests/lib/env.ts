@@ -76,6 +76,7 @@ export function forkEnv(): NodeJS.ProcessEnv {
 
 /** Every variable docker-compose.yml interpolates, so neither the repo's .env nor the caller's env leaks in. */
 export const COMPOSE_VARS: Record<string, string> = {
+  FACILITATOR_BIND: "127.0.0.1",
   FACILITATOR_PORT: String(FACILITATOR_PORT),
   FACILITATOR_CONFIG: "config.json",
   RUST_LOG: "info",

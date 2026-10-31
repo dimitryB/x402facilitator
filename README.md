@@ -2,7 +2,7 @@
 
 An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hemi mainnet (`eip155:43111`) and Hemi testnet (`eip155:743111`) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint.
 
-It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and nineteen small patches. Eighteen make its error responses match the x402 v2 spec, and one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
+It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and twenty-one small patches. Eighteen make its error responses match the x402 v2 spec, one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018), and two keep a settlement's outcome correct under load and with two RPCs (D-019). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
 **Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and a live USDC.e payment settled ([docs/testnet-run.md](docs/testnet-run.md)); the hBTC payment waits for Bitcoin-testnet funds. Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
 
@@ -98,7 +98,7 @@ docker compose up                                          # both chains (config
 
 If a contract or key is missing, the container exits with the reason. A missing contract shows as `Contract at address … does not exist`. An empty `FACILITATOR_*_PRIVATE_KEY` shows as `Invalid evm private key: invalid string length`. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently.
 
-The image, `hemi-x402-facilitator:e75adda-hemi.8`, is x402-rs at commit `e75adda` plus nineteen small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it. The build fetches x402-rs from GitHub, the crates from crates.io and the pinned `rust:1.93-trixie` image (about 2.2 GB), then compiles for about 2 minutes on a 4-CPU machine. Add `--build` after changing a patch. Forks also need the Hemi public RPCs to be reachable.
+The image, `hemi-x402-facilitator:e75adda-hemi.9`, is x402-rs at commit `e75adda` plus twenty-one small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it. The build fetches x402-rs from GitHub, the crates from crates.io and the pinned `rust:1.93-trixie` image (about 2.2 GB), then compiles for about 2 minutes on a 4-CPU machine. Add `--build` after changing a patch. Forks also need the Hemi public RPCs to be reachable.
 
 Stock x402-rs does not return the x402 v2 spec's error shapes, and on a quiet Hemi it can send a settlement that is never mined. The patches fix both:
 
@@ -115,6 +115,7 @@ Stock x402-rs does not return the x402 v2 spec's error shapes, and on a quiet He
 - **Permit2 spender:** a Permit2 payload whose spender is not the x402 exact proxy returns `invalid_payload`.
 - **Client disconnects:** a settlement finishes even if the client hangs up, and its tx hash is logged once the node accepts the transaction. The record is kept, and an identical `/settle` retry gets `settlement_pending` with the hash while the tx is unmined. The first retry after it mines gets the success; later retries are replays. A stock seller always verifies before settling, and `/verify` refuses an authorization with a record. So only a client that calls `/settle` directly can claim a kept success. For a stock seller, see "Charged but not served" under [Limits](#limits-and-open-items).
 - **Settlement tips:** a settlement tips at least the node's suggested priority fee, which is 0.001 gwei on both Hemi chains. After ten blocks without tips, stock x402-rs tips 1 wei. Hemi testnet's sequencer never mines that, and the stuck nonce would block every later settlement. Mainnet has mined tips as low as 21 wei, so there the floor is a precaution that costs about 1e-7 ETH per settlement (D-018).
+- **One broadcast per settlement:** a transaction goes to one RPC at a time, moving on only if that RPC can't be reached. Stock x402-rs sends a copy to every RPC, and the rejection of the second copy can make a mined settlement look failed.
 - **HTTP status codes as the reference facilitator uses them:** 200 for every verdict on a readable request, `isValid: false`, `success: false` and `settlement_pending` included. 400 is only for a request that cannot be read; 500 for unexpected failures. A stock TS seller then receives the bare §9 code.
 
 None of them changes where funds go. The exact-amount patch narrows what is accepted. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) and D-016 explain each one. The unpatched stock image is kept, by digest, in a comment in `docker-compose.yml`.
@@ -122,8 +123,9 @@ None of them changes where funds go. The exact-amount patch narrows what is acce
 [`facilitator/config.json`](facilitator/config.json) holds both chains, and [`config.testnet.json`](facilitator/config.testnet.json) and [`config.mainnet.json`](facilitator/config.mainnet.json) hold one each. Settings, all explained in D-013:
 
 - **Scheme:** `v2-eip155-exact` on each chain. It accepts both EIP-3009 and Permit2 payloads. `/supported` lists `exact` per network; which transfer method a payment uses is set per asset by the seller's `extra.assetTransferMethod`.
-- **RPCs:** dRPC first, the Hemi public RPC second, overridable with `HEMI_{TESTNET,MAINNET}_RPC_{PRIMARY,FALLBACK}`. x402-rs sends every read to all RPCs at once and takes the first answer, so a dead or stalled RPC costs nothing as long as one answers (D-015). The public RPC is throttled to 4 requests per second, under its ~300 per minute limit.
+- **RPCs:** dRPC first, the Hemi public RPC second, overridable with `HEMI_{TESTNET,MAINNET}_RPC_{PRIMARY,FALLBACK}`. x402-rs sends every read to all RPCs at once and takes the first answer, so a dead or stalled RPC costs nothing as long as one answers (D-015). A transaction goes to one RPC at a time, starting with the best-ranked one (D-019). The public RPC is throttled to 4 requests per second, under its ~300 per minute limit.
 - **Signers:** one key per chain, `FACILITATOR_TESTNET_PRIVATE_KEY` and `FACILITATOR_MAINNET_PRIVATE_KEY`. The signer only pays gas. Run exactly one facilitator process per signer key, and don't use the key elsewhere while it runs. The nonce manager and the pending-settlement records live in that one process.
+- **Reachability:** compose publishes the port on `127.0.0.1`, so only this machine can reach it. `/settle` has no authentication and the signer pays its gas, so anyone who can reach the port can spend that gas on valid payments of their own, such as paying themselves. A seller on another machine needs `FACILITATOR_BIND` set to a wider interface, and then authentication or rate limits in front of the facilitator, for example in a reverse proxy. This repo provides neither.
 - **Receipt timeout:** 60 seconds. Hemi RPCs do stall (the brief's outage note), and if a broadcast tx has no receipt by then, `/settle` returns `settlement_pending` with the tx hash instead of losing it. The timeout must stay under the seller SDK's 90-second facilitator timeout, or a stock seller gives up first and never sees the hash.
 
 ### Why the facilitator never holds funds
@@ -187,6 +189,8 @@ Run on 2026-10-29 for USDC.e: the contracts were deployed and one payment settle
 ```bash
 scripts/testnet-run.sh
 ```
+
+The run uses its own Compose project, so it cannot replace or stop a facilitator started with plain `docker compose`. With `--go`, it stops before sending anything if its facilitator or seller port is in use. It also stops before paying if the seller's `payTo`, network or facilitator differ from the run's.
 
 It needs two funded wallets:
 
@@ -261,6 +265,7 @@ The mainnet facilitator needs two contracts that do not exist on Hemi mainnet ye
    ```bash
    FACILITATOR_CONFIG=config.mainnet.json docker compose up -d
    ```
+   It is reachable from this machine only. Read **Reachability** under [The facilitator](#the-facilitator) before setting `FACILITATOR_BIND`.
 5. Start a seller that offers mainnet. It reads `SELLER_PAY_TO` from `.env`:
    ```bash
    SELLER_NETWORKS=eip155:43111 npm run start -w seller
@@ -296,13 +301,13 @@ The end-to-end suite starts both forks and the facilitator image from this repo.
 - that the dead primary really is dead inside the container
 - that a settlement sent after ten tip-less blocks tips at least the node's suggested priority fee
 
-Latest results (2026-10-29), against a no-cache build of the image:
+Latest results, from 2026-10-29 against a no-cache build of the image unless a row says otherwise:
 
 | Suite | Result |
 |------|------|
-| `npm test -w tests` | 10 files, 103 tests passed, 0 failed (136 s), on hemi.8 |
+| `npm test -w tests` | 11 files, 104 tests passed, 0 failed (144 s), on hemi.9, on 2026-10-30, against a build that reused the cached dependency layer |
 | `forge test` | 17 passed, 0 failed |
-| `buyer/demo-fork.sh` | all four payments settled; payTo received exactly the price each time |
+| `buyer/demo-fork.sh` | all four payments settled in 20 of 20 runs on hemi.9, on 2026-10-30; payTo received exactly the price each time |
 
 ## Definition of done
 
@@ -327,7 +332,10 @@ Latest results (2026-10-29), against a no-cache build of the image:
 - **Charged but not served:** this happens in two ways. A settle can go `settlement_pending` while the stock seller's single automatic retry is also still pending. Or the seller times out or disconnects from `/settle` after the tx was broadcast. Either way the seller refuses the request, the payment can still mine, and the buyer is charged without being served. Resending the same payment header gets a 402 while the facilitator holds the record, up to 15 minutes, and a replay error after that. To reconcile, use the tx hash from the seller's log (`settlement_pending` answers) or the facilitator's log (every accepted broadcast).
 - **Missing Permit2 allowance is HTTP 200:** `scheme_exact_evm.md` Permit2 step 2 says the verifier returns `412 Precondition Failed`. This facilitator answers 200 with `permit2_allowance_required`, as the TS reference facilitator does. The stock seller SDK then answers the buyer 412. This is a deliberate deviation from the scheme text (D-016, 0018).
 - **Ambiguous broadcast:** if the node accepts a transaction but its response is lost, the facilitator treats the send as failed. It resets the nonce, answers `unexpected_settle_error` with no hash, and logs no hash, yet the tx can still mine. The payer's nonce still prevents a double charge.
-- **Record eviction under load:** pending records are capped at 10,000. A flood of parseable `/settle` requests could evict the oldest, which are the real pending ones. That drops the `/verify` block and any kept success. The on-chain nonce still prevents a double charge.
+- **Single broadcast:** a transaction reaches only the first RPC that answers. If that node accepts it and never forwards it, no other RPC holds a copy, and the settle ends in `settlement_pending`. If that node rejects it, the rejection stands, even if the other RPC would have taken it. Sending to both RPCs was worse: a mined settlement could be reported as failed (D-019).
+- **No authentication:** anyone who can reach the facilitator can spend its signer's gas on valid payments of their own. The default binding is loopback for that reason, and a wider one needs authentication or rate limits in front of it. See **Reachability** under [The facilitator](#the-facilitator).
+- **Record eviction:** records that outlive their settlement are capped at 10,000, and the oldest goes when another is kept. Only a settlement that broadcast a transaction can push one out, so a flood of rejected requests cannot. An eviction drops the `/verify` block and any kept success. The on-chain nonce still prevents a double charge.
+- **Records before checks:** a settle's record is created before its request is checked, so that two settles can never race. A request with someone else's payer and nonce therefore blocks that authorization while its own checks run. It needs that payer's nonce, and the block ends when the request is rejected.
 - **Timeouts in front of `/settle`:** a proxy or client timeout on `/settle` should exceed the 60-second receipt timeout, or the hash won't come back in the response. The facilitator logs the hash of every broadcast the node accepts. After a client hangs up, the settlement keeps running. A retry while it is still waiting for the receipt gets `invalid_transaction_state` ("in progress"). Once it ends, the first identical retry gets the hash.
 - **Facilitator memory:** pending-settlement records live in memory. A facilitator restart forgets them, after which a pending authorization is judged by the chain alone.
 - **Verify-then-settle race:** two requests carrying the same payment header that both pass `/verify` before either settles can both reach the seller's handler; only one settle succeeds. This is inherent to the x402 verify, handler, settle flow, not specific to this facilitator.

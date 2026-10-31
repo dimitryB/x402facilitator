@@ -7,8 +7,9 @@
  * and was never restarted, then makes fresh verify and settle calls while the primary stays dead.
  *
  * x402-rs wraps the configured RPCs in alloy's FallbackLayer with active_transport_count equal to the
- * number of RPCs (chain/provider.rs, rpc_client): each request is sent to all of them in parallel and
- * the first success wins, so a dead primary costs nothing but a failed sample in alloy's ranking.
+ * number of RPCs (chain/provider.rs, rpc_client): each read is sent to all of them in parallel and
+ * the first success wins, so a dead primary costs nothing but a failed sample in alloy's ranking. A
+ * transaction goes to one RPC at a time and moves on from one it cannot reach (patch 0021).
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
