@@ -483,7 +483,7 @@ Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return 
 
 The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
 
-No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.11` (hemi.7 until patch 0019, D-018; hemi.8 until patches 0020 and 0021, D-019; hemi.9 until patch 0022, D-020; hemi.10 until patches 0023 to 0026, D-021). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.12` (hemi.7 until patch 0019, D-018; hemi.8 until patches 0020 and 0021, D-019; hemi.9 until patch 0022, D-020; hemi.10 until patches 0023 to 0026, D-021; hemi.11 until patch 0027, D-022). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
 
 | Patch | Change |
 |------|------|
@@ -513,6 +513,7 @@ No config setting changes any of this, so the facilitator is now built from `fac
 | 0024 | A failed send's hash is looked up on each RPC, for two blocks if the send timed out, and is logged (hemi.11, D-021) |
 | 0025 | A settlement whose tip cannot be read fails before anything is sent (hemi.11, D-021) |
 | 0026 | A send and its receipt wait share one budget, the receipt timeout plus 5 s (hemi.11, D-021) |
+| 0027 | Any failed send no node answered is searched for, with an 8 s lookup limit, within the budget (hemi.12, D-022) |
 
 hemi.1 had patches 0001 to 0005. A fresh-context critic then found three more gaps:
 
@@ -833,12 +834,12 @@ test chain::pending_nonce_manager::tests::a_reset_waiting_for_the_nonce_lock_doe
  × a failed tip read: nothing is sent, because the estimate alone can be a 1-wei tip
 ```
 
-The rejected-send case in that file also covers what the critic found untested: without the nonce reset, the next settlement would queue behind a gap.
+The rejected-send case in that file also covers what the critic found untested: without the nonce reset, the next settlement queues behind a gap. D-022 has the mutant run that shows it.
 
 Choices made:
 
 - **A failed tip read fails the settlement.** The alternative, the last good suggestion, needs state and can go stale. Nothing has been sent at that point, so a failure costs a retry.
-- **Only a send that timed out gets the long search.** A node that answered has either rejected the transaction or taken it. The test is the send's duration against the 10 s limit, because the fallback layer reports only the last error. So a fast rejection never waits.
+- **Only a send that timed out gets the long search.** The test is the send's duration against the 10 s limit, because the fallback layer reports only the last error. This entry also said a node that answered has either rejected the transaction or taken it. That is false for a gateway; D-022 corrects it.
 - **The time budget starts at `send_transaction`, not at `/settle`.** Threading a deadline from the handler would touch every caller. The 25 s left over for checks before the send is about two reads at the 10 s limit.
 
 Still open, and listed under Limits in the README: an RPC that answers JSON-RPC errors defeats failover, a transaction dropped by its one node stops settlement until a restart, and a send that no RPC can show within the search still counts as failed.
@@ -846,6 +847,34 @@ Still open, and listed under Limits in the README: an RPC that answers JSON-RPC 
 Verified on 2026-11-01 against a no-cache hemi.11 build (247 s, all 26 patches): `cargo fmt`, `clippy -D warnings` and the unit tests pass at each of the four new commits; the e2e suite passed, 12 files and 109 tests in 213 s; `forge test` passed 17; `buyer/demo-fork.sh` settled all four payments. Both assets then settled live on Hemi testnet through hemi.11: USDC.e in `0xf72346bea38dd423109a786e65969682c5d85780297d26dcb821fab059d06bb8` and hBTC in `0x42ec5319355db2357a66c27964854cfa2bff1cf4f8b186caa6a274ae9780eac2`, about 8.9 s each. The signer's nonce rose by exactly two. No live run had a stalled RPC or a failed send, so these fixes are proven on forks only.
 
 The critic also noted that a restart after a nonce gap can give one more failed settlement, with HTTP 500 "nonce too low", because the queued transaction mines and overtakes the cached nonce. The next settlement then succeeds.
+
+## D-022. Eleventh critic pass: where the failed-send path stops
+
+All eight Definition-of-done items passed for the third pass in a row. The review found four more issues in the failed-send path. The critic marked its pass incomplete: its mutant queue did not finish, so it does not count as a clean pass. 0023 and 0025 held up, and the freeze did not return in 3 of 3 runs at the load that froze hemi.10.
+
+| Issue | Trigger | Outcome |
+|------|------|------|
+| A fast failure got one lookup | A gateway forwards the transaction, then answers 5xx or drops the connection, and no RPC shows it yet | Fixed in 0027 |
+| A 3 s lookup limit hid a transaction | A send timeout, and both RPCs slower than 3 s | Fixed in 0027: 8 s |
+| The search ran past the budget | Both RPCs stalling sends, with reads at 8 s: `/settle` took 93 s | Fixed in 0027: it ends with the budget |
+| Settlements during a search queue behind its nonce | Every RPC loses one send, plus traffic in the next 25 s or so | Listed under Limits |
+| A JSON-RPC error after forwarding | A gateway forwards the transaction, then answers with a JSON-RPC error, and no RPC shows it at that moment | Listed under Limits |
+
+The fourth could be fixed by resending the same signed bytes during the search, which is safe because the hash is the same. It was left because it adds a retry path to the part of the code that has needed the most correction, for a case that needs every RPC to lose a send.
+
+The fifth cannot be told from a real rejection without reading each node's error text.
+
+Two claims were checked with a mutant that removes the nonce reset after a failed send. Both nonce cases in `09-stalled-rpc.test.ts` fail on it. The swallowed-send case passed when run after the failing rejected-send case, which had left a queued transaction on the fork, and it failed when run alone.
+
+```
+ × a rejected send: the settlement fails, and the next one reuses the nonce
+ × a send that no RPC answers and no RPC can find: it fails, and the next one reuses the nonce     # run alone
+AssertionError: expected false to be true // Object.is equality
+```
+
+Verified on 2026-11-01 against a no-cache hemi.12 build (287 s, all 27 patches): `cargo fmt`, `clippy -D warnings` and the unit tests pass; the e2e suite passed, 12 files and 111 tests in 283 s; `forge test` passed 17; `buyer/demo-fork.sh` settled all four payments. Both assets then settled live on Hemi testnet through hemi.12: USDC.e in `0x2a181f78116ce3454c61ede99144143b4241f737f9bb79904c956a1d941da26d` and hBTC in `0xadf0e1b867f0b4a477737cc9a5107a977b34b893101b62b43e8b6a0936b84cf8`, in 16 s and 23 s. Both broadcasts left under 2 s after `/settle` began, and the rest was waiting for blocks.
+
+**Where this stops.** Passes 9, 10 and 11 all passed the Definition of done. Each also found failed-send problems that passes before it had not, and most of the last pass's need faults on several RPCs at once. Passes 12 and 13 are therefore scoped as the brief scopes them: the Definition of done from the README, plus a review of the latest change. The remaining failed-send cases are listed under Limits. All of this path is proven on forks only; no live run had a stalled RPC or a failed send.
 
 ## Pre-spike context: what the reference code requires
 

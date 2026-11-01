@@ -21,7 +21,7 @@ how a payment is settled. What they change:
   no other settle can overwrite or delete it, and a running settle's record is never evicted (0020);
 - where a transaction goes: to one RPC at a time, moving on only if that RPC cannot be reached or does not
   answer within 10 s, instead of a copy to every RPC (0021, 0022);
-- when a send counts as failed: only once no RPC knows the transaction (0022, 0024);
+- when a send counts as failed: only once no RPC shows the transaction (0022, 0024, 0027);
 - what is sent at all: an EIP-6492 wallet deployment through Multicall3 is only sent after the EIP-6492
   validator accepted the signature, and a wrapper around the payer's own signature is never sent (0012).
 
@@ -31,7 +31,7 @@ how a payment is settled. What they change:
 - the fees a settlement pays: on an EIP-1559 chain the tip is at least the node's suggested priority fee,
   so a settlement sent after a run of tip-less blocks is still mined where the sequencer has a minimum
   tip, as Hemi testnet's does (0019), and a settlement whose tip cannot be read is not sent (0025). These,
-  and 0021 to 0026, are about liveness rather than error shapes.
+  and 0021 to 0027, are about liveness rather than error shapes.
 
 Spec references are to `x402-foundation/x402` at `e4a0868`:
 
@@ -67,6 +67,7 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0024](patches/0024-eip155-ask-every-RPC-for-a-failed-send-s-hash-for-tw.patch) | a lookup after a failed send takes the first answer, and `null` is one, so a mined settlement can still be reported as failed | none: §5.3.2 hash |
 | [0025](patches/0025-eip155-do-not-send-a-settlement-whose-tip-floor-coul.patch) | a failed tip read removes 0019's floor, and the settlement goes out at 1 wei | none: liveness |
 | [0026](patches/0026-eip155-bound-a-send-and-its-receipt-wait-together.patch) | a slow send plus the receipt wait can outlast the TS SDK's 90 s, and the hash is lost to the caller | §5.3.2 hash |
+| [0027](patches/0027-eip155-search-after-any-failed-send-no-node-answered.patch) | a fast 5xx, a slow lookup or a long search can still report a mined settlement as failed, or run past 90 s | §5.3.2 hash |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -244,7 +245,7 @@ payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an a
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.11` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.12` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -260,7 +261,7 @@ silicon), with the base images already pulled:
   patches.
 - `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
   113 s for hemi.3; 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches); 113 s for hemi.5
-  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11.
+  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11; 287 s for hemi.12.
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -1221,10 +1222,9 @@ holds the lock, starts a reset, and checks that `entry()` still returns. It fail
 A node that had not seen the transaction could answer first while another held it. A mined settlement was
 still reported as failed, with an empty hash, and the hash was in no log.
 
-**Change.** Each RPC has its own lookup client, with a 3 s limit, and any that knows the transaction settles
-it. A send that took at least the 10 s limit may have reached a node that alone holds the transaction until
-it is mined, so that search lasts 25 s, two of Hemi's blocks. A send that was answered is looked up once.
-The hash of a failed send is now logged in both cases.
+**Change.** Each RPC has its own lookup client, and any that knows the transaction settles it. A send that
+timed out may have reached a node that alone holds the transaction until it is mined, so that search lasts
+25 s, two of Hemi's blocks. The hash of a failed send is now logged in every case. 0027 widens this.
 
 **Tests.** e2e only: `09-stalled-rpc.test.ts` has the primary stall on both the send and the lookup while
 the fallback answers `null` twice. It fails on hemi.10.
@@ -1245,10 +1245,31 @@ and an e2e case that sends nothing on a failed read and then settles on the retr
 receipt wait. With both RPCs stalling sends, no block mined and each read 2 s late, `/settle` took 92.7 s,
 and the SDK threw at 90 s before the hash came back.
 
-**Change.** `send_transaction` has one budget, the receipt timeout plus 5 s, which covers its reads, sends and
-any lookup. A slow send shortens the receipt wait, and when the budget is gone the transaction is reported as
-pending with its hash. The 60 s timeout leaves 25 s for the checks before the send. **Tests.** A unit test
-for the arithmetic. The stalled case was not re-measured end to end.
+**Change.** `send_transaction` has one budget, the receipt timeout plus 5 s, for its reads and sends. A slow
+send shortens the receipt wait, and when the budget is gone the transaction is reported as pending with its
+hash. The 60 s timeout leaves 25 s for the checks before the send. 0027 brings the search into the budget.
+**Tests.** A unit test for the arithmetic. With no mining and both RPCs stalling sends, the critic measured
+65.2 s at no read delay and 69.6 s at 2 s, against 92.7 s on hemi.10.
+
+### 0027 eip155: search after any failed send no node answered, within the budget
+
+**Problem.** The lookup could still report a mined settlement as failed in three ways, all reproduced on a
+fork against hemi.11:
+
+- A fast failure got one lookup. A gateway can forward a transaction and answer 5xx, or drop the connection,
+  in under 10 s.
+- The 3 s lookup limit hid a transaction from RPCs that answer in more than 3 s but under the 10 s limit.
+- The search did not count against the budget, so a failing send reached 93 s, past the TS SDK's 90 s.
+
+**Change.** Only a node's own JSON-RPC answer skips the search, so the search covers timeouts, dropped
+connections and 5xx. The lookup limit is 8 s. The search ends with the send's budget. A send that fails can
+still run one round of lookups over, up to 16 s with two RPCs, but it has no hash to lose.
+
+**Left as it is.** A gateway that forwards a transaction and then answers with a JSON-RPC error looks like a
+rejection. Telling them apart would mean reading error text. See Limits in the main README.
+
+**Tests.** A unit test for when the search runs. e2e cases: a 502 after forwarding, with `null` from the first
+lookups; and a send that every RPC swallows, which fails and frees its nonce.
 
 ## What these patches do not change
 

@@ -30,7 +30,7 @@ const LOOKUP_BOUND_MS = 45_000;
 const buyer = privateKeyToAccount(BUYER_KEY);
 const asset = usdcAsset(TESTNET);
 
-type Mode = "answer" | "stall" | "forward-then-stall";
+type Mode = "answer" | "stall" | "forward-then-stall" | "swallow-sends";
 
 class ProxyRpc {
   mode: Mode = "answer";
@@ -39,6 +39,9 @@ class ProxyRpc {
   heldSends = 0;
   /** Answers every transaction with a node's rejection, without forwarding it. */
   rejectSends = false;
+  /** Answers every transaction with a gateway's 502, after forwarding it if `forwardBadGateway` is set. */
+  badGatewaySends = false;
+  forwardBadGateway = false;
   /** Never answers eth_getTransactionByHash. */
   stallLookups = false;
   /** Answers this many eth_getTransactionByHash calls with null, as a node that has not seen the transaction. */
@@ -65,7 +68,12 @@ class ProxyRpc {
     if ((isSend && this.rejectSends) || calls.some(call => call.method === this.failingMethod)) {
       return answerWith({ error: { code: -32000, message: "rejected by the test" } });
     }
-    if (this.mode === "stall" || (this.mode === "forward-then-stall" && isSend)) {
+    if (isSend && this.badGatewaySends) {
+      if (this.forwardBadGateway) await forward(body);
+      response.writeHead(502);
+      return response.end("bad gateway");
+    }
+    if (this.mode === "stall" || (isSend && this.mode !== "answer")) {
       if (isSend) this.heldSends++;
       if (this.mode === "forward-then-stall") await forward(body);
       return; // Never answers.
@@ -108,11 +116,13 @@ describe("a stalled RPC", () => {
   let urls: string[] = [];
 
   beforeEach(async () => {
-    primary.mode = "answer";
+    primary.mode = fallback.mode = "answer";
     primary.sends = fallback.sends = primary.heldSends = fallback.heldSends = 0;
     primary.rejectSends = primary.stallLookups = false;
+    primary.badGatewaySends = fallback.badGatewaySends = false;
+    primary.forwardBadGateway = false;
     primary.failingMethod = "";
-    fallback.nullLookups = 0;
+    primary.nullLookups = fallback.nullLookups = 0;
     fallback.delayMs = 150;
     if (urls.length === 0) urls = await Promise.all([primary.start(), fallback.start()]);
     // A new facilitator has no ranking yet; one settlement makes the primary the first choice.
@@ -198,10 +208,12 @@ describe("a stalled RPC", () => {
     primary.rejectSends = true;
     const nonce = await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET]);
     const rejected = await payment();
+    const started = Date.now();
     const res = await settle(rejected.signed, rejected.requirements);
     record("settle whose send a node rejects", res);
     expect(res.body.success).toBe(false);
     // The node's rejection is the answer: no second RPC, and no search for the hash.
+    expect(Date.now() - started).toBeLessThan(5_000);
     expect(primary.sends + fallback.sends).toBe(2);
     expect(await tokenBalance(TESTNET, asset, rejected.payTo)).toBe(0n);
     expect(await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET])).toBe(nonce);
@@ -211,6 +223,36 @@ describe("a stalled RPC", () => {
     const next = await payment();
     const nextRes = await settle(next.signed, next.requirements);
     expect(nextRes.body.success).toBe(true);
+    expect(await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET])).toBe(nonce + 1);
+  });
+
+  it("a gateway's 502 after forwarding is no rejection: a mined settlement is not reported as failed", async () => {
+    primary.badGatewaySends = fallback.badGatewaySends = true;
+    primary.forwardBadGateway = true;
+    primary.nullLookups = fallback.nullLookups = 1;
+    const { requirements, signed, payTo } = await payment();
+
+    const started = Date.now();
+    const res = await settle(signed, requirements);
+    record("settle whose send a gateway answers 502 after forwarding", res);
+    expect(res.body.success).toBe(true);
+    expect(Date.now() - started).toBeLessThan(LOOKUP_BOUND_MS);
+    expect(await tokenBalance(TESTNET, asset, payTo)).toBe(1_000n);
+  });
+
+  it("a send that no RPC answers and no RPC can find: it fails, and the next one reuses the nonce", async () => {
+    primary.mode = fallback.mode = "swallow-sends";
+    const nonce = await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET]);
+    const lost = await payment();
+    const res = await settle(lost.signed, lost.requirements);
+    record("settle whose send every RPC swallows", res);
+    expect(res.body.success).toBe(false);
+    expect(primary.heldSends + fallback.heldSends).toBe(2);
+    expect(await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET])).toBe(nonce);
+
+    primary.mode = fallback.mode = "answer";
+    const next = await payment();
+    expect((await settle(next.signed, next.requirements)).body.success).toBe(true);
     expect(await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET])).toBe(nonce + 1);
   });
 

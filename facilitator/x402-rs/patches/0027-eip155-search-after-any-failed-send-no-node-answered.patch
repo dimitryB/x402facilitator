@@ -1,0 +1,147 @@
+From 6024aa6a8de7f072f2ce4cc60e9323c940ab3a60 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 18:21:59 -0500
+Subject: [PATCH] eip155: search after any failed send no node answered, within
+ the budget
+
+The lookup still reported a mined settlement as failed in three ways.
+
+A fast failure got one lookup. A gateway can forward the transaction
+and answer 5xx, or drop the connection, in under 10 s, and that is no
+more a rejection than a timeout is. Only a node's own JSON-RPC answer
+now skips the search.
+
+The 3 s lookup limit hid a transaction from RPCs that answer in more
+than 3 s but under the 10 s request limit. The limit is now 8 s.
+
+The search did not count against the send's budget, so a failing send
+ran past the SDK's 90 s. It now ends with the budget. A send that fails
+can still run one round of lookups over, but it has no hash to lose.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../x402-chain-eip155/src/chain/provider.rs   | 72 ++++++++++++++-----
+ 1 file changed, 54 insertions(+), 18 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/chain/provider.rs b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+index 6f7f1f0..3f95b2b 100644
+--- a/crates/chains/x402-chain-eip155/src/chain/provider.rs
++++ b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+@@ -104,14 +104,9 @@ impl Eip155ChainProvider {
+ 
+     /// Whether a transaction whose send failed is on its way after all.
+     ///
+-    /// A send that timed out may have reached a node, which may be the only one holding it until it is
+-    /// mined, so the search then lasts two blocks. A send that was answered is looked up once.
+-    async fn find_transaction(&self, tx_hash: TxHash, send_timed_out: bool) -> bool {
+-        let search = if send_timed_out {
+-            LOOKUP_WINDOW
+-        } else {
+-            Duration::ZERO
+-        };
++    /// A send that no node answered may have reached one, which may be the only one holding it until it
++    /// is mined, so the caller can ask for a `search` of a block or two. The RPCs are always asked once.
++    async fn find_transaction(&self, tx_hash: TxHash, search: Duration) -> bool {
+         let deadline = Instant::now() + search;
+         loop {
+             if self.transaction_is_known(tx_hash).await {
+@@ -173,24 +168,42 @@ impl Eip155ChainProvider {
+ /// unreachable after this long: the send moves on, and the failure counts against the RPC's rank.
+ const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+ 
+-/// How long one RPC gets to answer a lookup of a transaction by hash. It is asked again.
+-const LOOKUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
++/// How long one RPC gets to answer a lookup of a transaction by hash. Close to `RPC_REQUEST_TIMEOUT`:
++/// an RPC that is slow but answers must not hide a transaction it knows.
++const LOOKUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+ 
+-/// How long a transaction is looked for after a send that timed out: two of Hemi's 12 s blocks.
++/// How long a transaction is looked for after a send no node answered: two of Hemi's 12 s blocks.
+ const LOOKUP_WINDOW: Duration = Duration::from_secs(25);
+ 
+ /// The pause between lookups of a transaction by hash.
+ const LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
+ 
+-/// What a send may add to the receipt timeout. Sending and waiting for the receipt together stay within
+-/// the receipt timeout plus this, however slow the RPCs are. The 60 s receipt timeout then leaves 25 s
+-/// of the 90 s the TS SDK gives `/settle` for the checks before the send.
++/// What a send may add to the receipt timeout. A transaction that is on its way is answered, with its
++/// hash, within the receipt timeout plus this, which with the 60 s timeout leaves 25 s of the 90 s the TS
++/// SDK gives `/settle` for the checks before the send. A send that fails can run one round of lookups over,
++/// but it has no hash to lose.
+ const SEND_ALLOWANCE: Duration = Duration::from_secs(5);
+ 
+ /// How long to wait for a receipt when `spent` of the send's time has gone. Zero reports the transaction
+ /// as pending at once.
+ fn receipt_wait(receipt_timeout: Duration, spent: Duration) -> Duration {
+-    receipt_timeout.min((receipt_timeout + SEND_ALLOWANCE).saturating_sub(spent))
++    receipt_timeout.min(time_left(receipt_timeout, spent))
++}
++
++/// How much of a send's whole budget is left when `spent` has gone.
++fn time_left(receipt_timeout: Duration, spent: Duration) -> Duration {
++    (receipt_timeout + SEND_ALLOWANCE).saturating_sub(spent)
++}
++
++/// How long to search for a transaction whose send failed. A node's own JSON-RPC answer is a rejection.
++/// Anything else says nothing about whether the transaction left: a timeout, a dropped connection, or a
++/// gateway's 5xx after it forwarded the transaction. The search ends with the send's budget.
++fn lookup_search(timed_out: bool, answered_by_a_node: bool, time_left: Duration) -> Duration {
++    if timed_out || !answered_by_a_node {
++        LOOKUP_WINDOW.min(time_left)
++    } else {
++        Duration::ZERO
++    }
+ }
+ 
+ /// An HTTP transport whose requests end after `timeout`.
+@@ -441,8 +454,15 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+             // A failed send proves nothing if an RPC took the transaction and then stalled: the next RPC
+             // rejects the copy while the first one's is mined. A node that knows the hash settles it.
+             Err(e) => {
+-                let send_timed_out = send_started.elapsed() >= RPC_REQUEST_TIMEOUT;
+-                if self.find_transaction(tx_hash, send_timed_out).await {
++                let search = lookup_search(
++                    send_started.elapsed() >= RPC_REQUEST_TIMEOUT,
++                    e.as_error_resp().is_some(),
++                    time_left(
++                        Duration::from_secs(self.receipt_timeout_secs),
++                        started.elapsed(),
++                    ),
++                );
++                if self.find_transaction(tx_hash, search).await {
+                     #[cfg(feature = "telemetry")]
+                     tracing::warn!(tx = %tx_hash, error = %e, "Send failed, but an RPC has the transaction");
+                     PendingTransactionBuilder::new(self.inner.root().clone(), tx_hash)
+@@ -653,7 +673,10 @@ pub async fn assert_contracts_exists<P: Provider>(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{fallback_layer, fees_with_tip_floor, is_method_not_found, receipt_wait, rpc_http};
++    use super::{
++        LOOKUP_WINDOW, fallback_layer, fees_with_tip_floor, is_method_not_found, lookup_search,
++        receipt_wait, rpc_http,
++    };
+     use alloy_provider::mock::{Asserter, MockTransport};
+     use alloy_rpc_client::RpcClient;
+     use alloy_transport::{TransportError, TransportErrorKind, TransportFut};
+@@ -759,6 +782,19 @@ mod tests {
+         assert_eq!(live.calls(), 1);
+     }
+ 
++    #[test]
++    fn only_a_nodes_own_answer_skips_the_search_for_a_failed_send() {
++        let plenty = Duration::from_secs(60);
++        assert_eq!(lookup_search(false, true, plenty), Duration::ZERO);
++        assert_eq!(lookup_search(false, false, plenty), LOOKUP_WINDOW);
++        assert_eq!(lookup_search(true, false, plenty), LOOKUP_WINDOW);
++        // A node answered, but only after an earlier RPC had timed out with the transaction.
++        assert_eq!(lookup_search(true, true, plenty), LOOKUP_WINDOW);
++        // The search ends with the budget.
++        let little = Duration::from_secs(4);
++        assert_eq!(lookup_search(true, false, little), little);
++    }
++
+     #[test]
+     fn a_slow_send_shortens_the_receipt_wait() {
+         let receipt_timeout = Duration::from_secs(60);
