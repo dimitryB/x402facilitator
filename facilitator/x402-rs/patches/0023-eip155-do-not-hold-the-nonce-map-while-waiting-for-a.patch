@@ -1,0 +1,82 @@
+From 46edeab5576f709c5b46960987876a489ab2483a Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 17:04:14 -0500
+Subject: [PATCH 23/26] eip155: do not hold the nonce map while waiting for a
+ nonce lock
+
+reset_nonce kept a DashMap read guard across nonce_lock.lock().await,
+while get_next_nonce calls entry(), which parks the OS thread until the
+shard is free. Under a stream of rejected sends every tokio worker ends
+up parked there, with nothing left to drive I/O. The whole process
+freezes: /supported stops answering, the container still shows running,
+and it stays frozen after the RPCs recover. On four CPUs, 10 rejected
+settlements a second froze hemi.10 in 5 of 5 runs.
+
+Clone the Arc out of the map first, as get_next_nonce already does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/chain/pending_nonce_manager.rs        | 46 ++++++++++++++++++-
+ 1 file changed, 45 insertions(+), 1 deletion(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/chain/pending_nonce_manager.rs b/crates/chains/x402-chain-eip155/src/chain/pending_nonce_manager.rs
+index 529d99e..effae60 100644
+--- a/crates/chains/x402-chain-eip155/src/chain/pending_nonce_manager.rs
++++ b/crates/chains/x402-chain-eip155/src/chain/pending_nonce_manager.rs
+@@ -84,7 +84,12 @@ impl PendingNonceManager {
+     /// By resetting to the sentinel value, the next call to `get_next_nonce` will query
+     /// the RPC provider using `.pending()`, which includes mempool transactions.
+     pub async fn reset_nonce(&self, address: Address) {
+-        if let Some(nonce_lock) = self.nonces.get(&address) {
++        // Clone the `Arc` first: a map guard held across the await below would block the map.
++        let nonce_lock = self
++            .nonces
++            .get(&address)
++            .map(|entry| Arc::clone(entry.value()));
++        if let Some(nonce_lock) = nonce_lock {
+             let mut nonce = nonce_lock.lock().await;
+             *nonce = u64::MAX; // NONE sentinel - will trigger fresh query
+             #[cfg(feature = "telemetry")]
+@@ -92,3 +97,42 @@ impl PendingNonceManager {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::mpsc;
++    use std::time::Duration;
++
++    // A reset waits for the address's nonce lock. It must not hold the map while it does: `entry` in
++    // `get_next_nonce` then parks an OS thread, and once every runtime worker is parked nothing can
++    // ever release the lock.
++    #[tokio::test]
++    async fn a_reset_waiting_for_the_nonce_lock_does_not_block_the_map() {
++        let manager = PendingNonceManager::default();
++        let address = Address::repeat_byte(1);
++        let lock = Arc::new(Mutex::new(7));
++        manager.nonces.insert(address, Arc::clone(&lock));
++        let held = lock.lock().await;
++
++        let reset = tokio::spawn({
++            let manager = manager.clone();
++            async move { manager.reset_nonce(address).await }
++        });
++        tokio::task::yield_now().await; // The reset now waits for the lock.
++
++        let (done, entered) = mpsc::channel();
++        std::thread::spawn({
++            let manager = manager.clone();
++            move || {
++                drop(manager.nonces.entry(address).or_default());
++                done.send(()).unwrap();
++            }
++        });
++        assert!(entered.recv_timeout(Duration::from_secs(5)).is_ok());
++
++        drop(held);
++        reset.await.unwrap();
++        assert_eq!(*lock.lock().await, u64::MAX);
++    }
++}

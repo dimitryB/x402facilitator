@@ -6,6 +6,7 @@
  * losing rank, so it is still the first choice for the send. Patch 0022 bounds every request. The second
  * case is the reason a timeout alone is not enough: an RPC can forward the transaction and only then
  * stall. The next RPC then rejects the copy, and the settlement must still be reported from its hash.
+ * The later cases cover the ways that lookup and the nonce around it can go wrong (D-020, D-021).
  *
  * Each RPC here is a proxy in front of the testnet fork. The fallback answers later than the primary, so
  * the primary wins every read and ranks first.
@@ -24,6 +25,8 @@ import { freshAddress, requirementsFor, signPayment } from "../lib/payments";
 
 /** RPC_REQUEST_TIMEOUT in patch 0022, plus room for the fallback and a block. */
 const SEND_BOUND_MS = 20_000;
+/** The same, plus a search for the hash: patch 0024 asks each RPC, for up to two blocks. */
+const LOOKUP_BOUND_MS = 45_000;
 const buyer = privateKeyToAccount(BUYER_KEY);
 const asset = usdcAsset(TESTNET);
 
@@ -34,13 +37,34 @@ class ProxyRpc {
   delayMs = 0;
   sends = 0;
   heldSends = 0;
+  /** Answers every transaction with a node's rejection, without forwarding it. */
+  rejectSends = false;
+  /** Never answers eth_getTransactionByHash. */
+  stallLookups = false;
+  /** Answers this many eth_getTransactionByHash calls with null, as a node that has not seen the transaction. */
+  nullLookups = 0;
+  /** Answers this method with a JSON-RPC error, as an RPC can while it recovers. */
+  failingMethod = "";
   private readonly server: Server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(chunk as Buffer);
     const body = Buffer.concat(chunks).toString();
-    const calls = [JSON.parse(body)].flat() as { method: string }[];
+    const calls = [JSON.parse(body)].flat() as { id: number; method: string }[];
     const isSend = calls.some(call => call.method === "eth_sendRawTransaction");
+    const isLookup = calls.some(call => call.method === "eth_getTransactionByHash");
     if (isSend) this.sends++;
+    const answerWith = (fields: object) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: calls[0]!.id, ...fields }));
+    };
+    if (isLookup && this.stallLookups) return;
+    if (isLookup && this.nullLookups > 0) {
+      this.nullLookups--;
+      return answerWith({ result: null });
+    }
+    if ((isSend && this.rejectSends) || calls.some(call => call.method === this.failingMethod)) {
+      return answerWith({ error: { code: -32000, message: "rejected by the test" } });
+    }
     if (this.mode === "stall" || (this.mode === "forward-then-stall" && isSend)) {
       if (isSend) this.heldSends++;
       if (this.mode === "forward-then-stall") await forward(body);
@@ -86,11 +110,14 @@ describe("a stalled RPC", () => {
   beforeEach(async () => {
     primary.mode = "answer";
     primary.sends = fallback.sends = primary.heldSends = fallback.heldSends = 0;
+    primary.rejectSends = primary.stallLookups = false;
+    primary.failingMethod = "";
+    fallback.nullLookups = 0;
     fallback.delayMs = 150;
     if (urls.length === 0) urls = await Promise.all([primary.start(), fallback.start()]);
     // A new facilitator has no ranking yet; one settlement makes the primary the first choice.
     await restartFacilitator({ HEMI_TESTNET_RPC_PRIMARY: urls[0]!, HEMI_TESTNET_RPC_FALLBACK: urls[1]! });
-    await ensurePermit2Approval(TESTNET, buyer, asset, 10_000n);
+    await ensurePermit2Approval(TESTNET, buyer, asset, 100_000n);
     const first = await payment();
     expect((await settle(first.signed, first.requirements)).body.success).toBe(true);
     expect(primary.sends, "the primary must be the first choice for this test to mean anything").toBe(1);
@@ -149,5 +176,58 @@ describe("a stalled RPC", () => {
     expect(receipt.status).toBe("success");
     expect(await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET])).toBe(nonce + 1);
     expect(await tokenBalance(TESTNET, asset, payTo)).toBe(1_000n);
+  });
+
+  it("a stalled RPC and a node that has not seen the transaction: any RPC that knows it counts", async () => {
+    primary.mode = "forward-then-stall";
+    primary.stallLookups = true;
+    // A shared lookup would take this first null as the answer.
+    fallback.nullLookups = 2;
+    const { requirements, signed, payTo } = await payment();
+
+    const started = Date.now();
+    const res = await settle(signed, requirements);
+    record("settle whose hash the first answer does not know", res);
+    expect(res.body.success).toBe(true);
+    expect(Date.now() - started).toBeLessThan(LOOKUP_BOUND_MS);
+    expect(fallback.nullLookups).toBe(0);
+    expect(await tokenBalance(TESTNET, asset, payTo)).toBe(1_000n);
+  });
+
+  it("a rejected send: the settlement fails, and the next one reuses the nonce", async () => {
+    primary.rejectSends = true;
+    const nonce = await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET]);
+    const rejected = await payment();
+    const res = await settle(rejected.signed, rejected.requirements);
+    record("settle whose send a node rejects", res);
+    expect(res.body.success).toBe(false);
+    // The node's rejection is the answer: no second RPC, and no search for the hash.
+    expect(primary.sends + fallback.sends).toBe(2);
+    expect(await tokenBalance(TESTNET, asset, rejected.payTo)).toBe(0n);
+    expect(await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET])).toBe(nonce);
+
+    // A kept nonce would put this transaction behind a gap, and it would never be mined.
+    primary.rejectSends = false;
+    const next = await payment();
+    const nextRes = await settle(next.signed, next.requirements);
+    expect(nextRes.body.success).toBe(true);
+    expect(await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET])).toBe(nonce + 1);
+  });
+
+  it("a failed tip read: nothing is sent, because the estimate alone can be a 1-wei tip", async () => {
+    primary.failingMethod = "eth_maxPriorityFeePerGas";
+    const sends = primary.sends + fallback.sends;
+    const nonce = await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET]);
+    const failed = await payment();
+    const res = await settle(failed.signed, failed.requirements);
+    record("settle whose tip read fails", res);
+    expect(res.body.success).toBe(false);
+    expect(primary.sends + fallback.sends).toBe(sends);
+    expect(await nonceOf(TESTNET, FACILITATOR_SIGNER[TESTNET])).toBe(nonce);
+
+    primary.failingMethod = "";
+    const retried = await settle(failed.signed, failed.requirements);
+    expect(retried.body.success).toBe(true);
+    expect(await tokenBalance(TESTNET, asset, failed.payTo)).toBe(1_000n);
   });
 });

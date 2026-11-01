@@ -5,7 +5,7 @@ The facilitator image is x402-rs at commit `e75adda8a0e3cf23db446883ba91b88bbab2
 spec's error shapes, and no setting in `config.json` changes that. The Definition of done requires those
 shapes (a failed signature and an insufficient balance must "return the spec's error shapes").
 
-Each patch is small, does one thing, has unit tests and is meant to go upstream. None changes to whom or
+Each patch is small, does one thing, has unit tests (0024 has e2e tests only) and is meant to go upstream. None changes to whom or
 how a payment is settled. What they change:
 
 - which error is returned, and with which fields (all patches);
@@ -19,8 +19,9 @@ how a payment is settled. What they change:
   a settlement runs to its end even if the client disconnects, with every broadcast hash logged (0015),
   and a success nobody received is kept for the client's retry (0016); each settle owns its record, so
   no other settle can overwrite or delete it, and a running settle's record is never evicted (0020);
-- where a transaction goes: to one RPC at a time, moving on only if that RPC cannot be reached, instead
-  of a copy to every RPC (0021);
+- where a transaction goes: to one RPC at a time, moving on only if that RPC cannot be reached or does not
+  answer within 10 s, instead of a copy to every RPC (0021, 0022);
+- when a send counts as failed: only once no RPC knows the transaction (0022, 0024);
 - what is sent at all: an EIP-6492 wallet deployment through Multicall3 is only sent after the EIP-6492
   validator accepted the signature, and a wrapper around the payer's own signature is never sent (0012).
 
@@ -29,7 +30,8 @@ how a payment is settled. What they change:
   [HTTP status codes](#http-status-codes)).
 - the fees a settlement pays: on an EIP-1559 chain the tip is at least the node's suggested priority fee,
   so a settlement sent after a run of tip-less blocks is still mined where the sequencer has a minimum
-  tip, as Hemi testnet's does (0019). This is the one patch about liveness rather than error shapes.
+  tip, as Hemi testnet's does (0019), and a settlement whose tip cannot be read is not sent (0025). These,
+  and 0021 to 0026, are about liveness rather than error shapes.
 
 Spec references are to `x402-foundation/x402` at `e4a0868`:
 
@@ -61,6 +63,10 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0020](patches/0020-eip155-a-settlement-owns-its-record-until-it-ends.patch) | a flood of settles evicts a running settle's record; its guard then overwrites or deletes the record of a later settle of that authorization, so a retry can get success with another request's hash | §5.3.2, §9 `invalid_transaction_state` |
 | [0021](patches/0021-eip155-broadcast-a-transaction-to-one-RPC-at-a-time.patch) | with two RPCs a transaction is broadcast twice, and the rejection of the second copy can make a mined settlement look failed: the payer is charged and the seller refuses service | §5.3.2, §9 `invalid_transaction_state` |
 | [0022](patches/0022-eip155-a-stalled-RPC-can-neither-hold-a-settlement-n.patch) | a stalled best-ranked RPC holds a settlement with no limit since 0021, and an RPC that forwards a transaction and then stalls would make a mined settlement look failed | none: liveness (§9 `settlement_pending`) |
+| [0023](patches/0023-eip155-do-not-hold-the-nonce-map-while-waiting-for-a.patch) | rejected sends under load can freeze the whole process: `reset_nonce` holds a map guard across an await | none: liveness |
+| [0024](patches/0024-eip155-ask-every-RPC-for-a-failed-send-s-hash-for-tw.patch) | a lookup after a failed send takes the first answer, and `null` is one, so a mined settlement can still be reported as failed | none: §5.3.2 hash |
+| [0025](patches/0025-eip155-do-not-send-a-settlement-whose-tip-floor-coul.patch) | a failed tip read removes 0019's floor, and the settlement goes out at 1 wei | none: liveness |
+| [0026](patches/0026-eip155-bound-a-send-and-its-receipt-wait-together.patch) | a slow send plus the receipt wait can outlast the TS SDK's 90 s, and the hash is lost to the caller | §5.3.2 hash |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -238,7 +244,7 @@ payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an a
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.10` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.11` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -254,7 +260,7 @@ silicon), with the base images already pulled:
   patches.
 - `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
   113 s for hemi.3; 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches); 113 s for hemi.5
-  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 143 s for hemi.9; 118 s for hemi.10.
+  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11.
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -885,8 +891,9 @@ this patch; a verdict, 200, since 0018).
     hash when the receipt does not arrive (`Transaction receipt not available; settlement pending`).
   - `/verify` stays in the request's future: it sends nothing.
 - **Timeouts in front of the facilitator.** Any proxy, load balancer or client timeout on `/settle` should
-  exceed `receipt_timeout_secs` (60 s in `facilitator/config*.json`), plus the few seconds the checks
-  before the broadcast take. With a shorter timeout the caller loses the response, and with it the hash,
+  be at least 90 s, the TS SDK's default. Sending and waiting take up to `receipt_timeout_secs` (60 s in
+  `facilitator/config*.json`) plus 5 s (0026), and the checks before the broadcast come on top. With a
+  shorter timeout the caller loses the response, and with it the hash,
   although the settlement completes. The hash is then in the facilitator's log. A retry of the same request
   is answered from it once the receipt wait has ended.
 - **Limits.**
@@ -1171,11 +1178,11 @@ the receipt timeout because the brief expects stalled RPCs, so this is an expect
 1. Every RPC request ends after 10 s (`RPC_REQUEST_TIMEOUT`). That counts as a transport error, so the send
    moves on and the failure counts against the RPC's rank. alloy scores the last ten results and latency,
    so the rank flips after one or two failures, or three if the other RPC averages over a second. Until
-   then each settlement pays about 10 s more. With a chain's two RPCs, the send plus the 60 s receipt wait
-   stays under the SDK's 90 s.
+   then each settlement pays about 10 s more. That holds for an RPC that stalls everything. One that stalls
+   only sends keeps winning reads and keeps its rank.
 2. The transaction is signed before the send, so its hash is known. If a send fails, `send_transaction`
-   asks the RPCs for that hash. If one knows it, the settlement carries on from the hash and the nonce is
-   kept. If none does, the send failed as before. Without this, an RPC that forwards the transaction and
+   asks the RPCs for that hash, which 0024 makes a question to each one. If one knows it, the settlement
+   carries on from the hash and the nonce is kept. If none does, the send failed as before. Without this, an RPC that forwards the transaction and
    then stalls would bring back what 0021 removed: the next RPC rejects the copy, and a mined settlement is
    reported as failed. The lookup needs no error text, and it runs only after a failed send.
 
@@ -1196,6 +1203,52 @@ run had a stalled RPC, so the timeout and the lookup are proven on forks only.
 >
 > `Http::new` has no request timeout, and alloy's sequential fallback moves on only on a transport error, so a node that accepts the connection and never answers holds `eth_sendRawTransaction` with no limit. This PR gives each RPC request a 10 s timeout. A timeout makes the send ambiguous, since the node may have forwarded the transaction and the next RPC will then reject the copy, so the transaction is now signed before the send and a failed send looks the hash up before it is reported as failed. Only relevant together with a one-RPC-at-a-time send.
 </details>
+
+### 0023 eip155: do not hold the nonce map while waiting for a nonce lock
+
+**Problem.** `reset_nonce` kept a DashMap read guard across `nonce_lock.lock().await`, and `get_next_nonce`
+calls `entry()`, which parks the OS thread until the shard is free. Under a stream of rejected sends every
+tokio worker ends up parked, with nothing left to drive I/O. `/supported` stops answering, the container
+still shows `running`, and it stays frozen after the RPCs recover. On four CPUs, 10 rejected settlements a
+second froze hemi.10 in 5 of 5 runs, and hemi.9 in 3 of 4. This is upstream code, not a regression.
+
+**Change.** Clone the `Arc` out of the map first, as `get_next_nonce` already does. **Tests.** A unit test
+holds the lock, starts a reset, and checks that `entry()` still returns. It fails without the change.
+
+### 0024 eip155: ask every RPC for a failed send's hash, for two blocks if it timed out
+
+**Problem.** 0022's lookup went through the fallback layer, which takes the first answer, and `null` is one.
+A node that had not seen the transaction could answer first while another held it. A mined settlement was
+still reported as failed, with an empty hash, and the hash was in no log.
+
+**Change.** Each RPC has its own lookup client, with a 3 s limit, and any that knows the transaction settles
+it. A send that took at least the 10 s limit may have reached a node that alone holds the transaction until
+it is mined, so that search lasts 25 s, two of Hemi's blocks. A send that was answered is looked up once.
+The hash of a failed send is now logged in both cases.
+
+**Tests.** e2e only: `09-stalled-rpc.test.ts` has the primary stall on both the send and the lookup while
+the fallback answers `null` twice. It fails on hemi.10.
+
+### 0025 eip155: do not send a settlement whose tip floor could not be read
+
+**Problem.** `suggested_tip.ok()` turned any failed read into "no suggestion", so an RPC that answered that
+read with a JSON-RPC error sent the settlement out at alloy's 1-wei fallback. On Hemi testnet that
+transaction is never mined, and its kept nonce stops settlement on the chain.
+
+**Change.** Only -32601, a node without the method, keeps the estimate. Any other failure fails the
+settlement before anything is sent and before a nonce is taken. **Tests.** A unit test for the error check,
+and an e2e case that sends nothing on a failed read and then settles on the retry. It fails on hemi.10.
+
+### 0026 eip155: bound a send and its receipt wait together
+
+**Problem.** 0022 claimed a settlement stays under the TS SDK's 90 s, but counted only the sends and the
+receipt wait. With both RPCs stalling sends, no block mined and each read 2 s late, `/settle` took 92.7 s,
+and the SDK threw at 90 s before the hash came back.
+
+**Change.** `send_transaction` has one budget, the receipt timeout plus 5 s, which covers its reads, sends and
+any lookup. A slow send shortens the receipt wait, and when the budget is gone the transaction is reported as
+pending with its hash. The 60 s timeout leaves 25 s for the checks before the send. **Tests.** A unit test
+for the arithmetic. The stalled case was not re-measured end to end.
 
 ## What these patches do not change
 

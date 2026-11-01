@@ -1,0 +1,91 @@
+From 3877e0799a4c92b1f2f9e1dce22b05bbe7088483 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 17:05:18 -0500
+Subject: [PATCH 25/26] eip155: do not send a settlement whose tip floor could
+ not be read
+
+A failed eth_maxPriorityFeePerGas read counted as "no suggestion", so
+after a run of tip-less blocks the settlement went out at alloy's 1-wei
+tip. An RPC that answers that read with a JSON-RPC error, or that
+stalls on both RPCs, was enough. Hemi testnet's sequencer does not mine
+such a transaction, and its kept nonce stops settlement on the chain.
+
+Only -32601, a node without the method, keeps the estimate now. Any
+other failure fails the settlement before anything is sent and before
+a nonce is taken, which costs a retry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../x402-chain-eip155/src/chain/provider.rs   | 35 +++++++++++++++++--
+ 1 file changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/chain/provider.rs b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+index ef8f1a4..dd923ac 100644
+--- a/crates/chains/x402-chain-eip155/src/chain/provider.rs
++++ b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+@@ -382,11 +382,18 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+             #[cfg(not(feature = "telemetry"))]
+             let (fees, suggested_tip) = fees_fut.await;
+             let fees = fees?;
+-            // A node without eth_maxPriorityFeePerGas leaves the estimate as it was.
++            // Only a node without the method leaves the estimate as it was. A failed read must not:
++            // the estimate can be a 1-wei tip, and a transaction that is never mined holds its nonce.
++            // Nothing has been sent, and no nonce taken, so failing here costs a retry.
++            let suggested_tip = match suggested_tip {
++                Ok(tip) => Some(tip),
++                Err(e) if is_method_not_found(&e) => None,
++                Err(e) => return Err(e.into()),
++            };
+             let (max_fee, tip) = fees_with_tip_floor(
+                 fees.max_fee_per_gas,
+                 fees.max_priority_fee_per_gas,
+-                suggested_tip.ok(),
++                suggested_tip,
+             );
+             txr.set_max_priority_fee_per_gas(tip);
+             txr.set_max_fee_per_gas(max_fee);
+@@ -591,6 +598,13 @@ impl<T: Eip155MetaTransactionProvider> Eip155MetaTransactionProvider for Arc<T>
+     }
+ }
+ 
++/// Whether an RPC answered that it does not have the method (JSON-RPC -32601).
++fn is_method_not_found(error: &TransportError) -> bool {
++    error
++        .as_error_resp()
++        .is_some_and(|response| response.code == -32601)
++}
++
+ /// EIP-1559 fees from an estimate, with the node's suggested tip as a floor for the tip.
+ ///
+ /// Returns `(max_fee_per_gas, max_priority_fee_per_gas)`. The estimate's max fee is its base-fee
+@@ -625,7 +639,7 @@ pub async fn assert_contracts_exists<P: Provider>(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{fallback_layer, fees_with_tip_floor, rpc_http};
++    use super::{fallback_layer, fees_with_tip_floor, is_method_not_found, rpc_http};
+     use alloy_provider::mock::{Asserter, MockTransport};
+     use alloy_rpc_client::RpcClient;
+     use alloy_transport::{TransportError, TransportErrorKind, TransportFut};
+@@ -731,6 +745,21 @@ mod tests {
+         assert_eq!(live.calls(), 1);
+     }
+ 
++    #[tokio::test]
++    async fn only_a_missing_method_counts_as_a_node_without_it() {
++        let answers = Asserter::new();
++        let method = serde_json::from_str(r#"{"code":-32601,"message":"no such method"}"#).unwrap();
++        answers.push_failure(method);
++        answers.push_failure_msg("try later");
++        let client = RpcClient::new(MockTransport::new(answers.clone()), false);
++        let missing = client.request_noparams::<String>("eth_maxPriorityFeePerGas");
++        assert!(is_method_not_found(&missing.await.unwrap_err()));
++        let failed = client.request_noparams::<String>("eth_maxPriorityFeePerGas");
++        assert!(!is_method_not_found(&failed.await.unwrap_err()));
++        let timed_out = TransportErrorKind::custom_str("timed out");
++        assert!(!is_method_not_found(&timed_out));
++    }
++
+     #[tokio::test]
+     async fn a_request_to_an_rpc_that_never_answers_ends() {
+         // Connections queue on the listener, and nothing ever reads them.

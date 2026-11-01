@@ -483,7 +483,7 @@ Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return 
 
 The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
 
-No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.10` (hemi.7 until patch 0019, D-018; hemi.8 until patches 0020 and 0021, D-019; hemi.9 until patch 0022, D-020). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.11` (hemi.7 until patch 0019, D-018; hemi.8 until patches 0020 and 0021, D-019; hemi.9 until patch 0022, D-020; hemi.10 until patches 0023 to 0026, D-021). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
 
 | Patch | Change |
 |------|------|
@@ -509,6 +509,10 @@ No config setting changes any of this, so the facilitator is now built from `fac
 | 0020 | A settle owns its record: no other settle can overwrite or delete it. A running settle's record neither expires nor is evicted, and the 10,000 cap applies to kept records only (hemi.9, D-019) |
 | 0021 | `eth_sendRawTransaction` goes to one RPC at a time, moving on only if that RPC cannot be reached (hemi.9, D-019) |
 | 0022 | Every RPC request ends after 10 s, and a failed send is looked up by its hash before it counts as failed (hemi.10, D-020) |
+| 0023 | `reset_nonce` no longer holds the nonce map across an await, which could freeze the process (hemi.11, D-021) |
+| 0024 | A failed send's hash is looked up on each RPC, for two blocks if the send timed out, and is logged (hemi.11, D-021) |
+| 0025 | A settlement whose tip cannot be read fails before anything is sent (hemi.11, D-021) |
+| 0026 | A send and its receipt wait share one budget, the receipt timeout plus 5 s (hemi.11, D-021) |
 
 hemi.1 had patches 0001 to 0005. A fresh-context critic then found three more gaps:
 
@@ -787,7 +791,7 @@ A failure does not always flip the rank at once, which my first version of the t
 | 2 | 0.854 | 0.5 s | 0.900 |
 | 3 | 0.784 | 1.0 s | 0.850 |
 
-So a stalled best-ranked RPC costs each settlement about 10 s until it loses rank, usually after one or two failures, or three if the other RPC averages over a second. That cost is bounded. With both RPCs stalling, the send takes 20 s, and with the 60 s receipt wait that stays under the TS SDK's 90 s.
+So an RPC that stalls everything costs each settlement about 10 s until it loses rank, usually after one or two failures, or three if the other RPC averages over a second. This entry first claimed that for any stalled RPC, and that a settlement stays under the TS SDK's 90 s. D-021 shows that neither held.
 
 Rejected alternatives:
 
@@ -804,6 +808,44 @@ The critic's other findings were false or missing statements, now corrected:
 Verified on 2026-11-01 against a no-cache hemi.10 build (118 s, all 22 patches): `cargo fmt`, `clippy -D warnings` and the unit tests pass; the e2e suite passed, 12 files and 106 tests in 195 s; `forge test` passed 17; `buyer/demo-fork.sh` settled all four payments.
 
 Patch 0022 changes how every transaction is sent, so both assets were then paid live on Hemi testnet through hemi.10: USDC.e in `0x97ecdf92a57a57ca59ebcbef0da4286edfda040811f128051297c407e54c9698` and hBTC in `0xfafc0f4573cb6917a07bd73094eae20a45f310eeb0a567a68962758ec51c9563`. The signer's nonce rose by exactly two, and both broadcasts left about 1.5 s after `/settle` began. Neither live run had a stalled RPC, so the bound and the hash lookup are proven on forks only.
+
+## D-021. Tenth critic pass: a freeze, a lookup race, a lost tip floor and a false time bound
+
+All eight Definition-of-done items passed, as in the ninth pass, but the review of hemi.10 found five major issues. Four were in the code. Each was reproduced on a local fork, and each fix has a test that fails without it, except 0026, which has a unit test only.
+
+| Issue | Failure on hemi.10 | Fix |
+|------|------|------|
+| Process freeze | 10 rejected settlements a second froze the process in 5 of 5 runs, and hemi.9 in 3 of 4. All workers were parked, and it stayed frozen after the RPCs recovered | 0023 |
+| Lookup race | With the primary stalled and the fallback answering `null`, a mined settlement was reported as `invalid_transaction_state`, with no hash | 0024 |
+| Tip floor lost | With the tip read failing, the settlement went out at 1 wei | 0025 |
+| 90 s bound | With both RPCs stalling sends, no block mined and reads 2 s late, `/settle` took 92.7 s, and the SDK threw at 90 s | 0026 |
+| Rank | An RPC that stalled only sends kept its rank: 8 of 8 settlements went to it first, each about 10.5 s | documented |
+
+The rank issue costs latency, not funds. Demoting an RPC for a fixed time after a failed send would need a change to alloy's fallback layer, so it is a listed limit.
+
+The freeze is upstream code that the patches left unchanged. It needs fast rejections under load, and a stalled send does not trigger it.
+
+```
+# 0023's test on the old reset_nonce
+test chain::pending_nonce_manager::tests::a_reset_waiting_for_the_nonce_lock_does_not_block_the_map ... FAILED
+# tests/e2e/09-stalled-rpc.test.ts on hemi.10
+ × a stalled RPC and a node that has not seen the transaction: any RPC that knows it counts
+ × a failed tip read: nothing is sent, because the estimate alone can be a 1-wei tip
+```
+
+The rejected-send case in that file also covers what the critic found untested: without the nonce reset, the next settlement would queue behind a gap.
+
+Choices made:
+
+- **A failed tip read fails the settlement.** The alternative, the last good suggestion, needs state and can go stale. Nothing has been sent at that point, so a failure costs a retry.
+- **Only a send that timed out gets the long search.** A node that answered has either rejected the transaction or taken it. The test is the send's duration against the 10 s limit, because the fallback layer reports only the last error. So a fast rejection never waits.
+- **The time budget starts at `send_transaction`, not at `/settle`.** Threading a deadline from the handler would touch every caller. The 25 s left over for checks before the send is about two reads at the 10 s limit.
+
+Still open, and listed under Limits in the README: an RPC that answers JSON-RPC errors defeats failover, a transaction dropped by its one node stops settlement until a restart, and a send that no RPC can show within the search still counts as failed.
+
+Verified on 2026-11-01 against a no-cache hemi.11 build (247 s, all 26 patches): `cargo fmt`, `clippy -D warnings` and the unit tests pass at each of the four new commits; the e2e suite passed, 12 files and 109 tests in 213 s; `forge test` passed 17; `buyer/demo-fork.sh` settled all four payments. Both assets then settled live on Hemi testnet through hemi.11: USDC.e in `0xf72346bea38dd423109a786e65969682c5d85780297d26dcb821fab059d06bb8` and hBTC in `0x42ec5319355db2357a66c27964854cfa2bff1cf4f8b186caa6a274ae9780eac2`, about 8.9 s each. The signer's nonce rose by exactly two. No live run had a stalled RPC or a failed send, so these fixes are proven on forks only.
+
+The critic also noted that a restart after a nonce gap can give one more failed settlement, with HTTP 500 "nonce too low", because the queued transaction mines and overtakes the cached nonce. The next settlement then succeeds.
 
 ## Pre-spike context: what the reference code requires
 
