@@ -1072,8 +1072,8 @@ e2e: every rejection test now expects 200 (`tests/lib/spec.ts` `STATUS_VERDICT`)
 default estimate takes the median of the non-zero 20th-percentile tips of the last ten blocks and falls
 back to a 1-wei tip when there are none (`EIP1559_MIN_PRIORITY_FEE`, alloy-provider 2.0.5
 `utils.rs`). Hemi's blocks are often empty apart from the L1-info deposit, whose tip is 0, so the
-fallback is common. Hemi testnet's sequencer does not mine a transaction tipping below 0.001 gwei
-(1,000,000 wei). Hemi mainnet's mines tips as low as 21 wei, so there the floor is a precaution that
+fallback is common. Hemi testnet's sequencer did not mine a 1-wei tip, while a tip of 0.001 gwei
+(1,000,000 wei) was mined in the next block. Hemi mainnet's mines tips as low as 21 wei, so there the floor is a precaution that
 costs about 1e-7 ETH per settlement. On testnet, such a settlement is broadcast, its receipt times out, the buyer gets
 `settlement_pending`, and since 0006 keeps the nonce, every later settlement queues behind it.
 
@@ -1092,15 +1092,15 @@ on each fork, checks that the fee history has no tips and that anvil suggests 1 
 reads the transaction: its tip must be at least the suggestion. Against hemi.7 it fails with a 1-wei tip
 on both forks.
 
-**Live.** The first live Hemi testnet settlement, `0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5`, tipped 1,000,000 wei. It does
-not demonstrate the patch: the fee history held 1,000,000-wei tips from the deployment and the buyer's
-approval, so alloy's estimate was the same (D-018).
+**Live.** Neither live Hemi testnet settlement demonstrates the patch. Before the USDC.e one, the fee
+history held 1,000,000-wei tips from the deployment and the buyer's approval, so alloy's estimate was the
+same. Before the hBTC one, alloy's estimate was 999,997 wei, and the floor raised it by 3 wei (D-018).
 
 <details><summary>Upstream issue / PR draft</summary>
 
 > **Title:** Settlements on quiet OP Stack chains tip 1 wei and are never mined; use eth_maxPriorityFeePerGas as a floor
 >
-> On EIP-1559 chains the facilitator relies on alloy's default fee estimate. When the last ten blocks carry no non-zero tips, which is common on quiet L2s where most blocks only hold the L1-info deposit, alloy falls back to a 1-wei tip. A sequencer with a minimum tip does not include such a transaction, so the settlement is never mined, the receipt times out, and the signer's nonce is stuck. This PR reads `eth_maxPriorityFeePerGas` alongside the estimate and uses it as a floor for the tip, keeping the estimate's base-fee headroom in the max fee. Nodes without the method keep the old behaviour. Observed on Hemi testnet (chain 743111), whose sequencer mines no tip below 1000000 wei, the value its node answers to `eth_maxPriorityFeePerGas`.
+> On EIP-1559 chains the facilitator relies on alloy's default fee estimate. When the last ten blocks carry no non-zero tips, which is common on quiet L2s where most blocks only hold the L1-info deposit, alloy falls back to a 1-wei tip. A sequencer with a minimum tip does not include such a transaction, so the settlement is never mined, the receipt times out, and the signer's nonce is stuck. This PR reads `eth_maxPriorityFeePerGas` alongside the estimate and uses it as a floor for the tip, keeping the estimate's base-fee headroom in the max fee. Nodes without the method keep the old behaviour. Observed on Hemi testnet (chain 743111): a 1-wei tip stayed unmined, and a tip of 1000000 wei, the value its node answers to `eth_maxPriorityFeePerGas`, was mined in the next block.
 </details>
 
 ### 0020 eip155: a settlement owns its record until it ends

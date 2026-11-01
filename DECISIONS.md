@@ -636,13 +636,14 @@ $ curl -s https://mempool.space/testnet/api/tx/6d1e2ea41e126bbeb6077feec0c6eb417
 - **Minimum:** the Portal's minimum deposit on testnet is 0.01 BTC, as seen in the Portal on 2026-10-29. Hemi's docs say 0.0001 BTC, which would mint nothing after the 10,000-sat fee. Six Bitcoin confirmations are needed.
 - **Faucet:** coinfaucet.eu's testnet3 faucet (`https://coinfaucet.eu/en/btc-testnet/`, hCaptcha) was paying on 2026-10-29; its address `tb1qerzrlxcfu24davlur5sqmgzzgsal6wusda40er` sent six testnet3 transactions that day. A claim is about 0.003 BTC, so 0.01 BTC takes several. bitcoinfaucet.uo1.net and testnet.help now pay testnet4, which the tunnel does not watch. Hemi testnet's Bitcoin view was at testnet3 height 5,223,072, two blocks behind the testnet3 tip.
 - **Claim:** the mint is not automatic on testnet. The depositor's own EVM address sent `confirmDeposit`, nine months after the Bitcoin transaction confirmed.
-- **Activity:** the vault manager's history shows two confirmed deposits in 2026, both from that one address. The tunnel works, but it is barely used.
+- **Activity:** on 2026-10-29 the vault manager's history showed two confirmed deposits in 2026, both from that one address. The tunnel works, but it is barely used.
+- **This repo's funding:** a 0.01 BTC deposit minted 990,000 sats to the owner's wallet on 2026-11-01 (`confirmDeposit` tx `0x9a642524b8ecfaf997301667e0826a6e0f0b53073fe8ae114f9192636ad98d53`), and 90,000 sats went on to the buyer (tx `0xf4070e9c9f272a53d430f3411e0abe1a2eded37a71b196a9b835f9eada82d696`).
 
 So hBTC needs Bitcoin testnet3 coins, a UniSat wallet on "Bitcoin Testnet", a Portal deposit and a claim transaction. There is no faster on-chain source: the top hBTC holders are wallets, not pools.
 
 ## D-018. Settlement tips: Hemi testnet's sequencer minimum and patch 0019
 
-Found on 2026-10-29 while funding the testnet buyer (D-017). Hemi testnet's sequencer does not mine a transaction whose tip is below 0.001 gwei (1,000,000 wei). Hemi mainnet does mine lower tips; see the end of this entry. alloy's default fee estimate, which Foundry and the facilitator both use, tips 1 wei whenever the last ten blocks carry no tips. On Hemi that is common, because most blocks hold only the L1-info deposit.
+Found on 2026-10-29 while funding the testnet buyer (D-017). Hemi testnet's sequencer did not mine a transaction offering a 1-wei tip, and a tip of 0.001 gwei (1,000,000 wei) was mined in the next block. Hemi mainnet does mine much lower tips; see the end of this entry. alloy's default fee estimate, which Foundry and the facilitator both use, tips 1 wei whenever the last ten blocks carry no tips. On Hemi that is common, because most blocks hold only the L1-info deposit.
 
 The live evidence is a swap from the buyer on Hemi testnet, sent twice with the same nonce:
 
@@ -688,6 +689,17 @@ AssertionError: expected 1 to be greater than or equal to 1000000000
 
 The first live Hemi testnet settlement through hemi.8 tipped 1,000,000 wei. It did not exercise the patch: my deployment and the buyer's approval had just put 1,000,000-wei tips into the fee history, so alloy's own estimate was the same and hemi.7 would have tipped alike. The patch is shown by `07-priority-fee.test.ts` and the swap above.
 
+The hBTC settlement through hemi.9 on 2026-11-01 did not reach the 1-wei case either. The fee history before it held tips of 999,996 to 999,998 wei, so alloy's estimate was 999,997 and the floor raised it by 3 wei.
+
+Those tips come from a legacy sender with a fixed gas price of 1,000,253 wei. As the base fee rose, its effective tip fell below 1,000,000 and it was still mined. So 1,000,000 wei is not an exact minimum on the effective tip. Where the real minimum sits, between 1 wei and about 1,000,000 wei, is unknown. The node's suggestion is safe either way.
+
+```
+$ cast rpc eth_feeHistory 10 0x6ca870 '[20]' --rpc-url https://testnet.rpc.hemi.network/rpc | jq -c '[.reward[][0]]'
+["0xf423e","0x0","0x0","0x0","0xf423d","0x0","0x0","0x0","0xf423c","0x0"]       # 999998, 999997, 999996
+$ cast block 7121007 --json --full --rpc-url https://testnet.rpc.hemi.network/rpc | jq -c '.baseFeePerGas as $b | .transactions[] | select(.type!="0x7e") | {type, base: $b, gasPrice}'
+{"type":"0x0","base":"0x101","gasPrice":"0xf433d"}                              # effective tip 1000253 - 257 = 999996
+```
+
 ```
 $ cast tx 0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5 --rpc-url https://testnet.rpc.hemi.network/rpc --json | jq -c '{type, maxPriorityFeePerGas, maxFeePerGas}'
 {"type":"0x2","maxPriorityFeePerGas":"0xf4240","maxFeePerGas":"0xf443a"}       # tip 1000000; max fee 1000506 = 2 * 253 + tip
@@ -704,7 +716,7 @@ $ cast tx 0xe1789ca9346d26d06007a3f0abeb11408fdbf7d405d6c3f0adaa9073ce63b48b --r
 
 Whether mainnet mines a 1-wei tip is unproven either way. On mainnet the floor is a precaution: a settlement uses about 103,000 gas, so a 1,000,000-wei tip costs about 1e-7 ETH.
 
-The alternative was `eip1559: false`, which needs no image change, since `eth_gasPrice` is the base fee plus 1,000,000. It was rejected for two reasons. A legacy transaction priced at exactly the base fee plus the minimum falls below the minimum as soon as the base fee rises by 1 wei. And a config change would not fix x402-rs for other OP Stack chains.
+The alternative was `eip1559: false`, which needs no image change, since `eth_gasPrice` is the base fee plus 1,000,000. It was rejected because a config change would not fix x402-rs for other chains with a minimum tip. This entry first also claimed that such a legacy transaction stops being mined once the base fee rises by 1 wei. The legacy sender above shows that was wrong.
 
 ### Open questions
 
@@ -745,7 +757,7 @@ The cost is that one node has to forward the transaction, and its rejection stan
 
 The e2e suite could not see this, because its primary RPC is dead and only one RPC ever answered. `08-one-broadcast.test.ts` now runs with two live RPCs behind recording proxies. It counted the wrong number of broadcasts on the image without 0021.
 
-**Verification of all seven fixes.** `cargo fmt`, `clippy -D warnings` and the unit tests pass on the final tree. Removing the sequential method fails a unit test, and so does removing each part of 0020. The series was replayed from `e75adda` and gives the same tree. The runner's checks ran in a sandbox with stubbed `cast`, `docker` and `npm`, which sent nothing. No live `testnet-run.sh --go` was run, so neither 0020 nor 0021 has been exercised on a live network.
+**Verification of all seven fixes.** `cargo fmt`, `clippy -D warnings` and the unit tests pass on the final tree. Removing the sequential method fails a unit test, and so does removing each part of 0020. The series was replayed from `e75adda` and gives the same tree. The runner's checks ran in a sandbox with stubbed `cast`, `docker` and `npm`, which sent nothing. No live `testnet-run.sh --go` was run at the time. On 2026-11-01 the hBTC payment went through the new runner and hemi.9 on Hemi testnet (tx `0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d`). The signer sent exactly one transaction, its nonce rose by one, and `/settle` answered 200. That is the ordinary path of 0020 and 0021 on a live network. Neither failure path, a record race or an unreachable first RPC, has run live.
 
 ## Pre-spike context: what the reference code requires
 

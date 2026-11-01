@@ -34,3 +34,36 @@ pay-usdc: [buyer] explorer: https://testnet.explorer.hemi.xyz/tx/0x0bca64a7f81d3
 pay-usdc: [buyer] buyer balance: 22.562078 USDC.e -> 22.561078 USDC.e
 pay-usdc: [buyer] payTo balance: 0 USDC.e -> 0.001 USDC.e
 ```
+
+## Run on 2026-11-01T19:55:24Z: btc
+
+Facilitator image `hemi-x402-facilitator:e75adda-hemi.9`.
+
+| Payment | Settlement tx | Receipt |
+|------|------|------|
+| hBTC `0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7` (Permit2) | [`0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d`](https://testnet.explorer.hemi.xyz/tx/0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d) | status=0x1 block=7121009 from=0xd2b2fc8093f8a734c42b90762fd2b2f8464631af to=0x402085c248eea27d92e8b30b2c58ed07f9e20001, tip 1000000 wei |
+
+The facilitator signer is `0xD2B2fc8093f8A734c42B90762FD2B2F8464631af`; the buyer is `0x35C8182E886382D1133a3Daf980470D3646D3786`; payTo is `0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f`.
+
+Seller log: each payment is verified by the facilitator's /verify, then settled by its /settle:
+
+```
+[seller] verified 1 of 0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7 on eip155:743111 from 0x35C8182E886382D1133a3Daf980470D3646D3786
+[seller] settled 1 of 0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7 on eip155:743111 from 0x35C8182E886382D1133a3Daf980470D3646D3786: tx 0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d
+```
+
+Buyer output:
+
+```
+pay-btc: [buyer] buyer 0x35C8182E886382D1133a3Daf980470D3646D3786 holds 0.0009 hBTC
+pay-btc: [buyer] GET http://localhost:4021/echo?run=testnet&asset=btc
+pay-btc: [buyer] paying 1 base units of hBTC (0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7) on eip155:743111 to 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f via permit2
+pay-btc: [buyer] approve(Permit2, max) sent: 0x5d22a88db9f310aa61260132d37f3f19dc8a04034f6132398d3a9516c0ceb9c1
+pay-btc: [buyer]   https://testnet.explorer.hemi.xyz/tx/0x5d22a88db9f310aa61260132d37f3f19dc8a04034f6132398d3a9516c0ceb9c1
+pay-btc: [buyer] asset:    hBTC 0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7 (eip155:743111)
+pay-btc: [buyer] response: {"echo":{"run":"testnet","asset":"btc"},"timestamp":"2026-11-01T19:55:14.960Z"}
+pay-btc: [buyer] tx:       0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d
+pay-btc: [buyer] explorer: https://testnet.explorer.hemi.xyz/tx/0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d
+pay-btc: [buyer] buyer balance: 0.0009 hBTC -> 0.00089999 hBTC
+pay-btc: [buyer] payTo balance: 0 hBTC -> 0.00000001 hBTC
+```

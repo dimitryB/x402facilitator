@@ -12,9 +12,8 @@ queues behind it.
 
 Seen on Hemi testnet (OP Stack): a 1-wei-tip transaction stayed pending
 while empty blocks were produced; the same transaction with a 0.001 gwei
-tip was mined in the next block. Hemi testnet mines no tip below that,
-which is what its node answers to eth_maxPriorityFeePerGas. Hemi mainnet
-mines tips as low as 21 wei, so there the floor is a precaution costing
+tip was mined in the next block. That tip is what the node answers to
+eth_maxPriorityFeePerGas. Hemi mainnet mines tips as low as 21 wei, so there the floor is a precaution costing
 about 1e-7 ETH per settlement.
 
 On EIP-1559 chains, send_transaction now sets the fees itself: the tip

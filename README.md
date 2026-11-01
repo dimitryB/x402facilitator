@@ -4,7 +4,7 @@ An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hem
 
 It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and twenty-one small patches. Eighteen make its error responses match the x402 v2 spec, one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018), and two keep a settlement's outcome correct under load and with two RPCs (D-019). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
-**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and a live USDC.e payment settled ([docs/testnet-run.md](docs/testnet-run.md)); the hBTC payment waits for Bitcoin-testnet funds. Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
+**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
 
 | Path | What it is |
 |------|------|
@@ -184,7 +184,7 @@ The buyer prints the settlement tx hash and its explorer link. [`buyer/README.md
 
 ## Testnet run
 
-Run on 2026-10-29 for USDC.e: the contracts were deployed and one payment settled, in [tx `0x0bca64a7…b6c5`](https://testnet.explorer.hemi.xyz/tx/0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5). [docs/testnet-run.md](docs/testnet-run.md) has the receipt, the seller's verify-then-settle log and the buyer's output. The hBTC payment waits for Bitcoin-testnet funds. With no flag, the script only checks balances and prints what to fund; it sends nothing:
+Both assets have settled live. On 2026-10-29 the contracts were deployed and a USDC.e payment settled through hemi.8, in [tx `0x0bca64a7…b6c5`](https://testnet.explorer.hemi.xyz/tx/0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5). On 2026-11-01 an hBTC payment settled through hemi.9, in [tx `0x5f511cb0…fb0d`](https://testnet.explorer.hemi.xyz/tx/0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d). [docs/testnet-run.md](docs/testnet-run.md) has each receipt, the seller's verify-then-settle log and the buyer's output. With no flag, the script only checks balances and prints what to fund; it sends nothing:
 
 ```bash
 scripts/testnet-run.sh
@@ -218,7 +218,7 @@ hBTC needs more care:
 - **Network:** the tunnel watches Bitcoin testnet3. Many faucets now pay out testnet4, and those coins never reach the tunnel. Hemi's docs point to coinfaucet.eu.
 - **Amounts:** the Portal's minimum deposit on testnet is 0.01 BTC, although Hemi's docs say 0.0001 BTC. The vault charges at least 10,000 sats per deposit. A faucet claim is smaller than 0.01 BTC, so several claims have to be pooled first. One payment needs 1 sat.
 - **Claim:** after six Bitcoin confirmations, the depositor's EVM wallet must send the claim, `confirmDeposit`, from the Portal. Nothing is minted until it does, and it costs a little Hemi testnet ETH.
-- **Reliability:** the testnet tunnel is barely used, with two claimed deposits in 2026. If a claim fails, Hemi's Discord is the fallback for a few sats.
+- **Reliability:** the testnet tunnel is barely used, but it worked for this repo: a 0.01 BTC deposit minted 990,000 sats on 2026-11-01. If a claim fails, Hemi's Discord is the fallback for a few sats.
 
 Deposit to your own wallet and then send some hBTC to the buyer, or deposit to the buyer's address directly.
 
@@ -315,7 +315,7 @@ Latest results, from 2026-10-29 against a no-cache build of the image unless a r
 |------|------|------|
 | `docker compose up` starts the facilitator; `/supported` lists both networks with `exact` | Met on forks (`docker-compose.fork.yml`). Live on testnet with the testnet config, which lists `eip155:743111`. Both networks live need the mainnet contracts, which need the go | `tests/e2e/01-supported.test.ts`, D-013, D-016 |
 | One `/verify` then `/settle` on testnet in USDC.e, tx linked on the explorer | Met: [`0x0bca64a7…b6c5`](https://testnet.explorer.hemi.xyz/tx/0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5) | [docs/testnet-run.md](docs/testnet-run.md), `tests/e2e/02-settle.test.ts` |
-| One settle on testnet in hemiBTC (hBTC, per D-008) | **Open:** the buyer has no hBTC yet; it needs Bitcoin testnet3 coins through the Bitcoin tunnel (D-017). On a testnet fork it passes | `scripts/testnet-run.sh`, `tests/e2e/02-settle.test.ts` |
+| One settle on testnet in hemiBTC (hBTC, per D-008) | Met: [`0x5f511cb0…fb0d`](https://testnet.explorer.hemi.xyz/tx/0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d) | [docs/testnet-run.md](docs/testnet-run.md), `tests/e2e/02-settle.test.ts` |
 | Failed signature and insufficient balance return the spec's error shapes, with tests | Met | `tests/e2e/03-bad-signature.test.ts`, `04-insufficient-balance.test.ts`, D-016 |
 | Facilitator never holds funds, shown by reading the proxy and config | Met | [Why the facilitator never holds funds](#why-the-facilitator-never-holds-funds); balance and log checks in `02-settle.test.ts` |
 | RPC failover: tests pass with the primary RPC on a dead port | Met | every e2e test runs that way; `tests/e2e/05-rpc-failover.test.ts`, D-015 |

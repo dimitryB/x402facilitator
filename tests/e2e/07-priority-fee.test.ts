@@ -3,9 +3,8 @@
  * (eth_maxPriorityFeePerGas), even when recent blocks carry no tips.
  *
  * alloy's default EIP-1559 estimate falls back to a 1-wei tip when the last ten blocks have no
- * non-zero tips. Hemi testnet's sequencer does not mine a transaction tipping below 0.001 gwei, so such a
- * settlement stays pending and holds the signer's nonce (D-018). Patch 0019 makes the node's
- * suggestion a floor. Here each fork first mines empty blocks, so the fee history has no tips and
+ * non-zero tips. Hemi testnet's sequencer did not mine a 1-wei tip, so such a settlement stays
+ * pending and holds the signer's nonce (D-018). Patch 0019 makes the node's suggestion a floor. Here each fork first mines empty blocks, so the fee history has no tips and
  * the unpatched estimate would be 1 wei, while anvil suggests 1 gwei.
  */
 import { expect, it } from "vitest";
