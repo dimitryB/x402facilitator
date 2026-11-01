@@ -483,7 +483,7 @@ Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return 
 
 The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
 
-No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.9` (hemi.7 until patch 0019, D-018; hemi.8 until patches 0020 and 0021, D-019). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.10` (hemi.7 until patch 0019, D-018; hemi.8 until patches 0020 and 0021, D-019; hemi.9 until patch 0022, D-020). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
 
 | Patch | Change |
 |------|------|
@@ -508,6 +508,7 @@ No config setting changes any of this, so the facilitator is now built from `fac
 | 0019 | On EIP-1559 chains a settlement tips at least the node's `eth_maxPriorityFeePerGas`, so it is mined after tip-less blocks (hemi.8, D-018) |
 | 0020 | A settle owns its record: no other settle can overwrite or delete it. A running settle's record neither expires nor is evicted, and the 10,000 cap applies to kept records only (hemi.9, D-019) |
 | 0021 | `eth_sendRawTransaction` goes to one RPC at a time, moving on only if that RPC cannot be reached (hemi.9, D-019) |
+| 0022 | Every RPC request ends after 10 s, and a failed send is looked up by its hash before it counts as failed (hemi.10, D-020) |
 
 hemi.1 had patches 0001 to 0005. A fresh-context critic then found three more gaps:
 
@@ -540,10 +541,10 @@ Other choices and known limits of the patch set:
 - **Nonce trade-off:** a tx that is later dropped from every mempool leaves a nonce gap until restart. Before, the nonce could be reused while the earlier tx might still mine.
 - **Kept on purpose:** `invalidReasonDetails` stays next to `invalidMessage` for clients of stock x402-rs.
 - **One process per signer key:** the pending record (0011) and the nonce manager live in one process, so a restart forgets pending records. Two facilitator instances sharing a signer key collide on nonces; a critic saw `nonce too low` as HTTP 500, which recovered on the next request. Neither instance can see the other's pending settles. Run exactly one facilitator per signer key.
-- **Limits of the pending record (0011):** An unclaimed record blocks `/verify` of its authorization for up to 15 minutes; by then the authorization is spent anyway.
+- **Limits of the pending record (0011):** An unclaimed record blocks `/verify` of its authorization for up to 15 minutes. By then the authorization is normally spent. If its transaction was dropped, it is not, and the authorization becomes usable once the record expires.
 - **Verify-then-settle race:** two requests that both pass `/verify` before either settles can both reach a seller's handler, and only one settle succeeds. This is inherent to the x402 flow.
 - **EIP-6492 deployment:** a counterfactual wallet deployed during settle is untested end to end, because the forks have no wallet factory.
-- **After a disconnect:** until the original settlement's receipt wait ends (at most 60 s), retries get `invalid_transaction_state` ("in progress") without the hash. After that, the first identical retry claims the hash (0016). Two narrow gaps remain. A client that disconnects in the instant between the settlement's "is the caller still waiting" check and the response being written loses that success. A shutdown ends a detached settlement. The broadcast log line survives both.
+- **After a disconnect:** until the original settlement ends (its receipt wait is at most 60 s, after a send of up to 20 s when RPCs stall), retries get `invalid_transaction_state` ("in progress") without the hash. After that, the first identical retry claims the hash (0016). Two narrow gaps remain. A client that disconnects in the instant between the settlement's "is the caller still waiting" check and the response being written loses that success. A shutdown ends a detached settlement. The broadcast log line survives both.
 - **Known gaps found by the seventh critic and left as limits:**
   - **Ambiguous send:** if the node accepts a send but its response is lost, the hash goes unlogged and the nonce is reset.
   - **Eviction:** the 10,000-record cap evicts the oldest records first, including real pending ones. Since hemi.9 this applies to kept records only, and only another kept record pushes one out (D-019).
@@ -554,7 +555,7 @@ Other choices and known limits of the patch set:
 
 hemi.8 adds patch 0019 (D-018). On 2026-10-29 its no-cache build took 119 s, and the e2e suite passed: 10 files, 103 tests.
 
-hemi.9 adds patches 0020 and 0021 (D-019). On 2026-10-30 a build that reused the cached dependency layer took 20 s, and the e2e suite passed: 11 files, 104 tests. No no-cache build was run, because the workstation's Docker disk was full.
+hemi.9 adds patches 0020 and 0021 (D-019). On 2026-10-30 a build that reused the cached dependency layer took 20 s, and the e2e suite passed: 11 files, 104 tests. No no-cache build was run then, because the workstation's Docker disk was full. On 2026-11-01 one of hemi.9 took 143 s, and the suite passed on it: 11 files, 104 tests.
 
 Verified on 2026-10-29 against a no-cache hemi.7 build (113 s):
 
@@ -753,11 +754,56 @@ The first design refused new settles when the store was full. It was dropped bec
 
 Patch 0021 makes `eth_sendRawTransaction` a sequential method. It goes to the best-ranked RPC and moves on only if that RPC cannot be reached. The alternative was to keep both copies and treat a duplicate rejection as success. It was rejected because telling a duplicate from a real rejection means reading each node's error text.
 
-The cost is that one node has to forward the transaction, and its rejection stands. A dropped transaction ends in `settlement_pending`, which a retry can reconcile; a mined settlement reported as failed could not be reconciled. Whether the race ever happened on the live RPCs, where two different nodes answer, was not measured.
+The cost is that one node has to forward the transaction, and its rejection stands. A dropped transaction ends in `settlement_pending` with a hash that never mines. A retry cannot fix that, because nothing rebroadcasts it, and the nonce gap stops settlement on that chain until a restart (README, "Nonce gap after a timeout"). A mined settlement reported as failed could not be recovered at all, so this was still the better trade. This entry first said a retry could reconcile the dropped case; a fork test with `anvil_dropTransaction` showed that was wrong. Whether the race ever happened on the live RPCs, where two different nodes answer, was not measured.
 
 The e2e suite could not see this, because its primary RPC is dead and only one RPC ever answered. `08-one-broadcast.test.ts` now runs with two live RPCs behind recording proxies. It counted the wrong number of broadcasts on the image without 0021.
 
 **Verification of all seven fixes.** `cargo fmt`, `clippy -D warnings` and the unit tests pass on the final tree. Removing the sequential method fails a unit test, and so does removing each part of 0020. The series was replayed from `e75adda` and gives the same tree. The runner's checks ran in a sandbox with stubbed `cast`, `docker` and `npm`, which sent nothing. No live `testnet-run.sh --go` was run at the time. On 2026-11-01 the hBTC payment went through the new runner and hemi.9 on Hemi testnet (tx `0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d`). The signer sent exactly one transaction, its nonce rose by one, and `/settle` answered 200. That is the ordinary path of 0020 and 0021 on a live network. Neither failure path, a record race or an unreachable first RPC, has run live.
+
+## D-020. A stalled RPC: bounded requests and a hash check on failed sends
+
+The ninth critic pass, the first to review hemi.9, found that patch 0021 had made a stalled RPC hang `/settle`. All eight Definition-of-done items passed, but this was a regression in an expected condition: the brief says to treat a stalled RPC as expected, and D-013 sets the receipt timeout for that reason.
+
+A send waits for its one RPC, `Http` had no timeout, and the sequential fallback moves on only on a transport error. Reads race and the loser records nothing, so a stalled RPC is never demoted by them.
+
+| Image | `/settle` with the best-ranked RPC stalled, on a fork |
+|------|------|
+| hemi.8 | settled in 2.7 s |
+| hemi.9 | no answer in 100 s; every other settlement hung too; after the sockets dropped, the detached settlement paid with the client gone |
+
+Patch 0022 (image hemi.10) has two parts. Every RPC request ends after 10 s, so the send moves on and the failure counts against that RPC. And the transaction is signed before the send, so that a failed send can ask the chain for the hash before it counts as failed. The second part is needed because the first alone brings back the failure 0021 removed: an RPC can forward the transaction and only then stall, and the next RPC rejects the copy.
+
+```
+# tests/e2e/09-stalled-rpc.test.ts on a build with the timeout only
+ × stalling after forwarding the transaction: a mined settlement is not reported as failed
+AssertionError: expected false to be true // Object.is equality
+```
+
+A failure does not always flip the rank at once, which my first version of the test wrongly assumed. alloy scores 70% success over the last ten results plus 30% latency:
+
+| Primary after failed sends | Score | Fallback at this average latency | Score |
+|------|------|------|------|
+| 1 | 0.924 | 0.16 s | 0.959 |
+| 2 | 0.854 | 0.5 s | 0.900 |
+| 3 | 0.784 | 1.0 s | 0.850 |
+
+So a stalled best-ranked RPC costs each settlement about 10 s until it loses rank, usually after one or two failures, or three if the other RPC averages over a second. That cost is bounded. With both RPCs stalling, the send takes 20 s, and with the 60 s receipt wait that stays under the TS SDK's 90 s.
+
+Rejected alternatives:
+
+- **Send to both RPCs again:** this is what 0021 removed, because a rejection could win the race.
+- **A timeout only on the send:** it needs a per-method layer, and reads with every RPC stalled would still have no limit. One client timeout covers both.
+- **Reading each node's error text** to recognise a duplicate: node errors differ. A lookup by hash needs no text.
+
+The critic's other findings were false or missing statements, now corrected:
+
+- A dropped transaction cannot be reconciled by a retry (D-019 had said it could). Nothing rebroadcasts it, and settlement on that chain stops until a restart.
+- Files 08 and 09 run with two RPCs that answer, so "every test runs with a dead primary" was false.
+- An RPC that answers JSON-RPC errors defeats failover, and it is now listed under Limits. Fixing it would mean replacing alloy's fallback layer.
+
+Verified on 2026-11-01 against a no-cache hemi.10 build (118 s, all 22 patches): `cargo fmt`, `clippy -D warnings` and the unit tests pass; the e2e suite passed, 12 files and 106 tests in 195 s; `forge test` passed 17; `buyer/demo-fork.sh` settled all four payments.
+
+Patch 0022 changes how every transaction is sent, so both assets were then paid live on Hemi testnet through hemi.10: USDC.e in `0x97ecdf92a57a57ca59ebcbef0da4286edfda040811f128051297c407e54c9698` and hBTC in `0xfafc0f4573cb6917a07bd73094eae20a45f310eeb0a567a68962758ec51c9563`. The signer's nonce rose by exactly two, and both broadcasts left about 1.5 s after `/settle` began. Neither live run had a stalled RPC, so the bound and the hash lookup are proven on forks only.
 
 ## Pre-spike context: what the reference code requires
 

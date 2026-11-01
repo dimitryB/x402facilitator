@@ -60,6 +60,7 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0019](patches/0019-eip155-tip-at-least-the-node-s-suggested-priority-fe.patch) | after ten blocks without tips, a settlement tips 1 wei; Hemi testnet's sequencer never mines it, and it holds the signer's nonce and every later settlement | none: liveness (§9 `settlement_pending` is what the buyer sees) |
 | [0020](patches/0020-eip155-a-settlement-owns-its-record-until-it-ends.patch) | a flood of settles evicts a running settle's record; its guard then overwrites or deletes the record of a later settle of that authorization, so a retry can get success with another request's hash | §5.3.2, §9 `invalid_transaction_state` |
 | [0021](patches/0021-eip155-broadcast-a-transaction-to-one-RPC-at-a-time.patch) | with two RPCs a transaction is broadcast twice, and the rejection of the second copy can make a mined settlement look failed: the payer is charged and the seller refuses service | §5.3.2, §9 `invalid_transaction_state` |
+| [0022](patches/0022-eip155-a-stalled-RPC-can-neither-hold-a-settlement-n.patch) | a stalled best-ranked RPC holds a settlement with no limit since 0021, and an RPC that forwards a transaction and then stalls would make a mined settlement look failed | none: liveness (§9 `settlement_pending`) |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -237,7 +238,7 @@ payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an a
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.9` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.10` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -253,7 +254,7 @@ silicon), with the base images already pulled:
   patches.
 - `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
   113 s for hemi.3; 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches); 113 s for hemi.5
-  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8.
+  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 143 s for hemi.9; 118 s for hemi.10.
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -1146,13 +1147,55 @@ only if that RPC cannot be reached. Reads are unchanged.
 
 **Trade-off.** One copy of a transaction means one node has to forward it. A node's rejection is now the
 answer, even if the other RPC would have taken the transaction. A transaction whose node drops it ends in
-`settlement_pending`, which a retry can reconcile, where before a mined settlement could be reported as
-failed, which nothing could.
+`settlement_pending` with a hash that never mines, which a retry cannot fix (see D-019). Before, a mined
+settlement could be reported as failed, which was worse: no later step could put that right. A stalled RPC
+also held a send with no limit, until 0022.
 
 **Tests.** Unit tests through alloy's mock transport, with RPCs that answer on a later poll: a transaction
 goes to one RPC and a read to all; a transaction moves on from an RPC it cannot reach; a node's rejection
 is not sent to another. e2e `08-one-broadcast.test.ts` puts a recording proxy on each of two live RPCs in
 front of one fork, settles three payments and counts the broadcasts. It fails without this patch.
+
+### 0022 eip155: a stalled RPC can neither hold a settlement nor lose one
+
+**Problem.** Since 0021 a transaction waits for its one RPC. `Http` had no timeout, and the sequential
+fallback moves on only on a transport error, so an RPC that accepts the connection and never answers held
+the send with no limit. Reads race and the loser records nothing, so a stalled RPC stayed the first choice.
+On a fork with a stalled primary, hemi.9 gave `/settle` no answer in 100 s, past the 60 s receipt timeout
+and the TS SDK's 90 s, and every other settlement hung behind it. hemi.8 settled the same case in 2.7 s.
+When the sockets dropped, the detached settlement went on and paid after the client had left. D-013 sets
+the receipt timeout because the brief expects stalled RPCs, so this is an expected condition.
+
+**Change.** Two parts, and the first needs the second.
+
+1. Every RPC request ends after 10 s (`RPC_REQUEST_TIMEOUT`). That counts as a transport error, so the send
+   moves on and the failure counts against the RPC's rank. alloy scores the last ten results and latency,
+   so the rank flips after one or two failures, or three if the other RPC averages over a second. Until
+   then each settlement pays about 10 s more. With a chain's two RPCs, the send plus the 60 s receipt wait
+   stays under the SDK's 90 s.
+2. The transaction is signed before the send, so its hash is known. If a send fails, `send_transaction`
+   asks the RPCs for that hash. If one knows it, the settlement carries on from the hash and the nonce is
+   kept. If none does, the send failed as before. Without this, an RPC that forwards the transaction and
+   then stalls would bring back what 0021 removed: the next RPC rejects the copy, and a mined settlement is
+   reported as failed. The lookup needs no error text, and it runs only after a failed send.
+
+**Left as it was.** If a node takes a transaction and no RPC can show it yet when the lookup runs, the send
+still counts as failed. That is the ambiguous send listed under Limits in the main README.
+
+**Tests.** A unit test ends a request to a listener that never answers. e2e `09-stalled-rpc.test.ts` puts a
+proxy in front of the fork as each RPC, with a slower fallback so the primary ranks first, and stalls the
+primary in two ways: before the send, and after forwarding the transaction. With only part 1, the second
+case failed: the payment was mined and `/settle` reported failure.
+
+**Live.** Both assets settled through hemi.10 on Hemi testnet, which covers the sign-first send path. Neither
+run had a stalled RPC, so the timeout and the lookup are proven on forks only.
+
+<details><summary>Upstream issue / PR draft</summary>
+
+> **Title:** A stalled RPC hangs transaction sends once they are sequential; bound requests and check a failed send by hash
+>
+> `Http::new` has no request timeout, and alloy's sequential fallback moves on only on a transport error, so a node that accepts the connection and never answers holds `eth_sendRawTransaction` with no limit. This PR gives each RPC request a 10 s timeout. A timeout makes the send ambiguous, since the node may have forwarded the transaction and the next RPC will then reject the copy, so the transaction is now signed before the send and a failed send looks the hash up before it is reported as failed. Only relevant together with a one-RPC-at-a-time send.
+</details>
 
 ## What these patches do not change
 

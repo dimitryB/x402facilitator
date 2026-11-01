@@ -12,11 +12,11 @@
 # Secrets come from .env (copy .env.example). RPC defaults: dRPC primary, Hemi public RPC fallback.
 services:
   facilitator:
-    # x402-rs e75adda + facilitator/x402-rs/patches (hemi.9), see facilitator/x402-rs/README.md.
+    # x402-rs e75adda + facilitator/x402-rs/patches (hemi.10), see facilitator/x402-rs/README.md.
     # Unpatched base, for comparison: the stock image this replaced,
     #   ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d824bf6a5f342add8ae22eb44a2c56894ad22e7d3f5b83ba38023226b9
     #   (x402-rs 2.0.2, revision 0b14f39; EVM code identical to e75adda, DECISIONS.md D-013).
-    image: hemi-x402-facilitator:e75adda-hemi.9
+    image: hemi-x402-facilitator:e75adda-hemi.10
     build:
       context: ./facilitator
     # Bounded, so a missing-contract or missing-key startup error stops instead of crash-looping

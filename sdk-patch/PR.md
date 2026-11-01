@@ -77,7 +77,7 @@ The testnet token has no EIP-712 domain at all: no `version()`, no `DOMAIN_SEPAR
   - canonical Permit2 at `0x000000000022D473030F116dDEE9F6B43aC78BA3`
   - `x402ExactPermit2Proxy` at `0x402085c248EeA27D92E8b30b2C58ed07f9E20001`
 
-  Both were deployed on Hemi Testnet on 2026-10-29, at their canonical CREATE2 addresses, and a `"$0.001"` USDC.e payment has settled there through the proxy.
+  Both were deployed on Hemi Testnet on 2026-10-29, at their canonical CREATE2 addresses, and a $0.001 USDC.e payment, priced explicitly with these addresses, has settled there through the proxy.
 - **Mainnet.** Canonical Permit2 is present and byte-identical to Ethereum's apart from its chain-specific immutables. The exact proxy is not deployed yet. This doesn't affect the mainnet default asset, which settles through EIP-3009 and never touches Permit2.
 - **Deployment.** Both contracts go to their canonical CREATE2 addresses through the deterministic deployer `0x4e59b44847b379578588920cA78FbF26c0B4956C`, which is present on both chains. That is done on testnet; on mainnet, a dry run with `eth_call` reproduces the expected address of the proxy. Once deployed, the proxy rows can go into `contracts/evm/README.md`.
 - **Options for reviewers.** Merge as is (the entry is correct, and it becomes usable once the contracts land), hold the PR until the deployments are confirmed, or merge the mainnet entry now and the testnet entry later.
