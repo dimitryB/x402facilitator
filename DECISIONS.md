@@ -959,7 +959,11 @@ The nonce is the one to watch. A frozen RPC that keeps winning that read would m
 
 Verified on 2026-11-02 against a no-cache hemi.14 build (124 s, all 28 patches): `cargo fmt`, `clippy -D warnings` and the unit tests pass, and mutating `find_receipt` back to the first answer fails two unit tests. All four cases in `tests/e2e/10-stale-rpc.test.ts` failed on hemi.13 and pass on hemi.14. The e2e suite passed, 13 files and 116 tests in 361 s. `forge test` passed 17, and `buyer/demo-fork.sh` settled all four payments.
 
-hemi.14 has not run live. It changes how every settlement waits, so `scripts/testnet-run.sh --go` is due on this image. The 41 live receipts above are the only evidence so far that real RPCs answer these lookups.
+hemi.14 changes how every settlement waits, so both assets were then paid live on Hemi testnet through it on 2026-11-02: USDC.e in `0x4e1991ac8eac568dcef6d0e7fce3959ddf928b970fe96d904c877651d6dcb77c` and hBTC in `0xc45075075efcf7fbdcc463b4e0d01c37ccaca441c115c4acd71a318729810cc4`. Read back from the chain, both have status 1 and one Transfer of the exact price from the buyer to `payTo`. The facilitator holds no tokens, and its log has no warnings or errors (docs/testnet-run.md).
+
+`/settle` took 16.5 s and 16.1 s. They answered 6.2 s and 0.6 s after the mining block's timestamp, which fits the 7 s interval. The gap between the two buyer responses was 18.8 s, against 18.4 s on hemi.13, from one run of each.
+
+This run shows that real RPCs answer the new lookups on the normal path. It had no stale RPC, or none the log shows, so the stale cases are still proven on forks only.
 
 ## Pre-spike context: what the reference code requires
 
