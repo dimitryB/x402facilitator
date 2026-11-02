@@ -483,7 +483,7 @@ Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return 
 
 The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
 
-No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.12` (hemi.7 until patch 0019, D-018; hemi.8 until patches 0020 and 0021, D-019; hemi.9 until patch 0022, D-020; hemi.10 until patches 0023 to 0026, D-021; hemi.11 until patch 0027, D-022). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.13` (hemi.7 until patch 0019, D-018; hemi.8 until patches 0020 and 0021, D-019; hemi.9 until patch 0022, D-020; hemi.10 until patches 0023 to 0026, D-021; hemi.11 until patch 0027, D-022; hemi.12 until 0027 was corrected, D-023). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
 
 | Patch | Change |
 |------|------|
@@ -513,7 +513,7 @@ No config setting changes any of this, so the facilitator is now built from `fac
 | 0024 | A failed send's hash is looked up on each RPC, for two blocks if the send timed out, and is logged (hemi.11, D-021) |
 | 0025 | A settlement whose tip cannot be read fails before anything is sent (hemi.11, D-021) |
 | 0026 | A send and its receipt wait share one budget, the receipt timeout plus 5 s (hemi.11, D-021) |
-| 0027 | Any failed send no node answered is searched for, with an 8 s lookup limit, within the budget (hemi.12, D-022) |
+| 0027 | Any failed send except a node's rejection of a non-duplicate is searched for, with an 8 s lookup limit, within the budget (hemi.13, D-023) |
 
 hemi.1 had patches 0001 to 0005. A fresh-context critic then found three more gaps:
 
@@ -792,7 +792,7 @@ A failure does not always flip the rank at once, which my first version of the t
 | 2 | 0.854 | 0.5 s | 0.900 |
 | 3 | 0.784 | 1.0 s | 0.850 |
 
-So an RPC that stalls everything costs each settlement about 10 s until it loses rank, usually after one or two failures, or three if the other RPC averages over a second. This entry first claimed that for any stalled RPC, and that a settlement stays under the TS SDK's 90 s. D-021 shows that neither held.
+So an RPC that stalls everything costs each settlement about 10 s until it loses rank. The scores above suggest one to three failures, but the fallback's throttle sits inside what alloy times, so under load it looks slow: one suite run needed four (D-023). This entry first claimed one or two for any stalled RPC, and that a settlement stays under the TS SDK's 90 s. D-021 shows that neither held.
 
 Rejected alternatives:
 
@@ -854,9 +854,9 @@ All eight Definition-of-done items passed for the third pass in a row. The revie
 
 | Issue | Trigger | Outcome |
 |------|------|------|
-| A fast failure got one lookup | A gateway forwards the transaction, then answers 5xx or drops the connection, and no RPC shows it yet | Fixed in 0027 |
+| A fast failure got one lookup | A gateway forwards the transaction, then answers 5xx or drops the connection, and no RPC shows it yet | Fixed in 0027, fully only after D-023 |
 | A 3 s lookup limit hid a transaction | A send timeout, and both RPCs slower than 3 s | Fixed in 0027: 8 s |
-| The search ran past the budget | Both RPCs stalling sends, with reads at 8 s: `/settle` took 93 s | Fixed in 0027: it ends with the budget |
+| The search ran past the budget | Both RPCs stalling sends, with reads at 8 s: `/settle` took 93 s | Search capped in 0027, but `/settle` can still pass 90 s (D-023) |
 | Settlements during a search queue behind its nonce | Every RPC loses one send, plus traffic in the next 25 s or so | Listed under Limits |
 | A JSON-RPC error after forwarding | A gateway forwards the transaction, then answers with a JSON-RPC error, and no RPC shows it at that moment | Listed under Limits |
 
@@ -875,6 +875,35 @@ AssertionError: expected false to be true // Object.is equality
 Verified on 2026-11-01 against a no-cache hemi.12 build (287 s, all 27 patches): `cargo fmt`, `clippy -D warnings` and the unit tests pass; the e2e suite passed, 12 files and 111 tests in 283 s; `forge test` passed 17; `buyer/demo-fork.sh` settled all four payments. Both assets then settled live on Hemi testnet through hemi.12: USDC.e in `0x2a181f78116ce3454c61ede99144143b4241f737f9bb79904c956a1d941da26d` and hBTC in `0xadf0e1b867f0b4a477737cc9a5107a977b34b893101b62b43e8b6a0936b84cf8`, in 16 s and 23 s. Both broadcasts left under 2 s after `/settle` began, and the rest was waiting for blocks.
 
 **Where this stops.** Passes 9, 10 and 11 all passed the Definition of done. Each also found failed-send problems that passes before it had not, and most of the last pass's need faults on several RPCs at once. Passes 12 and 13 are therefore scoped as the brief scopes them: the Definition of done from the README, plus a review of the latest change. The remaining failed-send cases are listed under Limits. All of this path is proven on forks only; no live run had a stalled RPC or a failed send.
+
+## D-023. Twelfth critic pass: a hidden fast failure, and the 65 s claim
+
+All eight Definition-of-done items passed, for the fourth pass in a row. The pass was not clean, and it was right on one point that mattered.
+
+**A hidden fast failure.** D-022 called this fixed, and it was fixed only when both RPCs failed. With one gateway forwarding the transaction and answering 502, the healthy RPC rejected the copy. The fallback layer reports only the last result, so the send looked like a plain rejection, the search was skipped, and a paid settlement came back as failed with no hash. That takes one fault. 0027 now also searches after `already known` or `nonce too low`.
+
+An earlier version of D-019's reasoning rejected reading error text, for deciding whether to send a transaction twice. Here the text only starts a search, so a wrong match costs time and a miss costs what it cost before.
+
+```
+# tests/e2e/09-stalled-rpc.test.ts, the single-fault case, on hemi.12
+ × one gateway's 502 after forwarding: the other RPC's rejection of the copy does not hide it
+AssertionError: expected false to be true // Object.is equality
+```
+
+**The time claims.** "Within 65 seconds" and "no hash to lose" were false when every RPC is slow, because a read or a lookup that has started runs to its own limit, and a zero receipt wait still runs two reads. The critic measured:
+
+| Case | `/settle` | Answer |
+|------|------|------|
+| Both RPCs time out on the send, one forwarded it; reads 5 s, lookups 7.5 s | 83.6 s | hash |
+| Both RPCs stall sends; reads and lookups 8 s | 95.6 s | `unexpected_settle_error`, no hash |
+
+These need every RPC degraded at once. The budget stays as a target, and the docs now say so. Capping each round by the time left would add a third timer to this path for a case with no RPC working normally.
+
+**The rank claim.** The full suite on hemi.13 failed one case: a fourth failed send still went to the stalled primary, where my test allowed three. Nothing was lost, and each settlement took about 13 s. `ThrottleLayer` wraps each transport inside `FallbackLayer`, so the 4-per-second limit on the fallback counts as its latency, and under load its score drops. The test now asserts that the rank flips within six settlements, and the docs say "a few". This is from reading the layers and from the one failure, and it was not measured separately.
+
+Verified on 2026-11-01 against a no-cache hemi.13 build (194 s, all 27 patches): `cargo fmt`, `clippy -D warnings` and the unit tests pass; the e2e suite passed, 12 files and 112 tests in 292 s; `forge test` passed 17; `buyer/demo-fork.sh` settled all four payments. Both assets then settled live on Hemi testnet through hemi.13: USDC.e in `0xefd1da7d2f08c7f81c19fd8db2bd368e8ee4411e4b0e1fa80c3a564808badf25` and hBTC in `0x36682a866b72c26eed8aee6b5b88e07b1b05391476a7b6d3ed1a6ab44fc8ec6d`.
+
+**Also fixed:** `package-lock.json` disagreed with `package.json` on the Node version, so `npm install` dirtied a clean clone; and the README now says that Colima shares only `$HOME` by default.
 
 ## Pre-spike context: what the reference code requires
 

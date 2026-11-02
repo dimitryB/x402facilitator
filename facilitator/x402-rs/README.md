@@ -67,7 +67,7 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0024](patches/0024-eip155-ask-every-RPC-for-a-failed-send-s-hash-for-tw.patch) | a lookup after a failed send takes the first answer, and `null` is one, so a mined settlement can still be reported as failed | none: §5.3.2 hash |
 | [0025](patches/0025-eip155-do-not-send-a-settlement-whose-tip-floor-coul.patch) | a failed tip read removes 0019's floor, and the settlement goes out at 1 wei | none: liveness |
 | [0026](patches/0026-eip155-bound-a-send-and-its-receipt-wait-together.patch) | a slow send plus the receipt wait can outlast the TS SDK's 90 s, and the hash is lost to the caller | §5.3.2 hash |
-| [0027](patches/0027-eip155-search-after-any-failed-send-no-node-answered.patch) | a fast 5xx, a slow lookup or a long search can still report a mined settlement as failed, or run past 90 s | §5.3.2 hash |
+| [0027](patches/0027-eip155-search-after-any-failed-send-no-node-answered.patch) | a fast 5xx or a slow lookup can still report a mined settlement as failed, and the search ignores the send's budget | §5.3.2 hash |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -245,7 +245,7 @@ payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an a
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.12` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.13` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -261,7 +261,7 @@ silicon), with the base images already pulled:
   patches.
 - `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
   113 s for hemi.3; 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches); 113 s for hemi.5
-  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11; 287 s for hemi.12.
+  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11; 287 s for hemi.12; 194 s for hemi.13.
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -1178,8 +1178,8 @@ the receipt timeout because the brief expects stalled RPCs, so this is an expect
 
 1. Every RPC request ends after 10 s (`RPC_REQUEST_TIMEOUT`). That counts as a transport error, so the send
    moves on and the failure counts against the RPC's rank. alloy scores the last ten results and latency,
-   so the rank flips after one or two failures, or three if the other RPC averages over a second. Until
-   then each settlement pays about 10 s more. That holds for an RPC that stalls everything. One that stalls
+   so the rank flips after a few failures. How many depends on the load, because the other RPC's throttle
+   counts as latency: four were needed in one suite run. Until then each settlement pays about 10 s more. That holds for an RPC that stalls everything. One that stalls
    only sends keeps winning reads and keeps its rank.
 2. The transaction is signed before the send, so its hash is known. If a send fails, `send_transaction`
    asks the RPCs for that hash, which 0024 makes a question to each one. If one knows it, the settlement
@@ -1246,8 +1246,8 @@ receipt wait. With both RPCs stalling sends, no block mined and each read 2 s la
 and the SDK threw at 90 s before the hash came back.
 
 **Change.** `send_transaction` has one budget, the receipt timeout plus 5 s, for its reads and sends. A slow
-send shortens the receipt wait, and when the budget is gone the transaction is reported as pending with its
-hash. The 60 s timeout leaves 25 s for the checks before the send. 0027 brings the search into the budget.
+send shortens the receipt wait, and when the budget is gone the wait ends after its first reads, and the
+transaction is reported as pending with its hash. The 60 s timeout leaves 25 s for the checks before the send. 0027 brings the search into the budget.
 **Tests.** A unit test for the arithmetic. With no mining and both RPCs stalling sends, the critic measured
 65.2 s at no read delay and 69.6 s at 2 s, against 92.7 s on hemi.10.
 
@@ -1257,19 +1257,22 @@ hash. The 60 s timeout leaves 25 s for the checks before the send. 0027 brings t
 fork against hemi.11:
 
 - A fast failure got one lookup. A gateway can forward a transaction and answer 5xx, or drop the connection,
-  in under 10 s.
+  in under 10 s. The next RPC then rejects the copy, and the fallback layer reports only that rejection.
 - The 3 s lookup limit hid a transaction from RPCs that answer in more than 3 s but under the 10 s limit.
 - The search did not count against the budget, so a failing send reached 93 s, past the TS SDK's 90 s.
 
-**Change.** Only a node's own JSON-RPC answer skips the search, so the search covers timeouts, dropped
-connections and 5xx. The lookup limit is 8 s. The search ends with the send's budget. A send that fails can
-still run one round of lookups over, up to 16 s with two RPCs, but it has no hash to lose.
+**Change.** Only a node's rejection of something other than a duplicate skips the search, so the search covers
+timeouts, dropped connections, 5xx, and `already known` or `nonce too low`. Those two come from the error text.
+It is only a hint to search, so a node that words them otherwise loses nothing but the search. The lookup
+limit is 8 s. The search ends with the send's budget, which is a target: reads and lookups that have started
+run to their own limits, so with every RPC slow a settle can still pass 90 s, with its hash in the log.
 
-**Left as it is.** A gateway that forwards a transaction and then answers with a JSON-RPC error looks like a
-rejection. Telling them apart would mean reading error text. See Limits in the main README.
+**Left as it is.** A gateway that forwards a transaction and then answers with any other JSON-RPC error looks
+like a rejection. See Limits in the main README.
 
-**Tests.** A unit test for when the search runs. e2e cases: a 502 after forwarding, with `null` from the first
-lookups; and a send that every RPC swallows, which fails and frees its nonce.
+**Tests.** Unit tests for when the search runs. e2e cases: a 502 after forwarding, with the other RPC either
+also answering 502 or rejecting the copy, and with `null` from the first lookups; and a send that every RPC
+swallows, which fails and frees its nonce.
 
 ## What these patches do not change
 

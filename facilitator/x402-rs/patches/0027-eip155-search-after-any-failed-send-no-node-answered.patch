@@ -1,4 +1,4 @@
-From 6024aa6a8de7f072f2ce4cc60e9323c940ab3a60 Mon Sep 17 00:00:00 2001
+From 786679c0f6c8aafc63f879bcef0dd7874f1671a0 Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Sun, 1 Nov 2026 18:21:59 -0500
 Subject: [PATCH] eip155: search after any failed send no node answered, within
@@ -8,23 +8,27 @@ The lookup still reported a mined settlement as failed in three ways.
 
 A fast failure got one lookup. A gateway can forward the transaction
 and answer 5xx, or drop the connection, in under 10 s, and that is no
-more a rejection than a timeout is. Only a node's own JSON-RPC answer
-now skips the search.
+more a rejection than a timeout is. The next RPC then rejects the copy,
+and the fallback layer reports only that, so the failure is hidden.
+Only a node's rejection of something other than a duplicate now skips
+the search. "already known" and "nonce too low" are read from the error
+text; a node that words them otherwise loses only the search.
 
 The 3 s lookup limit hid a transaction from RPCs that answer in more
 than 3 s but under the 10 s request limit. The limit is now 8 s.
 
-The search did not count against the send's budget, so a failing send
-ran past the SDK's 90 s. It now ends with the budget. A send that fails
-can still run one round of lookups over, but it has no hash to lose.
+The search did not count against the send's budget. It now ends with
+the budget. The budget is a target, not a limit: reads and lookups that
+have started run to their own limits, so with every RPC slow a settle
+can still pass the SDK's 90 s. The hash is then in the log.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../x402-chain-eip155/src/chain/provider.rs   | 72 ++++++++++++++-----
- 1 file changed, 54 insertions(+), 18 deletions(-)
+ .../x402-chain-eip155/src/chain/provider.rs   | 114 +++++++++++++++---
+ 1 file changed, 94 insertions(+), 20 deletions(-)
 
 diff --git a/crates/chains/x402-chain-eip155/src/chain/provider.rs b/crates/chains/x402-chain-eip155/src/chain/provider.rs
-index 6f7f1f0..3f95b2b 100644
+index 6f7f1f0..430813a 100644
 --- a/crates/chains/x402-chain-eip155/src/chain/provider.rs
 +++ b/crates/chains/x402-chain-eip155/src/chain/provider.rs
 @@ -104,14 +104,9 @@ impl Eip155ChainProvider {
@@ -45,7 +49,7 @@ index 6f7f1f0..3f95b2b 100644
          let deadline = Instant::now() + search;
          loop {
              if self.transaction_is_known(tx_hash).await {
-@@ -173,24 +168,42 @@ impl Eip155ChainProvider {
+@@ -173,24 +168,55 @@ impl Eip155ChainProvider {
  /// unreachable after this long: the send moves on, and the failure counts against the RPC's rank.
  const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
  
@@ -65,14 +69,17 @@ index 6f7f1f0..3f95b2b 100644
 -/// What a send may add to the receipt timeout. Sending and waiting for the receipt together stay within
 -/// the receipt timeout plus this, however slow the RPCs are. The 60 s receipt timeout then leaves 25 s
 -/// of the 90 s the TS SDK gives `/settle` for the checks before the send.
-+/// What a send may add to the receipt timeout. A transaction that is on its way is answered, with its
-+/// hash, within the receipt timeout plus this, which with the 60 s timeout leaves 25 s of the 90 s the TS
-+/// SDK gives `/settle` for the checks before the send. A send that fails can run one round of lookups over,
-+/// but it has no hash to lose.
++/// What a send may add to the receipt timeout. A slow send shortens the receipt wait and the search so
++/// that the whole takes about the receipt timeout plus this, which with the 60 s timeout leaves 25 s of
++/// the 90 s the TS SDK gives `/settle` for the checks before the send. This is a target, not a limit:
++/// a read or a round of lookups that has started runs to its own limit, so with every RPC slow the whole
++/// can run past it.
  const SEND_ALLOWANCE: Duration = Duration::from_secs(5);
  
- /// How long to wait for a receipt when `spent` of the send's time has gone. Zero reports the transaction
- /// as pending at once.
+-/// How long to wait for a receipt when `spent` of the send's time has gone. Zero reports the transaction
+-/// as pending at once.
++/// How long to wait for a receipt when `spent` of the send's time has gone. At zero the wait ends after
++/// its first reads, and the transaction is reported as pending.
  fn receipt_wait(receipt_timeout: Duration, spent: Duration) -> Duration {
 -    receipt_timeout.min((receipt_timeout + SEND_ALLOWANCE).saturating_sub(spent))
 +    receipt_timeout.min(time_left(receipt_timeout, spent))
@@ -83,19 +90,31 @@ index 6f7f1f0..3f95b2b 100644
 +    (receipt_timeout + SEND_ALLOWANCE).saturating_sub(spent)
 +}
 +
-+/// How long to search for a transaction whose send failed. A node's own JSON-RPC answer is a rejection.
-+/// Anything else says nothing about whether the transaction left: a timeout, a dropped connection, or a
-+/// gateway's 5xx after it forwarded the transaction. The search ends with the send's budget.
-+fn lookup_search(timed_out: bool, answered_by_a_node: bool, time_left: Duration) -> Duration {
-+    if timed_out || !answered_by_a_node {
++/// How long to search for a transaction whose send failed. A node's own rejection means it did not leave.
++/// Anything else says nothing: a timeout, a dropped connection, or a gateway's 5xx after it forwarded the
++/// transaction. The fallback layer reports only the last RPC's answer, so a rejection can hide such a
++/// failure on an earlier RPC. A rejection of a duplicate shows that, and so does the time a timeout took.
++/// The search ends with the send's budget.
++fn lookup_search(timed_out: bool, error: &TransportError, time_left: Duration) -> Duration {
++    let rejected = error
++        .as_error_resp()
++        .is_some_and(|response| !rejects_a_duplicate(&response.message));
++    if timed_out || !rejected {
 +        LOOKUP_WINDOW.min(time_left)
 +    } else {
 +        Duration::ZERO
 +    }
++}
++
++/// Whether a node's rejection means it already has this transaction, or has mined it. The text is only a
++/// hint to search, so a node that words it otherwise loses nothing but the search.
++fn rejects_a_duplicate(message: &str) -> bool {
++    let message = message.to_lowercase();
++    message.contains("already known") || message.contains("nonce too low")
  }
  
  /// An HTTP transport whose requests end after `timeout`.
-@@ -441,8 +454,15 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+@@ -441,8 +467,15 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
              // A failed send proves nothing if an RPC took the transaction and then stalled: the next RPC
              // rejects the copy while the first one's is mined. A node that knows the hash settles it.
              Err(e) => {
@@ -103,7 +122,7 @@ index 6f7f1f0..3f95b2b 100644
 -                if self.find_transaction(tx_hash, send_timed_out).await {
 +                let search = lookup_search(
 +                    send_started.elapsed() >= RPC_REQUEST_TIMEOUT,
-+                    e.as_error_resp().is_some(),
++                    &e,
 +                    time_left(
 +                        Duration::from_secs(self.receipt_timeout_secs),
 +                        started.elapsed(),
@@ -113,7 +132,7 @@ index 6f7f1f0..3f95b2b 100644
                      #[cfg(feature = "telemetry")]
                      tracing::warn!(tx = %tx_hash, error = %e, "Send failed, but an RPC has the transaction");
                      PendingTransactionBuilder::new(self.inner.root().clone(), tx_hash)
-@@ -653,7 +673,10 @@ pub async fn assert_contracts_exists<P: Provider>(
+@@ -653,7 +686,10 @@ pub async fn assert_contracts_exists<P: Provider>(
  
  #[cfg(test)]
  mod tests {
@@ -125,21 +144,46 @@ index 6f7f1f0..3f95b2b 100644
      use alloy_provider::mock::{Asserter, MockTransport};
      use alloy_rpc_client::RpcClient;
      use alloy_transport::{TransportError, TransportErrorKind, TransportFut};
-@@ -759,6 +782,19 @@ mod tests {
+@@ -759,6 +795,44 @@ mod tests {
          assert_eq!(live.calls(), 1);
      }
  
-+    #[test]
-+    fn only_a_nodes_own_answer_skips_the_search_for_a_failed_send() {
++    async fn rejection(message: &str) -> TransportError {
++        let answers = Asserter::new();
++        answers.push_failure_msg(message.to_string());
++        let client = RpcClient::new(MockTransport::new(answers.clone()), false);
++        let send = client.request_noparams::<String>("eth_sendRawTransaction");
++        send.await.unwrap_err()
++    }
++
++    #[tokio::test]
++    async fn only_a_nodes_own_rejection_skips_the_search_for_a_failed_send() {
 +        let plenty = Duration::from_secs(60);
-+        assert_eq!(lookup_search(false, true, plenty), Duration::ZERO);
-+        assert_eq!(lookup_search(false, false, plenty), LOOKUP_WINDOW);
-+        assert_eq!(lookup_search(true, false, plenty), LOOKUP_WINDOW);
-+        // A node answered, but only after an earlier RPC had timed out with the transaction.
-+        assert_eq!(lookup_search(true, true, plenty), LOOKUP_WINDOW);
++        let unreachable = TransportErrorKind::custom_str("502");
++        let rejected = rejection("insufficient funds for gas").await;
++
++        assert_eq!(lookup_search(false, &rejected, plenty), Duration::ZERO);
++        assert_eq!(lookup_search(false, &unreachable, plenty), LOOKUP_WINDOW);
++        assert_eq!(lookup_search(true, &unreachable, plenty), LOOKUP_WINDOW);
++        // A node rejected it, but only after an earlier RPC had timed out with the transaction.
++        assert_eq!(lookup_search(true, &rejected, plenty), LOOKUP_WINDOW);
 +        // The search ends with the budget.
 +        let little = Duration::from_secs(4);
-+        assert_eq!(lookup_search(true, false, little), little);
++        assert_eq!(lookup_search(true, &unreachable, little), little);
++    }
++
++    // An earlier RPC took the transaction and failed fast, and this one refused the copy.
++    #[tokio::test]
++    async fn a_rejected_duplicate_is_searched_for() {
++        let plenty = Duration::from_secs(60);
++        for message in [
++            "already known",
++            "nonce too low: next nonce 8, tx nonce 7",
++            "Nonce too low",
++        ] {
++            let duplicate = rejection(message).await;
++            assert_eq!(lookup_search(false, &duplicate, plenty), LOOKUP_WINDOW);
++        }
 +    }
 +
      #[test]

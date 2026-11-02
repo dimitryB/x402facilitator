@@ -202,3 +202,48 @@ pay-btc: [buyer] explorer: https://testnet.explorer.hemi.xyz/tx/0xadf0e1b867f0b4
 pay-btc: [buyer] buyer balance: 0.00089997 hBTC -> 0.00089996 hBTC
 pay-btc: [buyer] payTo balance: 0.00000003 hBTC -> 0.00000004 hBTC
 ```
+
+## Run on 2026-11-02T00:36:15Z: usdc btc
+
+Facilitator image `hemi-x402-facilitator:e75adda-hemi.13`.
+
+| Payment | Settlement tx | Receipt |
+|------|------|------|
+| USDC.e `0xD47971C7F5B1067d25cd45d30b2c9eb60de96443` (Permit2) | [`0xefd1da7d2f08c7f81c19fd8db2bd368e8ee4411e4b0e1fa80c3a564808badf25`](https://testnet.explorer.hemi.xyz/tx/0xefd1da7d2f08c7f81c19fd8db2bd368e8ee4411e4b0e1fa80c3a564808badf25) | status=0x1 block=7122412 from=0xd2b2fc8093f8a734c42b90762fd2b2f8464631af to=0x402085c248eea27d92e8b30b2c58ed07f9e20001, tip 1000000 wei |
+| hBTC `0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7` (Permit2) | [`0x36682a866b72c26eed8aee6b5b88e07b1b05391476a7b6d3ed1a6ab44fc8ec6d`](https://testnet.explorer.hemi.xyz/tx/0x36682a866b72c26eed8aee6b5b88e07b1b05391476a7b6d3ed1a6ab44fc8ec6d) | status=0x1 block=7122413 from=0xd2b2fc8093f8a734c42b90762fd2b2f8464631af to=0x402085c248eea27d92e8b30b2c58ed07f9e20001, tip 1000000 wei |
+
+The facilitator signer is `0xD2B2fc8093f8A734c42B90762FD2B2F8464631af`; the buyer is `0x35C8182E886382D1133a3Daf980470D3646D3786`; payTo is `0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f`.
+
+Seller log: each payment is verified by the facilitator's /verify, then settled by its /settle:
+
+```
+[seller] verified 1000 of 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 on eip155:743111 from 0x35C8182E886382D1133a3Daf980470D3646D3786
+[seller] settled 1000 of 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 on eip155:743111 from 0x35C8182E886382D1133a3Daf980470D3646D3786: tx 0xefd1da7d2f08c7f81c19fd8db2bd368e8ee4411e4b0e1fa80c3a564808badf25
+[seller] verified 1 of 0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7 on eip155:743111 from 0x35C8182E886382D1133a3Daf980470D3646D3786
+[seller] settled 1 of 0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7 on eip155:743111 from 0x35C8182E886382D1133a3Daf980470D3646D3786: tx 0x36682a866b72c26eed8aee6b5b88e07b1b05391476a7b6d3ed1a6ab44fc8ec6d
+```
+
+Buyer output:
+
+```
+pay-usdc: [buyer] buyer 0x35C8182E886382D1133a3Daf980470D3646D3786 holds 22.558078 USDC.e
+pay-usdc: [buyer] GET http://localhost:4021/echo?run=testnet&asset=usdc
+pay-usdc: [buyer] paying 1000 base units of USDC.e (0xD47971C7F5B1067d25cd45d30b2c9eb60de96443) on eip155:743111 to 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f via permit2
+pay-usdc: [buyer] Permit2 allowance ok (115792089237316195423570985008687907853269984665640564039457584007913129639935)
+pay-usdc: [buyer] asset:    USDC.e 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443 (eip155:743111)
+pay-usdc: [buyer] response: {"echo":{"run":"testnet","asset":"usdc"},"timestamp":"2026-11-02T00:35:47.776Z"}
+pay-usdc: [buyer] tx:       0xefd1da7d2f08c7f81c19fd8db2bd368e8ee4411e4b0e1fa80c3a564808badf25
+pay-usdc: [buyer] explorer: https://testnet.explorer.hemi.xyz/tx/0xefd1da7d2f08c7f81c19fd8db2bd368e8ee4411e4b0e1fa80c3a564808badf25
+pay-usdc: [buyer] buyer balance: 22.558078 USDC.e -> 22.557078 USDC.e
+pay-usdc: [buyer] payTo balance: 0.004 USDC.e -> 0.005 USDC.e
+pay-btc: [buyer] buyer 0x35C8182E886382D1133a3Daf980470D3646D3786 holds 0.00089996 hBTC
+pay-btc: [buyer] GET http://localhost:4021/echo?run=testnet&asset=btc
+pay-btc: [buyer] paying 1 base units of hBTC (0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7) on eip155:743111 to 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f via permit2
+pay-btc: [buyer] Permit2 allowance ok (115792089237316195423570985008687907853269984665640564039457584007913129639935)
+pay-btc: [buyer] asset:    hBTC 0x36Ab5Dba83d5d470F670BC4c06d7Da685d9afAe7 (eip155:743111)
+pay-btc: [buyer] response: {"echo":{"run":"testnet","asset":"btc"},"timestamp":"2026-11-02T00:36:06.181Z"}
+pay-btc: [buyer] tx:       0x36682a866b72c26eed8aee6b5b88e07b1b05391476a7b6d3ed1a6ab44fc8ec6d
+pay-btc: [buyer] explorer: https://testnet.explorer.hemi.xyz/tx/0x36682a866b72c26eed8aee6b5b88e07b1b05391476a7b6d3ed1a6ab44fc8ec6d
+pay-btc: [buyer] buyer balance: 0.00089996 hBTC -> 0.00089995 hBTC
+pay-btc: [buyer] payTo balance: 0.00000004 hBTC -> 0.00000005 hBTC
+```
