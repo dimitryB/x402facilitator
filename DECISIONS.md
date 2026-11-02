@@ -905,6 +905,14 @@ Verified on 2026-11-01 against a no-cache hemi.13 build (194 s, all 27 patches):
 
 **Also fixed:** `package-lock.json` disagreed with `package.json` on the Node version, so `npm install` dirtied a clean clone; and the README now says that Colima shares only `$HOME` by default.
 
+## D-024. Thirteenth critic pass
+
+All eight Definition-of-done items passed, and the amended 0027 held up: the single-fault case that hemi.12 reported as failed settles on hemi.13, with `already known` as well as `nonce too low`. The rebuilt binary has the same sha256 as the image that ran the live payments.
+
+The pass was not clean on one point: a comment in `.env.example` said the mainnet key is needed only with `config.json`, and `config.mainnet.json` needs it too. Two README lines were imprecise, and both are corrected. The search rule omitted that a rejection after a timed-out RPC is still searched for. And searching on a real `nonce too low` makes that failure take about 27 s instead of 4 s, measured on a fork with a stale nonce: each failed cleanly, nothing was sent or charged, and the next settlement succeeded. That cost is accepted, because it needs a nonce gap and a restart, and it is now listed under Limits.
+
+No code changed, so hemi.13 stands.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).
