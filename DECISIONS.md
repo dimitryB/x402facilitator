@@ -463,7 +463,7 @@ $ curl … '{"method":"eth_blockNumber"}' https://hemi.drpc.org   vs   cast bloc
 5614567 = 5614567                                                                        # mainnet dRPC is fine
 ```
 
-Impact on the facilitator: verification reads and nonce reads are correct. Settlement waits for its receipt through alloy's `get_receipt`. With x402-rs's one confirmation (`MetaTransaction::confirmations = 1`, `chain/provider.rs:396`), that polls `eth_getTransactionReceipt` on a timer, independent of the `eth_blockNumber` block stream (`alloy-provider` 2.0.5, `heart.rs` `get_receipt`). A stale block number therefore cannot hide the receipt. dRPC stays the testnet primary as the brief specifies, and the live testnet run checks this.
+Impact on the facilitator: verification reads and nonce reads are correct. Settlement waits for its receipt through alloy's `get_receipt`. With x402-rs's one confirmation (`MetaTransaction::confirmations = 1`, `chain/provider.rs:396`), that polls `eth_getTransactionReceipt` on a timer, independent of the `eth_blockNumber` block stream (`alloy-provider` 2.0.5, `heart.rs` `get_receipt`). A stale block number therefore cannot hide the receipt. dRPC stays the testnet primary as the brief specifies, and the live testnet run checks this. A `null` receipt from a lagging RPC could hide it, which this entry missed. D-025 covers that, and since patch 0028 the wait reads neither that timer nor any block number.
 
 Impact on forks: an unpinned anvil fork of dRPC testnet would start ~2.9M blocks back. `scripts/fork.sh` defaults to the public RPCs and falls back to dRPC on testnet only with a pinned block.
 
@@ -514,6 +514,7 @@ No config setting changes any of this, so the facilitator is now built from `fac
 | 0025 | A settlement whose tip cannot be read fails before anything is sent (hemi.11, D-021) |
 | 0026 | A send and its receipt wait share one budget, the receipt timeout plus 5 s (hemi.11, D-021) |
 | 0027 | Any failed send except a node's rejection of a non-duplicate is searched for, with an 8 s lookup limit, within the budget (hemi.13, D-023) |
+| 0028 | A receipt is looked for on each RPC separately, on the first settle and on a retry, so a lagging RPC cannot hide it (hemi.14, D-025) |
 
 hemi.1 had patches 0001 to 0005. A fresh-context critic then found three more gaps:
 
@@ -918,6 +919,47 @@ The fourteenth pass, on the commit with those fixes, was clean: all eight items 
 The last is now a limit. In a burst of 30 concurrent payments on a fork with the primary dead, the fallback's throttle held throughput to about 0.3 payments a second, `/verify` took up to 88 s and `/settle` up to 86 s, all 30 were mined, and one answered `settlement_pending`.
 
 Passes 9 to 14 all passed the Definition of done. Pass 13 found no code or funds issue, only the comment above, and pass 14 was clean, on the same image. The brief's condition of two passes in a row is met on that reading. Pass 13 was not fully clean by the stricter rule used here.
+
+## D-025. External review on 2026-11-02: a fast stale RPC hid a mined payment
+
+The review reported that a fast RPC with a stale view could hide a confirmed receipt from the healthy fallback, at 404d96f, and it cited the retry's lookup. The finding was correct, and it understated the problem, because the first settle failed too. Reproduced on hemi.13 on a fork, with the stale RPC first in the race. Each time the transfer was mined and `payTo` paid:
+
+| Stale RPC | First settle | Three retries | Once it recovered |
+|------|------|------|------|
+| `null` for receipts only | `settlement_pending` in 0.9 s | all pending | success, same transaction |
+| Also frozen at an old block | `settlement_pending` in 60.5 s | all pending | success, same transaction |
+
+In the frozen run the fallback served the real receipt 10 times, and all 10 were discarded. The cause is D-015's fan-out: the first answer wins, and `null` counts as an answer. The first settle had its own route. alloy's `get_receipt` ends the wait with an error on one `null` once its block watcher has seen the transaction, so the wait could end in under a second. D-015 checked that a stale block number cannot hide a receipt and did not ask whether a stale receipt could.
+
+A stock seller retries once and then refuses, so this was a further route to **Charged but not served**, on a payment that had landed.
+
+**Live exposure was low but not zero.** A read-only sample on 2026-11-02 took the last transaction of each new block for 230 s from the workstation: 41 receipts, none `null` on either RPC, and dRPC answered first twice. dRPC testnet's `eth_blockNumber` was 5,416,126 against the public RPC's 7,126,964, so its stale backend is still there. This is a short sample from one machine.
+
+**Fix, patch 0028.** `find_receipt` asks each RPC on its own and takes the first real receipt. Both routes use it, and it replaces alloy's watcher. An RPC that stalls holds up no other, because each RPC polls on its own schedule. Only a receipt ends the search early. With no RPC holding it, the answer is `settlement_pending`, as before.
+
+The interval is 7 s, alloy's own for a remote RPC. A first version polled every 3 s, and I changed it before measuring, because every look goes to every RPC and the 4-per-second limit on the public RPC is already the facilitator's capacity limit. The lookups now share each RPC's rate limit with the fallback client, where 0024's had none. The same burst of 30 payments, with the primary dead and a block every 12 s on a fork, measured on both images:
+
+| Image | Payments a second | Slowest `/verify` | Slowest `/settle` | Settled | Pending |
+|------|------|------|------|------|------|
+| hemi.13 | 0.31 | 79 s | 74 s | 30 | 0 |
+| hemi.14 | 0.34 | 46 s | 71 s | 30 | 0 |
+
+**Cost.** With a stalled RPC and no receipt yet, a retry answers after its 8 s lookup limit, where the shared read answered at once, and the last look of a first settle can run 8 s past the wait. That makes the worst send and wait 73 s, which still leaves 17 s of the TS SDK's 90 s for the checks before the send. An RPC error during a retry now reads the same as `null`, so `details` no longer carry it. These cases all still answer `settlement_pending`, which is right for them.
+
+**The other first-answer reads were audited and left.** A receipt is the only chain read that happens after a payment has moved. The rest happen before a send, or after one that failed, so a stale answer costs a rejection, a revert or a stuck send, and none can hide a payment that landed:
+
+| Read | Stale answer costs |
+|------|------|
+| Balance, allowance and simulation | A false rejection, or a transaction that reverts and costs gas |
+| Fee and gas estimates | A settlement that reverts, or waits in the mempool as `settlement_pending` |
+| `authorizationState` and the Permit2 bitmap after a failure | The message only: both answers are `invalid_transaction_state` |
+| Nonce in `PendingNonceManager`, at first use and after a failed send | A low nonce is rejected, or queues behind a transaction the node has not seen |
+
+The nonce is the one to watch. A frozen RPC that keeps winning that read would make settlements fail, or sit pending, until it recovers. That costs availability and hides no payment, so it stays out of this patch, and it is listed in README "Limits and open items".
+
+Verified on 2026-11-02 against a no-cache hemi.14 build (124 s, all 28 patches): `cargo fmt`, `clippy -D warnings` and the unit tests pass, and mutating `find_receipt` back to the first answer fails two unit tests. All four cases in `tests/e2e/10-stale-rpc.test.ts` failed on hemi.13 and pass on hemi.14. The e2e suite passed, 13 files and 116 tests in 361 s. `forge test` passed 17, and `buyer/demo-fork.sh` settled all four payments.
+
+hemi.14 has not run live. It changes how every settlement waits, so `scripts/testnet-run.sh --go` is due on this image. The 41 live receipts above are the only evidence so far that real RPCs answer these lookups.
 
 ## Pre-spike context: what the reference code requires
 

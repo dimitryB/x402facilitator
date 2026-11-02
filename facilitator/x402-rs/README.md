@@ -22,6 +22,8 @@ how a payment is settled. What they change:
 - where a transaction goes: to one RPC at a time, moving on only if that RPC cannot be reached or does not
   answer within 10 s, instead of a copy to every RPC (0021, 0022);
 - when a send counts as failed: only once no RPC shows the transaction (0022, 0024, 0027);
+- when a settlement counts as pending: only once no RPC has its receipt, on the first settle and on a
+  retry (0028);
 - what is sent at all: an EIP-6492 wallet deployment through Multicall3 is only sent after the EIP-6492
   validator accepted the signature, and a wrapper around the payer's own signature is never sent (0012).
 
@@ -31,7 +33,7 @@ how a payment is settled. What they change:
 - the fees a settlement pays: on an EIP-1559 chain the tip is at least the node's suggested priority fee,
   so a settlement sent after a run of tip-less blocks is still mined where the sequencer has a minimum
   tip, as Hemi testnet's does (0019), and a settlement whose tip cannot be read is not sent (0025). These,
-  and 0021 to 0027, are about liveness rather than error shapes.
+  and 0021 to 0028, are about liveness rather than error shapes.
 
 Spec references are to `x402-foundation/x402` at `e4a0868`:
 
@@ -68,6 +70,7 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0025](patches/0025-eip155-do-not-send-a-settlement-whose-tip-floor-coul.patch) | a failed tip read removes 0019's floor, and the settlement goes out at 1 wei | none: liveness |
 | [0026](patches/0026-eip155-bound-a-send-and-its-receipt-wait-together.patch) | a slow send plus the receipt wait can outlast the TS SDK's 90 s, and the hash is lost to the caller | §5.3.2 hash |
 | [0027](patches/0027-eip155-search-after-any-failed-send-no-node-answered.patch) | a fast 5xx or a slow lookup can still report a mined settlement as failed, and the search ignores the send's budget | §5.3.2 hash |
+| [0028](patches/0028-eip155-a-lagging-RPC-cannot-hide-a-settlement-s-rece.patch) | a receipt read takes the first answer, and `null` is one, so a fast RPC that lags reports a mined settlement as pending, on the first settle and on every retry | §9 `settlement_pending` |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
@@ -245,7 +248,7 @@ payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an a
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.13` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.14` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -261,7 +264,7 @@ silicon), with the base images already pulled:
   patches.
 - `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
   113 s for hemi.3; 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches); 113 s for hemi.5
-  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 118 s and 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11; 287 s for hemi.12; 194 s for hemi.13.
+  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 118 s and 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11; 287 s for hemi.12; 194 s for hemi.13; 124 s for hemi.14.
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -893,7 +896,8 @@ this patch; a verdict, 200, since 0018).
   - `/verify` stays in the request's future: it sends nothing.
 - **Timeouts in front of the facilitator.** Any proxy, load balancer or client timeout on `/settle` should
   be at least 90 s, the TS SDK's default. Sending and waiting take up to `receipt_timeout_secs` (60 s in
-  `facilitator/config*.json`) plus 5 s (0026), and the checks before the broadcast come on top. With a
+  `facilitator/config*.json`) plus 5 s (0026), a stalled RPC can hold the last look for 8 s more (0028), and the checks before the
+  broadcast come on top. With a
   shorter timeout the caller loses the response, and with it the hash,
   although the settlement completes. The hash is then in the facilitator's log. A retry of the same request
   is answered from it once the receipt wait has ended.
@@ -1273,6 +1277,41 @@ like a rejection. See Limits in the main README.
 **Tests.** Unit tests for when the search runs. e2e cases: a 502 after forwarding, with the other RPC either
 also answering 502 or rejecting the copy, and with `null` from the first lookups; and a send that every RPC
 swallows, which fails and frees its nonce.
+
+### 0028 eip155: a lagging RPC cannot hide a settlement's receipt
+
+**Problem.** A read goes to every RPC and the first answer wins, and `null` from a node that has not seen the
+block is an answer. A fast RPC that lags hid a receipt the other RPC had, for as long as it lagged. Reproduced
+on a fork against hemi.13: the transfer was mined and `payTo` paid, the settle and three retries answered
+`settlement_pending`, and they succeeded only once the RPC recovered. There were two routes:
+
+- A retry read the receipt through the shared client (0011).
+- The first settle waited in alloy's `get_receipt`. Once its block watcher has seen the transaction, one
+  `null` ends the wait with an error, so the settle answered pending in 0.9 s. With the RPC frozen at an old
+  block the watcher saw nothing, and the settle used the whole 60 s.
+
+A stock seller retries once and then refuses, so the buyer was charged and not served.
+
+**Change.** `find_receipt` asks each RPC on its own and takes the first real receipt. Only a receipt ends the
+search early, and an RPC that stalls holds up no other. Both routes use it. The first settle polls every RPC
+in place of alloy's watcher, every 7 s as alloy did, with a last look when the wait ends. A retry looks once.
+With no RPC holding the receipt the answer is `settlement_pending`, as before. An RPC error now counts the
+same as `null`, so a retry's `details` no longer carry it. `MetaTransaction.confirmations` was always 1 and
+is gone, because a receipt is the one confirmation the wait gives.
+
+These lookups now use each RPC's rate limit, shared with the fallback client, so the 4 per second on the
+public RPC covers them. With a stalled RPC and no receipt yet, a retry answers after its 8 s lookup limit, and
+the last look of a first settle can run 8 s past the wait.
+
+**Left as it is.** The other reads still take the first answer. They all happen before a send, or after one
+that failed, so a stale answer costs a rejection, a revert or a stuck send, and none can hide a payment that landed. The
+one to know about is the nonce read in `PendingNonceManager`, at first use and after a failed send. A stale nonce is
+rejected, or queues behind a transaction the node has not seen, so that settlement fails or stays pending. See
+D-025.
+
+**Tests.** Unit tests for `find_receipt`. `tests/e2e/10-stale-rpc.test.ts` keeps a fast primary stale through
+each case: `null` receipts, frozen at an old block, a block during the wait, and a retry after
+`settlement_pending`. All four failed on hemi.13.
 
 ## What these patches do not change
 
