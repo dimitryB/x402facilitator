@@ -1,0 +1,133 @@
+From 225b48495dd7f5f2339fc201e47d3254c1b5a295 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 22:48:23 -0400
+Subject: [PATCH 01/18] =?UTF-8?q?types:=20add=20x402=20v2=20=C2=A79=20erro?=
+ =?UTF-8?q?r=20codes=20to=20ErrorReason?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The x402 v2 specification (specs/x402-specification-v2.md §9) defines the error
+codes facilitators return in invalidReason / errorReason. Add the ones x402-rs
+needs and has no equivalent for:
+
+- invalid_exact_evm_payload_signature: signature of an exact-scheme EVM payload
+  is invalid or not made by the payer
+- invalid_transaction_state: the chain rejects the transfer, e.g. because the
+  payment authorization was already used
+- unexpected_verify_error / unexpected_settle_error: endpoint-specific
+  replacements for the non-spec unexpected_error
+
+and the PaymentVerificationError variants that map to the first two. Existing
+variants and their serialization are unchanged.
+---
+ crates/x402-types/src/proto/mod.rs | 78 ++++++++++++++++++++++++++++++
+ 1 file changed, 78 insertions(+)
+
+diff --git a/crates/x402-types/src/proto/mod.rs b/crates/x402-types/src/proto/mod.rs
+index fafbbb1..b7397f2 100644
+--- a/crates/x402-types/src/proto/mod.rs
++++ b/crates/x402-types/src/proto/mod.rs
+@@ -278,6 +278,17 @@ pub enum PaymentVerificationError {
+     /// The accepted payment details don't match the requirements.
+     #[error("Accepted does not match payment requirements")]
+     AcceptedRequirementsMismatch,
++    /// The signature of an `exact` scheme EVM payload is invalid or was not made by the payer.
++    ///
++    /// Reported as x402 v2 §9 `invalid_exact_evm_payload_signature`.
++    #[error("{0}")]
++    InvalidExactEvmPayloadSignature(String),
++    /// The payment authorization (for example an EIP-3009 or Permit2 nonce) was already used on chain,
++    /// so the transfer it authorizes can no longer execute.
++    ///
++    /// Reported as x402 v2 §9 `invalid_transaction_state`.
++    #[error("Payment authorization was already used on chain")]
++    AuthorizationAlreadyUsed,
+ }
+ 
+ impl PaymentVerificationError {
+@@ -311,6 +322,12 @@ impl AsPaymentProblem for PaymentVerificationError {
+             PaymentVerificationError::AcceptedRequirementsMismatch => {
+                 ErrorReason::AcceptedRequirementsMismatch
+             }
++            PaymentVerificationError::InvalidExactEvmPayloadSignature(_) => {
++                ErrorReason::InvalidExactEvmPayloadSignature
++            }
++            PaymentVerificationError::AuthorizationAlreadyUsed => {
++                ErrorReason::InvalidTransactionState
++            }
+         };
+         PaymentProblem::new(error_reason, self.to_string())
+     }
+@@ -359,6 +376,14 @@ pub enum ErrorReason {
+     UnsupportedScheme,
+     /// An unexpected error occurred.
+     UnexpectedError,
++    /// x402 v2 §9: "Payment authorization signature is invalid or improperly signed" (`exact` on EVM).
++    InvalidExactEvmPayloadSignature,
++    /// x402 v2 §9: "Blockchain transaction failed or was rejected".
++    InvalidTransactionState,
++    /// x402 v2 §9: "Unexpected error occurred during payment verification".
++    UnexpectedVerifyError,
++    /// x402 v2 §9: "Unexpected error occurred during payment settlement".
++    UnexpectedSettleError,
+ }
+ 
+ /// Trait for converting errors into structured payment problems.
+@@ -411,3 +436,56 @@ pub type PaymentRequired = ProtocolVersioned<PaymentRequiredV>;
+ /// Verbatim JSON for PaymentRequirements and other places.
+ #[derive(Debug, Serialize, Deserialize, Clone)]
+ pub struct OriginalJson(pub Box<serde_json::value::RawValue>);
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn spec_error_codes_serialize_as_in_x402_v2_section_9() {
++        let cases = [
++            (
++                ErrorReason::InvalidExactEvmPayloadSignature,
++                "invalid_exact_evm_payload_signature",
++            ),
++            (
++                ErrorReason::InvalidTransactionState,
++                "invalid_transaction_state",
++            ),
++            (
++                ErrorReason::UnexpectedVerifyError,
++                "unexpected_verify_error",
++            ),
++            (
++                ErrorReason::UnexpectedSettleError,
++                "unexpected_settle_error",
++            ),
++            (ErrorReason::InsufficientFunds, "insufficient_funds"),
++        ];
++        for (reason, code) in cases {
++            assert_eq!(
++                serde_json::to_value(reason).unwrap(),
++                serde_json::json!(code)
++            );
++            assert_eq!(
++                serde_json::from_value::<ErrorReason>(serde_json::json!(code)).unwrap(),
++                reason
++            );
++        }
++    }
++
++    #[test]
++    fn new_verification_errors_map_to_spec_reasons() {
++        let signature = PaymentVerificationError::InvalidExactEvmPayloadSignature("bad".into());
++        assert_eq!(
++            signature.as_payment_problem().reason(),
++            ErrorReason::InvalidExactEvmPayloadSignature
++        );
++        assert_eq!(signature.as_payment_problem().details(), "bad");
++        let used = PaymentVerificationError::AuthorizationAlreadyUsed;
++        assert_eq!(
++            used.as_payment_problem().reason(),
++            ErrorReason::InvalidTransactionState
++        );
++    }
++}

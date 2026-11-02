@@ -1,0 +1,9 @@
+{
+  "name": "@hemi-x402/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.ts",
+  "exports": { ".": "./index.ts", "./hemi.json": "./hemi.json" },
+  "dependencies": { "viem": "2.57.5" }
+}

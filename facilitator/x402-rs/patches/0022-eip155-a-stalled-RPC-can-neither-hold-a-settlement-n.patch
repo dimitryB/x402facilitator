@@ -1,0 +1,188 @@
+From b48646a565337c920c5ba36be235a74db1f4ad19 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 15:30:45 -0500
+Subject: [PATCH] eip155: a stalled RPC can neither hold a settlement nor lose
+ one
+
+Since a transaction goes to one RPC at a time, a node that accepts the
+connection and never answers held the send with no limit: Http had no
+timeout, and the sequential fallback moves on only on a transport
+error. Reads race, and the loser of a race records nothing, so a
+stalled RPC stayed the first choice. /settle never answered, and when
+the socket finally dropped the detached settlement went on and paid
+after the client had left. The next settlements hung behind it.
+
+Every RPC request now ends after 10 s, which counts as unreachable: the
+send moves on, and the failure counts against that RPC's rank. alloy
+scores the last ten results, so the rank flips after a failure or two.
+
+That alone would bring back the failure the one-RPC send removed. An
+RPC can forward the transaction and only then stall, and the next RPC
+rejects the copy, so a mined settlement would be reported as failed. So
+the transaction is signed before the send, its hash is known, and a
+failed send asks the chain for that hash. If an RPC knows it, the
+settlement carries on from the hash, and the nonce is kept. If none
+does, the send failed as before.
+
+An RPC that took the transaction, stalled, and whose copy has not yet
+reached the node answering the lookup is still reported as failed; that
+is the ambiguous send already listed as a limit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../x402-chain-eip155/src/chain/provider.rs   | 76 ++++++++++++++++---
+ 1 file changed, 65 insertions(+), 11 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/chain/provider.rs b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+index ccb42b5..096e9c5 100644
+--- a/crates/chains/x402-chain-eip155/src/chain/provider.rs
++++ b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+@@ -4,7 +4,8 @@ use alloy_provider::fillers::{
+     BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
+ };
+ use alloy_provider::{
+-    Identity, PendingTransactionError, Provider, ProviderBuilder, RootProvider, WalletProvider,
++    Identity, PendingTransactionBuilder, PendingTransactionError, Provider, ProviderBuilder,
++    RootProvider, WalletProvider,
+ };
+ use alloy_rpc_client::RpcClient;
+ use alloy_rpc_types_eth::{BlockId, TransactionReceipt, TransactionRequest};
+@@ -12,11 +13,12 @@ use alloy_signer::Signer;
+ use alloy_signer_local::PrivateKeySigner;
+ use alloy_transport::TransportError;
+ use alloy_transport::layers::{FallbackLayer, ThrottleLayer};
+-use alloy_transport_http::Http;
++use alloy_transport_http::{Http, reqwest};
+ use std::num::NonZeroUsize;
+ use std::ops::Deref;
+ use std::sync::atomic::{AtomicUsize, Ordering};
+ use std::sync::{Arc, LazyLock};
++use std::time::Duration;
+ use tower::ServiceBuilder;
+ use x402_types::chain::{ChainId, ChainProviderOps, FromConfig};
+ 
+@@ -103,7 +105,7 @@ impl Eip155ChainProvider {
+                 let rate_limit = provider_config.rate_limit.unwrap_or(u32::MAX);
+                 let service = ServiceBuilder::new()
+                     .layer(ThrottleLayer::new(rate_limit))
+-                    .service(Http::new(rpc_url));
++                    .service(rpc_http(rpc_url, RPC_REQUEST_TIMEOUT));
+                 Some(service)
+             })
+             .collect::<Vec<_>>();
+@@ -129,6 +131,23 @@ impl Eip155ChainProvider {
+     }
+ }
+ 
++/// How long one RPC gets to answer one request.
++///
++/// A read goes to every RPC and the first answer wins, but a transaction waits for its one RPC, so a node
++/// that accepts the connection and never answers would hold a settlement for ever. It counts as
++/// unreachable after this long: the send moves on, and the failure counts against the RPC's rank. With a
++/// chain's two RPCs the send plus the 60 s receipt wait stays under the 90 s the TS SDK gives `/settle`.
++const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
++
++/// An HTTP transport whose requests end after `timeout`.
++fn rpc_http(url: url::Url, timeout: Duration) -> Http<reqwest::Client> {
++    let client = reqwest::Client::builder()
++        .timeout(timeout)
++        .build()
++        .expect("HTTP client for an RPC");
++    Http::with_client(client, url)
++}
++
+ /// How requests are shared between a chain's RPCs.
+ ///
+ /// A read goes to all of them at once and the first answer wins. A transaction must not, and by default
+@@ -243,8 +262,9 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+     /// selects the next available signer using round-robin selection, and handles gas pricing
+     /// based on whether the network supports EIP-1559.
+     ///
+-    /// If submission fails, the nonce for the sending address is reset to force a fresh query on
+-    /// the next transaction. If the transaction was submitted but its receipt does not arrive
++    /// If submission fails and no RPC knows the transaction's hash, the nonce for the sending address
++    /// is reset to force a fresh query on the next transaction. If an RPC knows it, the transaction is
++    /// on its way, and this carries on as for a send that succeeded. If the transaction was submitted but its receipt does not arrive
+     /// (timeout or RPC error), the nonce is kept, because the transaction may still be mined, and
+     /// the error carries its hash ([`MetaTransactionSendError::ReceiptUnavailable`]).
+     ///
+@@ -331,17 +351,38 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+             txr.set_gas_limit(gas_limit)
+         }
+ 
+-        // Send transaction with error handling for nonce reset
+-        let pending_tx = match self.inner.send_transaction(txr).await {
+-            Ok(pending) => pending,
++        // Sign here rather than inside the send, so that the hash is known whatever the send answers.
++        let filled = self.inner.fill(txr).await;
++        let signed =
++            filled.and_then(|tx| tx.try_into_envelope().map_err(TransportError::local_usage));
++        let signed = match signed {
++            Ok(signed) => signed,
+             Err(e) => {
+-                // Transaction submission failed - reset nonce to force requery
+                 self.nonce_manager.reset_nonce(from_address).await;
+                 return Err(MetaTransactionSendError::Transport(e));
+             }
+         };
++        let tx_hash = *signed.tx_hash();
++
++        // Send transaction with error handling for nonce reset
++        let pending_tx = match self.inner.send_tx_envelope(signed).await {
++            Ok(pending) => pending,
++            // A failed send proves nothing if an RPC took the transaction and then stalled: the next RPC
++            // rejects the copy while the first one's is mined. A node that knows the hash settles it.
++            Err(e) => match self.inner.get_transaction_by_hash(tx_hash).await {
++                Ok(Some(_)) => {
++                    #[cfg(feature = "telemetry")]
++                    tracing::warn!(tx = %tx_hash, error = %e, "Send failed, but the chain has the transaction");
++                    PendingTransactionBuilder::new(self.inner.root().clone(), tx_hash)
++                }
++                _ => {
++                    // Transaction submission failed - reset nonce to force requery
++                    self.nonce_manager.reset_nonce(from_address).await;
++                    return Err(MetaTransactionSendError::Transport(e));
++                }
++            },
++        };
+ 
+-        let tx_hash = *pending_tx.tx_hash();
+         // Logged before waiting for the receipt, so the hash of every transaction that went out can
+         // be found even if the receipt never arrives or nobody reads the response.
+         #[cfg(feature = "telemetry")]
+@@ -529,7 +570,7 @@ pub async fn assert_contracts_exists<P: Provider>(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{fallback_layer, fees_with_tip_floor};
++    use super::{fallback_layer, fees_with_tip_floor, rpc_http};
+     use alloy_provider::mock::{Asserter, MockTransport};
+     use alloy_rpc_client::RpcClient;
+     use alloy_transport::{TransportError, TransportErrorKind, TransportFut};
+@@ -537,6 +578,7 @@ mod tests {
+     use std::sync::Arc;
+     use std::sync::atomic::{AtomicUsize, Ordering};
+     use std::task::{Context, Poll};
++    use std::time::Duration;
+     use tower::{Service, ServiceBuilder};
+ 
+     /// An RPC that counts what it receives and answers on a later poll, as a real one does, so that the
+@@ -634,6 +676,18 @@ mod tests {
+         assert_eq!(live.calls(), 1);
+     }
+ 
++    #[tokio::test]
++    async fn a_request_to_an_rpc_that_never_answers_ends() {
++        // Connections queue on the listener, and nothing ever reads them.
++        let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let url = format!("http://{}", stalled.local_addr().unwrap());
++        let http = rpc_http(url.parse().unwrap(), Duration::from_millis(50));
++        let answer = RpcClient::new(http, false)
++            .request_noparams::<String>("eth_chainId")
++            .await;
++        assert!(answer.is_err());
++    }
++
+     #[tokio::test]
+     async fn a_node_that_rejects_a_transaction_is_the_answer() {
+         let answers = Asserter::new();

@@ -1,0 +1,42 @@
+# Hemi x402 facilitator: x402-rs plus a small patch set for the x402 v2 spec's error shapes,
+# configured for Hemi. The image is built locally from facilitator/Dockerfile (first build: 2 to 4 minutes).
+#
+# x402-rs refuses to start if any configured chain lacks Permit2, the x402 exact proxy or the
+# EIP-6492 validator, so pick the config that matches what is deployed (README "Run it"):
+#
+#   FACILITATOR_CONFIG=config.testnet.json docker compose up    testnet only
+#   FACILITATOR_CONFIG=config.mainnet.json docker compose up    mainnet only
+#   docker compose up                                           both chains (config.json)
+#   docker compose -f docker-compose.yml -f docker-compose.fork.yml up   both chains on local forks (scripts/fork.sh up)
+#
+# Secrets come from .env (copy .env.example). RPC defaults: dRPC primary, Hemi public RPC fallback.
+services:
+  facilitator:
+    # x402-rs e75adda + facilitator/x402-rs/patches (hemi.14), see facilitator/x402-rs/README.md.
+    # Unpatched base, for comparison: the stock image this replaced,
+    #   ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d824bf6a5f342add8ae22eb44a2c56894ad22e7d3f5b83ba38023226b9
+    #   (x402-rs 2.0.2, revision 0b14f39; EVM code identical to e75adda, DECISIONS.md D-013).
+    image: hemi-x402-facilitator:e75adda-hemi.14
+    build:
+      context: ./facilitator
+    # Bounded, so a missing-contract or missing-key startup error stops instead of crash-looping
+    # silently under `up -d`; `docker compose logs facilitator` shows why.
+    restart: on-failure:5
+    # Loopback by default: /settle has no authentication and the signer pays its gas, so anyone who
+    # can reach this port can spend that gas. README "The facilitator" says what a wider binding needs.
+    ports:
+      - "${FACILITATOR_BIND:-127.0.0.1}:${FACILITATOR_PORT:-8080}:8080"
+    volumes:
+      - ./facilitator/${FACILITATOR_CONFIG:-config.json}:/app/config.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      # Empty is allowed here so that `docker compose down` works without .env; the facilitator itself
+      # refuses to start when a configured chain has no signer key.
+      FACILITATOR_TESTNET_PRIVATE_KEY: ${FACILITATOR_TESTNET_PRIVATE_KEY:-}
+      FACILITATOR_MAINNET_PRIVATE_KEY: ${FACILITATOR_MAINNET_PRIVATE_KEY:-}
+      HEMI_TESTNET_RPC_PRIMARY: ${HEMI_TESTNET_RPC_PRIMARY:-https://hemi-testnet.drpc.org}
+      HEMI_TESTNET_RPC_FALLBACK: ${HEMI_TESTNET_RPC_FALLBACK:-https://testnet.rpc.hemi.network/rpc}
+      HEMI_MAINNET_RPC_PRIMARY: ${HEMI_MAINNET_RPC_PRIMARY:-https://hemi.drpc.org}
+      HEMI_MAINNET_RPC_FALLBACK: ${HEMI_MAINNET_RPC_FALLBACK:-https://rpc.hemi.network/rpc}

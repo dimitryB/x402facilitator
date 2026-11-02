@@ -1,0 +1,161 @@
+From fac4d6f9412c4cffc0bb60bccbb53a317c18a55a Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 22:20:45 -0400
+Subject: [PATCH] feat(evm): add Hemi default stablecoins
+
+Enable dollar-string pricing on Hemi mainnet (chain ID 43111) and Hemi
+Testnet (chain ID 743111) in the TypeScript SDK.
+
+Hemi mainnet: USDC.e (Stargate bridged, Circle FiatToken v2.2) at
+0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA, 6 decimals. The token
+implements EIP-3009, so no transfer-method override is needed. Its
+EIP-712 domain is name "Bridged USDC (Stargate)", version "2"; the
+domain separator recomputed from these values matches
+DOMAIN_SEPARATOR() on chain.
+
+Hemi Testnet: USDC.e at 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443,
+6 decimals. It is a plain ERC-20 with neither EIP-3009 nor EIP-2612, so
+the entry uses assetTransferMethod "permit2" and omits supportsEip2612,
+like Igra. The token has no version(); the name/version fields are not
+sent in extra for this entry and follow the Igra entry's convention.
+
+Also register v1 network names hemi and hemi-testnet, add the two
+networks to the default-asset docs table, and cover both entries with
+parsePrice and v1-name resolution tests. viem already ships hemi and
+hemiSepolia, so the paywall's chain lookup needs no change. Decimals
+stay 6, so the generated paywall decimals map is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../network-and-token-support.mdx             |  2 ++
+ .../.changeset/add-hemi-default-stablecoin.md |  5 ++++
+ .../packages/mechanisms/evm/src/constants.ts  |  2 ++
+ .../mechanisms/evm/src/defaultAssets.ts       | 19 +++++++++++++++
+ .../evm/test/unit/defaultAssets.test.ts       |  8 +++++++
+ .../mechanisms/evm/test/unit/server.test.ts   | 23 +++++++++++++++++++
+ 6 files changed, 59 insertions(+)
+ create mode 100644 typescript/.changeset/add-hemi-default-stablecoin.md
+
+diff --git a/docs/core-concepts/network-and-token-support.mdx b/docs/core-concepts/network-and-token-support.mdx
+index c3929f63..2d15ac7d 100644
+--- a/docs/core-concepts/network-and-token-support.mdx
++++ b/docs/core-concepts/network-and-token-support.mdx
+@@ -146,6 +146,8 @@ When you use `"$0.01"` syntax, x402 needs to know which stablecoin to use. The f
+ | Sei Testnet | `eip155:1328` | `0x4fCF1784B31630811181f670Aea7A7bEF803eaED` | USDC | 6 | EIP-3009 |
+ | Arc | `eip155:5042` | `0x3600000000000000000000000000000000000000` | USDC | 6 | EIP-3009 |
+ | Arc Testnet | `eip155:5042002` | `0x3600000000000000000000000000000000000000` | USDC | 6 | EIP-3009 |
++| Hemi | `eip155:43111` | `0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA` | Bridged USDC (Stargate) | 6 | EIP-3009 |
++| Hemi Testnet | `eip155:743111` | `0xD47971C7F5B1067d25cd45d30b2c9eb60de96443` | USDC.e | 6 | Permit2 |
+ 
+ 
+ 
+diff --git a/typescript/.changeset/add-hemi-default-stablecoin.md b/typescript/.changeset/add-hemi-default-stablecoin.md
+new file mode 100644
+index 00000000..b6380d18
+--- /dev/null
++++ b/typescript/.changeset/add-hemi-default-stablecoin.md
+@@ -0,0 +1,5 @@
++---
++'@x402/evm': minor
++---
++
++Add Hemi mainnet (chain ID 43111) and Hemi Testnet (chain ID 743111) with USDC.e as the default stablecoin. Mainnet USDC.e uses EIP-3009; the testnet USDC.e has neither EIP-3009 nor EIP-2612 and uses Permit2. Register v1 network names `hemi` and `hemi-testnet`.
+diff --git a/typescript/packages/mechanisms/evm/src/constants.ts b/typescript/packages/mechanisms/evm/src/constants.ts
+index ab7db42c..a0a0db92 100644
+--- a/typescript/packages/mechanisms/evm/src/constants.ts
++++ b/typescript/packages/mechanisms/evm/src/constants.ts
+@@ -24,6 +24,8 @@ export const EVM_NETWORK_CHAIN_ID_MAP = {
+   "stable-testnet": 2201,
+   celo: 42220,
+   flare: 14,
++  hemi: 43111,
++  "hemi-testnet": 743111,
+ } as const;
+ 
+ export type EvmNetworkV1 = keyof typeof EVM_NETWORK_CHAIN_ID_MAP;
+diff --git a/typescript/packages/mechanisms/evm/src/defaultAssets.ts b/typescript/packages/mechanisms/evm/src/defaultAssets.ts
+index 7248fa80..dd5093d8 100644
+--- a/typescript/packages/mechanisms/evm/src/defaultAssets.ts
++++ b/typescript/packages/mechanisms/evm/src/defaultAssets.ts
+@@ -324,6 +324,25 @@ export const DEFAULT_ASSETS: DefaultAssetTable<ExactDefaultAssetInfo> = {
+       symbol: "USDC",
+     },
+   ], // Arc Testnet USDC (EIP-3009 supported)
++  "eip155:43111": [
++    {
++      asset: "0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA",
++      name: "Bridged USDC (Stargate)",
++      version: "2",
++      decimals: 6,
++      symbol: "USDC.e",
++    },
++  ], // Hemi mainnet USDC.e (EIP-3009 supported)
++  "eip155:743111": [
++    {
++      asset: "0xD47971C7F5B1067d25cd45d30b2c9eb60de96443",
++      name: "USDC.e",
++      version: "1",
++      decimals: 6,
++      symbol: "USDC.e",
++      assetTransferMethod: "permit2",
++    },
++  ], // Hemi testnet USDC.e (no EIP-3009, no EIP-2612)
+ };
+ 
+ /**
+diff --git a/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts b/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts
+index a9facc9a..245172e4 100644
+--- a/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts
++++ b/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts
+@@ -20,6 +20,14 @@ describe("defaultAssets (EVM)", () => {
+       expect(findDefaultAsset(BASE_USDC.asset, "base")).toEqual(BASE_USDC);
+     });
+ 
++    it("resolves v1 legacy network names hemi and hemi-testnet", () => {
++      const hemiUsdce = DEFAULT_ASSETS["eip155:43111"]![0]!;
++      const hemiTestnetUsdce = DEFAULT_ASSETS["eip155:743111"]![0]!;
++
++      expect(findDefaultAsset(hemiUsdce.asset, "hemi")).toEqual(hemiUsdce);
++      expect(findDefaultAsset(hemiTestnetUsdce.asset, "hemi-testnet")).toEqual(hemiTestnetUsdce);
++    });
++
+     it("finds 18-decimal mUSD on Mezo testnet", () => {
+       expect(findDefaultAsset(MEZO_TESTNET_MUSD.asset, "eip155:31611")).toEqual(MEZO_TESTNET_MUSD);
+       expect(MEZO_TESTNET_MUSD.decimals).toBe(18);
+diff --git a/typescript/packages/mechanisms/evm/test/unit/server.test.ts b/typescript/packages/mechanisms/evm/test/unit/server.test.ts
+index 1119eaed..e0c8c59b 100644
+--- a/typescript/packages/mechanisms/evm/test/unit/server.test.ts
++++ b/typescript/packages/mechanisms/evm/test/unit/server.test.ts
+@@ -80,6 +80,29 @@ describe("ExactEvmScheme (Server)", () => {
+       });
+     });
+ 
++    describe("Hemi network", () => {
++      const network = "eip155:43111";
++
++      it("should use Hemi mainnet USDC.e with its EIP-712 domain", async () => {
++        const result = await server.parsePrice("$0.001", network);
++        expect(result.asset).toBe("0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA");
++        expect(result.amount).toBe("1000");
++        expect(result.extra).toEqual({ name: "Bridged USDC (Stargate)", version: "2" });
++        expect(result.extra).not.toHaveProperty("assetTransferMethod");
++      });
++    });
++
++    describe("Hemi testnet network", () => {
++      const network = "eip155:743111";
++
++      it("should use Permit2 and omit the EIP-712 domain for a token without EIP-2612", async () => {
++        const result = await server.parsePrice("$0.001", network);
++        expect(result.asset).toBe("0xD47971C7F5B1067d25cd45d30b2c9eb60de96443");
++        expect(result.amount).toBe("1000");
++        expect(result.extra).toEqual({ assetTransferMethod: "permit2" });
++      });
++    });
++
+     describe("pre-parsed price objects", () => {
+       it("should handle pre-parsed price objects with asset", async () => {
+         const result = await server.parsePrice(
+-- 
+2.50.1 (Apple Git-155)
+

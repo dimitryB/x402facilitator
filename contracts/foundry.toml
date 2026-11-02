@@ -1,0 +1,53 @@
+# Foundry project for the Hemi x402 facilitator's on-chain prerequisites.
+#
+# The default profile uses the compile settings of the x402 reference,
+# x402-foundation/x402@e4a0868 contracts/evm/foundry.toml: solc 0.8.28, cancun,
+# optimizer 200 runs, no CBOR metadata. Nothing compiled here is ever deployed;
+# deployments replay the committed calldata in deploy-data/ (see README.md).
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+solc = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+cbor_metadata = false
+bytecode_hash = "none"
+ffi = false
+# DeployHemi.s.sol reads the committed deployment calldata with vm.readFile.
+fs_permissions = [{ access = "read", path = "./deploy-data" }]
+
+# Explorer verification only (verify.sh). The deployed proxy bytecode was built
+# with CBOR metadata (an IPFS hash), so the verification build must append CBOR
+# too; otherwise the bytecode lengths differ and Blockscout cannot match it.
+# Everything else is inherited from the default profile.
+[profile.verify]
+cbor_metadata = true
+bytecode_hash = "ipfs"
+# Separate artifacts, so forge verify-contract cannot pick up the default build's settings.
+out = "out/verify"
+cache_path = "cache/verify"
+
+[rpc_endpoints]
+hemi = "https://rpc.hemi.network/rpc"
+hemi_testnet = "https://testnet.rpc.hemi.network/rpc"
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+multiline_func_header = "params_first"
+quote_style = "double"
+number_underscore = "thousands"
+single_line_statement_blocks = "preserve"
+ignore = ["src/x402/**", "lib/**"]
+
+# The vendored x402 sources are kept byte-identical to the reference, so lint
+# findings there are not acted on.
+[lint]
+ignore = ["src/x402/**"]

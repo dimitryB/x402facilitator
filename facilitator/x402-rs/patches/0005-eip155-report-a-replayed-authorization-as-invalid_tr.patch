@@ -1,0 +1,391 @@
+From fe0a2c4156d804418d40e284025b66a671369967 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 22:53:53 -0400
+Subject: [PATCH 05/18] eip155: report a replayed authorization as
+ invalid_transaction_state
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Settling (or verifying) an EIP-3009 authorization or Permit2 permit whose nonce
+was already used makes the transfer simulation or gas estimate revert
+("FiatTokenV2: authorization is used or canceled", Permit2 InvalidNonce()).
+That revert surfaced as a transport error: HTTP 500 with unexpected_error.
+
+When the transfer fails to execute, read the authorization state on chain
+(EIP-3009 authorizationState, Permit2 nonceBitmap). If the nonce is spent,
+report PaymentVerificationError::AuthorizationAlreadyUsed, which maps to the
+x402 v2 §9 code invalid_transaction_state ("Blockchain transaction failed or
+was rejected"): the chain rejects the transfer because of on-chain state. §9
+has no replay-specific code; invalid_payload would wrongly call a once-valid
+payload malformed, and unexpected_*_error would invite retries that cannot
+succeed. The state is read only after a failure, so successful payments make
+no extra RPC call. Failures after broadcast (receipt timeouts) are not
+reclassified.
+---
+ .../src/v1_eip155_exact/facilitator.rs        |  99 ++++++++++++
+ .../v2_eip155_exact/facilitator/eip3009.rs    |   8 +-
+ .../v2_eip155_exact/facilitator/permit2.rs    | 148 +++++++++++++++++-
+ 3 files changed, 245 insertions(+), 10 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+index 1c4393a..4f3758e 100644
+--- a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
++++ b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+@@ -800,6 +800,52 @@ pub async fn assert_payment_signed_by_payer<P: Provider>(
+     assert_signed_by_payer(provider, &signed_message.signature, &signed_message.address).await
+ }
+ 
++/// Whether `error` comes from executing the transfer (a reverted simulation, gas estimate or
++/// transaction) rather than from a check of the payload. Only such failures are worth explaining
++/// by on-chain state, for example an authorization that was already used.
++pub fn is_failed_execution(error: &Eip155ExactError) -> bool {
++    matches!(
++        error,
++        Eip155ExactError::Transport(_)
++            | Eip155ExactError::ContractCall(_)
++            | Eip155ExactError::TransactionReverted(_)
++            | Eip155ExactError::PaymentVerification(
++                PaymentVerificationError::TransactionSimulation(_)
++            )
++    )
++}
++
++/// Explains a failed `transferWithAuthorization` simulation or send whose EIP-3009 authorization
++/// was already used (a replay, or the payer cancelled or spent it).
++///
++/// x402 v2 §9 has no replay-specific code. Such a transfer is one the chain rejects because of the
++/// authorization's on-chain state, which is what `invalid_transaction_state` ("Blockchain transaction
++/// failed or was rejected") describes; it is not an unexpected error, and retrying cannot succeed.
++/// The authorization state is read only after a failure, so successful payments cost no extra call.
++pub async fn explain_used_eip3009_authorization<T, P: Provider>(
++    contract: &IEIP3009::IEIP3009Instance<P>,
++    payment: &ExactEvmPayment,
++    result: Result<T, Eip155ExactError>,
++) -> Result<T, Eip155ExactError> {
++    let error = match result {
++        Ok(value) => return Ok(value),
++        Err(error) => error,
++    };
++    if is_failed_execution(&error)
++        && matches!(
++            contract
++                .authorizationState(payment.from, payment.nonce)
++                .call()
++                .await,
++            Ok(true)
++        )
++    {
++        Err(PaymentVerificationError::AuthorizationAlreadyUsed.into())
++    } else {
++        Err(error)
++    }
++}
++
+ pub async fn verify_payment<P: Provider>(
+     provider: &P,
+     contract: &IEIP3009::IEIP3009Instance<&P>,
+@@ -1222,6 +1268,59 @@ mod tests {
+         );
+     }
+ 
++    fn payment() -> ExactEvmPayment {
++        ExactEvmPayment {
++            from: Address::repeat_byte(0x11),
++            to: Address::repeat_byte(0x22),
++            value: U256::from(10),
++            valid_after: UnixTimestamp::from_secs(0),
++            valid_before: UnixTimestamp::from_secs(u32::MAX as u64),
++            nonce: B256::repeat_byte(0x33),
++            signature: Bytes::new(),
++        }
++    }
++
++    async fn explain(used: bool, error: Eip155ExactError) -> Result<(), Eip155ExactError> {
++        let asserter = Asserter::new();
++        let mut word = [0u8; 32];
++        word[31] = used as u8;
++        asserter.push_success(&Bytes::from(word));
++        let provider = mocked_provider(&asserter);
++        let contract = IEIP3009::new(Address::repeat_byte(0x44), &provider);
++        explain_used_eip3009_authorization(&contract, &payment(), Err(error)).await
++    }
++
++    #[tokio::test]
++    async fn failed_transfer_with_used_authorization_is_reported_as_such() {
++        let reverted =
++            || Eip155ExactError::ContractCall("authorization is used or canceled".into());
++        let result = explain(true, reverted()).await;
++        assert!(
++            matches!(
++                result,
++                Err(Eip155ExactError::PaymentVerification(
++                    PaymentVerificationError::AuthorizationAlreadyUsed
++                ))
++            ),
++            "{result:?}"
++        );
++        let result = explain(false, reverted()).await;
++        assert!(
++            matches!(result, Err(Eip155ExactError::ContractCall(_))),
++            "{result:?}"
++        );
++        let result = explain(true, PaymentVerificationError::InsufficientFunds.into()).await;
++        assert!(
++            matches!(
++                result,
++                Err(Eip155ExactError::PaymentVerification(
++                    PaymentVerificationError::InsufficientFunds
++                ))
++            ),
++            "{result:?}"
++        );
++    }
++
+     #[tokio::test]
+     async fn eip1271_signature_from_a_contract_is_left_to_the_contract() {
+         let asserter = Asserter::new();
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
+index 95e1f29..8bc1bba 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
+@@ -11,7 +11,7 @@ use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider};
+ use crate::v1_eip155_exact::{
+     Eip155ExactError, ExactEvmPayment, IEIP3009, PaymentRequirementsExtra, assert_domain,
+     assert_enough_balance, assert_enough_value, assert_payment_signed_by_payer, assert_time,
+-    settle_payment, verify_payment,
++    explain_used_eip3009_authorization, settle_payment, verify_payment,
+ };
+ use crate::v2_eip155_exact::Eip3009Payload;
+ use crate::v2_eip155_exact::types::{Eip3009PaymentPayload, Eip3009PaymentRequirements};
+@@ -32,7 +32,8 @@ pub async fn verify_eip3009_payment<P: Eip155MetaTransactionProvider + ChainProv
+     )
+     .await?;
+ 
+-    let payer = verify_payment(provider.inner(), &contract, &payment, &eip712_domain).await?;
++    let verified = verify_payment(provider.inner(), &contract, &payment, &eip712_domain).await;
++    let payer = explain_used_eip3009_authorization(&contract, &payment, verified).await?;
+     Ok(v2::VerifyResponse::valid(payer.to_string()))
+ }
+ 
+@@ -56,7 +57,8 @@ where
+     )
+     .await?;
+ 
+-    let tx_hash = settle_payment(provider, &contract, &payment, &eip712_domain).await?;
++    let settled = settle_payment(provider, &contract, &payment, &eip712_domain).await;
++    let tx_hash = explain_used_eip3009_authorization(&contract, &payment, settled).await?;
+ 
+     Ok(v2::SettleResponse::Success {
+         payer: payment.from.to_string(),
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+index 1508daf..2deaa99 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+@@ -2,7 +2,7 @@ use alloy_primitives::{Address, B256, Bytes, TxHash, U256};
+ use alloy_provider::bindings::IMulticall3;
+ use alloy_provider::{MULTICALL3_ADDRESS, MulticallItem, Provider};
+ use alloy_rpc_types_eth::TransactionReceipt;
+-use alloy_sol_types::{SolCall, SolStruct, eip712_domain};
++use alloy_sol_types::{SolCall, SolStruct, eip712_domain, sol};
+ use x402_types::chain::ChainProviderOps;
+ use x402_types::proto::{PaymentVerificationError, v2};
+ use x402_types::scheme::X402SchemeFacilitatorError;
+@@ -19,7 +19,8 @@ use crate::chain::permit2::{EXACT_PERMIT2_PROXY_ADDRESS, PERMIT2_ADDRESS};
+ use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider, MetaTransaction};
+ use crate::v1_eip155_exact::{
+     Eip155ExactError, StructuredSignature, VALIDATOR_ADDRESS, Validator6492, assert_enough_value,
+-    assert_signed_by_payer, assert_time, is_contract_deployed, tx_hash_from_receipt,
++    assert_signed_by_payer, assert_time, is_contract_deployed, is_failed_execution,
++    tx_hash_from_receipt,
+ };
+ use crate::v2_eip155_exact::eip3009::assert_requirements_match;
+ use crate::v2_eip155_exact::types::{
+@@ -52,15 +53,18 @@ pub async fn verify_permit2_payment<P: Eip155MetaTransactionProvider + ChainProv
+             return Err(PaymentVerificationError::eip2612_gas_sponsoring_not_enabled().into());
+         }
+         eip2612::assert_eip2612_offchain_valid(eip2612_gas_sponsoring_payload, payment_payload)?;
+-        eip2612::assert_onchain_exact_permit2_with_eip2612(
++        let simulated = eip2612::assert_onchain_exact_permit2_with_eip2612(
+             provider.inner(),
+             provider.chain(),
+             payment_payload,
+             eip2612_gas_sponsoring_payload,
+         )
+-        .await?;
++        .await;
++        explain_used_permit2_nonce(provider.inner(), payer, authorization.nonce, simulated).await?;
+     } else {
+-        assert_onchain_exact_permit2(provider.inner(), provider.chain(), payment_payload).await?;
++        let simulated =
++            assert_onchain_exact_permit2(provider.inner(), provider.chain(), payment_payload).await;
++        explain_used_permit2_nonce(provider.inner(), payer, authorization.nonce, simulated).await?;
+     }
+ 
+     Ok(v2::VerifyResponse::valid(payer.to_string()))
+@@ -102,11 +106,18 @@ where
+         eip2612::assert_eip2612_offchain_valid(eip2612_gas_sponsoring_payload, payment_payload)?;
+         // The EIP-2612 permit grants the Permit2 allowance in the same transaction.
+         assert_onchain_balance(&token_contract, authorization.from.0, required_amount).await?;
+-        eip2612::settle_exact_permit2_with_eip2612(
++        let settled = eip2612::settle_exact_permit2_with_eip2612(
+             provider,
+             payment_payload,
+             eip2612_gas_sponsoring_payload,
+         )
++        .await;
++        explain_used_permit2_nonce(
++            provider.inner(),
++            authorization.from.0,
++            authorization.nonce,
++            settled,
++        )
+         .await?
+     } else {
+         assert_onchain_allowance_and_balance(
+@@ -115,7 +126,14 @@ where
+             required_amount,
+         )
+         .await?;
+-        settle_exact_permit2(provider, payment_payload).await?
++        let settled = settle_exact_permit2(provider, payment_payload).await;
++        explain_used_permit2_nonce(
++            provider.inner(),
++            authorization.from.0,
++            authorization.nonce,
++            settled,
++        )
++        .await?
+     };
+ 
+     let payer = authorization.from;
+@@ -399,6 +417,53 @@ pub async fn assert_onchain_balance<P: Provider>(
+     Ok(())
+ }
+ 
++sol! {
++    /// Permit2's unordered-nonce bitmap (SignatureTransfer).
++    #[sol(rpc)]
++    interface IPermit2NonceBitmap {
++        function nonceBitmap(address owner, uint256 wordPos) external view returns (uint256);
++    }
++}
++
++/// Where Permit2 records an unordered nonce: word `nonce >> 8` of the owner's bitmap, bit `nonce & 0xff`.
++pub fn permit2_nonce_position(nonce: U256) -> (U256, U256) {
++    let bit = nonce.as_limbs()[0] as usize & 0xff;
++    (nonce >> 8, U256::from(1) << bit)
++}
++
++/// Explains a failed Permit2 settle simulation or send whose Permit2 nonce was already used
++/// (a replay, or the payer invalidated it).
++///
++/// x402 v2 §9 has no replay-specific code; `invalid_transaction_state` ("Blockchain transaction failed
++/// or was rejected") describes a transfer the chain rejects because of on-chain state. The nonce bitmap
++/// is read only after a failure, so successful payments cost no extra call. See
++/// [`crate::v1_eip155_exact::explain_used_eip3009_authorization`] for the EIP-3009 counterpart.
++pub async fn explain_used_permit2_nonce<T, P: Provider>(
++    provider: &P,
++    owner: Address,
++    nonce: U256,
++    result: Result<T, Eip155ExactError>,
++) -> Result<T, Eip155ExactError> {
++    let error = match result {
++        Ok(value) => return Ok(value),
++        Err(error) => error,
++    };
++    if !is_failed_execution(&error) {
++        return Err(error);
++    }
++    let (word, bit) = permit2_nonce_position(nonce);
++    let bitmap = IPermit2NonceBitmap::new(PERMIT2_ADDRESS, provider)
++        .nonceBitmap(owner, word)
++        .call()
++        .await;
++    match bitmap {
++        Ok(bitmap) if bitmap & bit != U256::ZERO => {
++            Err(PaymentVerificationError::AuthorizationAlreadyUsed.into())
++        }
++        _ => Err(error),
++    }
++}
++
+ /// Checks the payer's Permit2 allowance, then its balance, in the order x402 prescribes
+ /// (`scheme_exact_evm.md`, Permit2 verification steps 2 and 3).
+ ///
+@@ -598,6 +663,75 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn permit2_nonce_position_matches_permit2_bitmap_layout() {
++        assert_eq!(
++            permit2_nonce_position(U256::ZERO),
++            (U256::ZERO, U256::from(1))
++        );
++        assert_eq!(
++            permit2_nonce_position(U256::from(257)),
++            (U256::from(1), U256::from(2))
++        );
++        assert_eq!(
++            permit2_nonce_position(U256::from(255)),
++            (U256::ZERO, U256::from(1) << 255)
++        );
++        assert_eq!(
++            permit2_nonce_position(U256::MAX),
++            (U256::MAX >> 8, U256::from(1) << 255)
++        );
++    }
++
++    async fn explain(bitmap: U256, error: Eip155ExactError) -> Result<(), Eip155ExactError> {
++        let asserter = Asserter::new();
++        asserter.push_success(&word(bitmap));
++        let provider = ProviderBuilder::new().connect_mocked_client(asserter);
++        explain_used_permit2_nonce(
++            &provider,
++            Address::repeat_byte(0x11),
++            U256::from(257),
++            Err(error),
++        )
++        .await
++    }
++
++    #[tokio::test]
++    async fn failed_settle_with_spent_nonce_is_reported_as_used_authorization() {
++        let reverted = || Eip155ExactError::ContractCall("execution reverted: 0x756688fe".into());
++        let result = explain(U256::from(2), reverted()).await;
++        assert!(
++            matches!(
++                result,
++                Err(Eip155ExactError::PaymentVerification(
++                    PaymentVerificationError::AuthorizationAlreadyUsed
++                ))
++            ),
++            "{result:?}"
++        );
++        // Another bit of the same word is spent, not ours: keep the original error.
++        let result = explain(U256::from(1), reverted()).await;
++        assert!(
++            matches!(result, Err(Eip155ExactError::ContractCall(_))),
++            "{result:?}"
++        );
++        // Payload check failures are not execution failures and are passed through untouched.
++        let result = explain(
++            U256::MAX,
++            PaymentVerificationError::InsufficientFunds.into(),
++        )
++        .await;
++        assert!(
++            matches!(
++                result,
++                Err(Eip155ExactError::PaymentVerification(
++                    PaymentVerificationError::InsufficientFunds
++                ))
++            ),
++            "{result:?}"
++        );
++    }
++
+     #[tokio::test]
+     async fn allowance_is_reported_before_balance() {
+         assert_eq!(

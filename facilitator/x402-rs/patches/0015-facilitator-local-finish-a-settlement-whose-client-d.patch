@@ -1,0 +1,208 @@
+From 839171d24266759570f176ed2392ece4ae783cdf Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 02:24:06 -0400
+Subject: [PATCH 15/18] facilitator-local: finish a settlement whose client
+ disconnected; log every broadcast
+
+post_settle awaited the settlement inside the request's future. When the
+client disconnected (or a proxy in front of the facilitator timed out), axum
+dropped that future, and with it the settlement wherever it was suspended. If
+that was after the transaction went out, the transaction was still mined, but
+the facilitator forgot it: the pending record's drop guard removed the
+authorization's record, nothing logged the hash, and the next /verify of the
+same payload went back to the chain instead of naming the pending transaction.
+
+- post_settle runs the settlement on its own task (tokio::spawn, in the
+  request's tracing span) and awaits it. A dropped request no longer cancels
+  the settlement: it completes, and its outcome is recorded as for any other
+  request (the transaction's receipt, or a pending record named by its hash
+  when the receipt does not arrive in time). A settlement task that panics is
+  answered with 500 unexpected_settle_error.
+- The EVM provider logs every broadcast at info level ("Transaction broadcast",
+  with the hash, sender and target) before waiting for the receipt, and logs a
+  warning with the hash when the receipt does not arrive.
+
+The handler now requires the facilitator state to be Clone + Send + Sync +
+'static, as routes() already did.
+---
+ .../x402-chain-eip155/src/chain/provider.rs   |   6 +
+ crates/x402-facilitator-local/src/handlers.rs | 104 +++++++++++++++++-
+ 2 files changed, 104 insertions(+), 6 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/chain/provider.rs b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+index d1dc7a2..88b2d82 100644
+--- a/crates/chains/x402-chain-eip155/src/chain/provider.rs
++++ b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+@@ -307,6 +307,10 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+         };
+ 
+         let tx_hash = *pending_tx.tx_hash();
++        // Logged before waiting for the receipt, so the hash of every transaction that went out can
++        // be found even if the receipt never arrives or nobody reads the response.
++        #[cfg(feature = "telemetry")]
++        tracing::info!(tx = %tx_hash, from = %from_address, to = %tx.to, "Transaction broadcast");
+ 
+         // Get receipt with timeout
+         // Default timeout of 30 seconds is reasonable for most EVM chains
+@@ -319,6 +323,8 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+         match watcher.get_receipt().await {
+             Ok(receipt) => Ok(receipt),
+             Err(e) => {
++                #[cfg(feature = "telemetry")]
++                tracing::warn!(tx = %tx_hash, error = %e, "Transaction receipt not available; settlement pending");
+                 // Receipt fetch failed (timeout or other error), but the transaction was accepted for
+                 // broadcast and may still be mined. Keep its nonce: resetting would let the next
+                 // transaction query a node that has not seen this one and reuse the nonce, replacing or
+diff --git a/crates/x402-facilitator-local/src/handlers.rs b/crates/x402-facilitator-local/src/handlers.rs
+index 7cf5ca8..97bab07 100644
+--- a/crates/x402-facilitator-local/src/handlers.rs
++++ b/crates/x402-facilitator-local/src/handlers.rs
+@@ -93,7 +93,7 @@ pub async fn get_settle_info() -> impl IntoResponse {
+ pub fn routes<A>() -> Router<A>
+ where
+     A: Facilitator + Clone + Send + Sync + 'static,
+-    A::Error: IntoResponse,
++    A::Error: IntoResponse + Send + 'static,
+ {
+     Router::new()
+         .route("/", get(get_root))
+@@ -205,8 +205,8 @@ pub async fn post_settle<A>(
+     body: Result<Json<proto::SettleRequest>, JsonRejection>,
+ ) -> impl IntoResponse
+ where
+-    A: Facilitator,
+-    A::Error: IntoResponse,
++    A: Facilitator + Clone + Send + Sync + 'static,
++    A::Error: IntoResponse + Send + 'static,
+ {
+     let body = match body {
+         Ok(Json(body)) => body,
+@@ -218,7 +218,29 @@ where
+             );
+         }
+     };
+-    match facilitator.settle(&body).await {
++    // A settlement may broadcast a transaction. It runs on its own task so that a client that
++    // disconnects, which drops this handler's future, cannot cancel it half-way: the settlement then
++    // completes, and its outcome (for example a pending transaction) is recorded as usual.
++    let settlement = {
++        let facilitator = facilitator.clone();
++        let body = body.clone();
++        async move { facilitator.settle(&body).await }
++    };
++    #[cfg(feature = "telemetry")]
++    let settlement = tracing::Instrument::in_current_span(settlement);
++    let settlement = tokio::spawn(settlement);
++    let result = match settlement.await {
++        Ok(result) => result,
++        Err(join_error) => {
++            return error_response(
++                StatusCode::INTERNAL_SERVER_ERROR,
++                ErrorReason::UnexpectedSettleError,
++                &join_error.to_string(),
++                Endpoint::Settle,
++            );
++        }
++    };
++    match result {
+         Ok(valid_response) => (StatusCode::OK, Json(valid_response)).into_response(),
+         Err(error) => {
+             #[cfg(feature = "telemetry")]
+@@ -269,10 +291,20 @@ enum Endpoint {
+ /// The answer to a body that is not JSON at all: the endpoint's error shape with x402 v2 §9
+ /// `invalid_payload`, instead of axum's plain-text rejection. Keeps the rejection's status code.
+ fn unreadable_request(status: StatusCode, message: &str, endpoint: Endpoint) -> Response {
++    error_response(status, ErrorReason::InvalidPayload, message, endpoint)
++}
++
++/// The endpoint's error shape for a failure that happened outside any scheme handler.
++fn error_response(
++    status: StatusCode,
++    reason: ErrorReason,
++    message: &str,
++    endpoint: Endpoint,
++) -> Response {
+     let body = match endpoint {
+         Endpoint::Verify => serde_json::to_value(VerificationErrorResponse {
+             is_valid: false,
+-            invalid_reason: ErrorReason::InvalidPayload,
++            invalid_reason: reason,
+             invalid_message: message,
+             invalid_reason_details: message,
+             payer: None,
+@@ -281,7 +313,7 @@ fn unreadable_request(status: StatusCode, message: &str, endpoint: Endpoint) ->
+             success: false,
+             network: None,
+             transaction: "",
+-            error_reason: ErrorReason::InvalidPayload,
++            error_reason: reason,
+             error_message: message,
+             payer: None,
+         }),
+@@ -536,6 +568,66 @@ mod tests {
+         assert_eq!(status, StatusCode::BAD_REQUEST);
+     }
+ 
++    /// A facilitator whose settlement waits for `release`, then signals `settled`.
++    #[derive(Clone, Default)]
++    struct SlowSettlement {
++        started: std::sync::Arc<tokio::sync::Notify>,
++        release: std::sync::Arc<tokio::sync::Notify>,
++        settled: std::sync::Arc<tokio::sync::Notify>,
++    }
++
++    impl Facilitator for SlowSettlement {
++        type Error = FacilitatorLocalError;
++
++        async fn verify(
++            &self,
++            _: &proto::VerifyRequest,
++        ) -> Result<proto::VerifyResponse, Self::Error> {
++            unreachable!()
++        }
++
++        fn settle(
++            &self,
++            _: &proto::SettleRequest,
++        ) -> impl Future<Output = Result<proto::SettleResponse, Self::Error>> + Send {
++            let me = self.clone();
++            async move {
++                me.started.notify_one();
++                me.release.notified().await;
++                me.settled.notify_one();
++                Ok(proto::SettleResponse(json!({ "success": true })))
++            }
++        }
++
++        async fn supported(&self) -> Result<proto::SupportedResponse, Self::Error> {
++            unreachable!()
++        }
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn a_settlement_outlives_a_client_that_disconnects() {
++        let facilitator = SlowSettlement::default();
++        let request: proto::SettleRequest = serde_json::from_str("{}").unwrap();
++        let handler = tokio::spawn(post_settle(State(facilitator.clone()), Ok(Json(request))));
++        facilitator.started.notified().await;
++        // The client goes away: axum drops the handler's future.
++        handler.abort();
++        match handler.await {
++            Err(join_error) => assert!(join_error.is_cancelled()),
++            Ok(_) => panic!("the handler finished before it was cancelled"),
++        }
++        facilitator.release.notify_one();
++        let settled = tokio::time::timeout(
++            std::time::Duration::from_secs(5),
++            facilitator.settled.notified(),
++        )
++        .await;
++        assert!(
++            settled.is_ok(),
++            "the settlement was cancelled with the request"
++        );
++    }
++
+     #[test]
+     fn status_codes_are_unchanged() {
+         let status = |e: FacilitatorLocalError| e.into_response().status();

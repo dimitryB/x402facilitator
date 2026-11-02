@@ -1,0 +1,165 @@
+From 033ad9b8c9729ae9155fa61a1b958411e48f5f26 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 17:04:42 -0500
+Subject: [PATCH 24/26] eip155: ask every RPC for a failed send's hash, for two
+ blocks if it timed out
+
+The lookup after a failed send went through the fallback layer, which
+takes the first answer, and null counts as one. A node that had not
+seen the transaction could answer first while the other held it, so a
+mined settlement was still reported as failed, with an empty hash.
+
+Each RPC is now asked on its own, and any that knows the transaction
+settles it. A send that timed out may have reached a node that alone
+holds the transaction until it is mined, so that search lasts two of
+Hemi's blocks. A send that was answered is looked up once.
+
+The hash of a send that failed is now logged in both cases.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/chains/x402-chain-eip155/Cargo.toml    |  2 +-
+ .../x402-chain-eip155/src/chain/provider.rs   | 69 +++++++++++++++++--
+ 2 files changed, 63 insertions(+), 8 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/Cargo.toml b/crates/chains/x402-chain-eip155/Cargo.toml
+index 911e014..ffe69a3 100644
+--- a/crates/chains/x402-chain-eip155/Cargo.toml
++++ b/crates/chains/x402-chain-eip155/Cargo.toml
+@@ -43,7 +43,7 @@ full = ["telemetry", "client", "server", "facilitator"]
+ x402-types = { workspace = true }
+ serde = { workspace = true }
+ async-trait = { workspace = true, optional = true }
+-tokio = { workspace = true, optional = true }
++tokio = { workspace = true, optional = true, features = ["time"] }
+ tower = { workspace = true, optional = true }
+ thiserror = { workspace = true }
+ serde_json = { workspace = true }
+diff --git a/crates/chains/x402-chain-eip155/src/chain/provider.rs b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+index 096e9c5..ef8f1a4 100644
+--- a/crates/chains/x402-chain-eip155/src/chain/provider.rs
++++ b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+@@ -18,7 +18,7 @@ use std::num::NonZeroUsize;
+ use std::ops::Deref;
+ use std::sync::atomic::{AtomicUsize, Ordering};
+ use std::sync::{Arc, LazyLock};
+-use std::time::Duration;
++use std::time::{Duration, Instant};
+ use tower::ServiceBuilder;
+ use x402_types::chain::{ChainId, ChainProviderOps, FromConfig};
+ 
+@@ -86,9 +86,44 @@ pub struct Eip155ChainProvider {
+     signer_cursor: Arc<AtomicUsize>,
+     /// Nonce manager for resetting nonces on transaction failures.
+     nonce_manager: PendingNonceManager,
++    /// One client per RPC, for the question that needs every RPC's answer: see `find_transaction`.
++    lookup_rpcs: Vec<RootProvider>,
+ }
+ 
+ impl Eip155ChainProvider {
++    /// Whether any RPC knows a transaction. Each is asked on its own: a shared request takes the first
++    /// answer, and `null` from a node that has not seen the transaction is an answer.
++    async fn transaction_is_known(&self, tx_hash: TxHash) -> bool {
++        for rpc in &self.lookup_rpcs {
++            if matches!(rpc.get_transaction_by_hash(tx_hash).await, Ok(Some(_))) {
++                return true;
++            }
++        }
++        false
++    }
++
++    /// Whether a transaction whose send failed is on its way after all.
++    ///
++    /// A send that timed out may have reached a node, which may be the only one holding it until it is
++    /// mined, so the search then lasts two blocks. A send that was answered is looked up once.
++    async fn find_transaction(&self, tx_hash: TxHash, send_timed_out: bool) -> bool {
++        let search = if send_timed_out {
++            LOOKUP_WINDOW
++        } else {
++            Duration::ZERO
++        };
++        let deadline = Instant::now() + search;
++        loop {
++            if self.transaction_is_known(tx_hash).await {
++                return true;
++            }
++            if Instant::now() >= deadline {
++                return false;
++            }
++            tokio::time::sleep(LOOKUP_INTERVAL).await;
++        }
++    }
++
+     #[allow(unused_variables)] // chain_id is needed for tracing only here
+     pub fn rpc_client(chain_id: ChainId, rpc: &[RpcConfig]) -> RpcClient {
+         let transports = rpc
+@@ -139,6 +174,15 @@ impl Eip155ChainProvider {
+ /// chain's two RPCs the send plus the 60 s receipt wait stays under the 90 s the TS SDK gives `/settle`.
+ const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+ 
++/// How long one RPC gets to answer a lookup of a transaction by hash. It is asked again.
++const LOOKUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
++
++/// How long a transaction is looked for after a send that timed out: two of Hemi's 12 s blocks.
++const LOOKUP_WINDOW: Duration = Duration::from_secs(25);
++
++/// The pause between lookups of a transaction by hash.
++const LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
++
+ /// An HTTP transport whose requests end after `timeout`.
+ fn rpc_http(url: url::Url, timeout: Duration) -> Http<reqwest::Client> {
+     let client = reqwest::Client::builder()
+@@ -205,6 +249,13 @@ impl FromConfig<Eip155ChainConfig> for Eip155ChainProvider {
+ 
+         // 2. Transports
+         let client = Self::rpc_client(config.chain_id(), config.rpc());
++        let lookup_rpcs = config
++            .rpc()
++            .iter()
++            .filter(|rpc| matches!(rpc.http.scheme(), "http" | "https"))
++            .map(|rpc| rpc_http(rpc.http.deref().clone(), LOOKUP_REQUEST_TIMEOUT))
++            .map(|http| RootProvider::new(RpcClient::new(http, false)))
++            .collect();
+ 
+         // 3. Provider
+         // Create nonce manager explicitly so we can store a reference for error handling
+@@ -240,6 +291,7 @@ impl FromConfig<Eip155ChainConfig> for Eip155ChainProvider {
+             signer_addresses,
+             signer_cursor,
+             nonce_manager,
++            lookup_rpcs,
+         })
+     }
+ }
+@@ -365,22 +417,25 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+         let tx_hash = *signed.tx_hash();
+ 
+         // Send transaction with error handling for nonce reset
++        let send_started = Instant::now();
+         let pending_tx = match self.inner.send_tx_envelope(signed).await {
+             Ok(pending) => pending,
+             // A failed send proves nothing if an RPC took the transaction and then stalled: the next RPC
+             // rejects the copy while the first one's is mined. A node that knows the hash settles it.
+-            Err(e) => match self.inner.get_transaction_by_hash(tx_hash).await {
+-                Ok(Some(_)) => {
++            Err(e) => {
++                let send_timed_out = send_started.elapsed() >= RPC_REQUEST_TIMEOUT;
++                if self.find_transaction(tx_hash, send_timed_out).await {
+                     #[cfg(feature = "telemetry")]
+-                    tracing::warn!(tx = %tx_hash, error = %e, "Send failed, but the chain has the transaction");
++                    tracing::warn!(tx = %tx_hash, error = %e, "Send failed, but an RPC has the transaction");
+                     PendingTransactionBuilder::new(self.inner.root().clone(), tx_hash)
+-                }
+-                _ => {
++                } else {
++                    #[cfg(feature = "telemetry")]
++                    tracing::warn!(tx = %tx_hash, error = %e, "Send failed, and no RPC has the transaction");
+                     // Transaction submission failed - reset nonce to force requery
+                     self.nonce_manager.reset_nonce(from_address).await;
+                     return Err(MetaTransactionSendError::Transport(e));
+                 }
+-            },
++            }
+         };
+ 
+         // Logged before waiting for the receipt, so the hash of every transaction that went out can

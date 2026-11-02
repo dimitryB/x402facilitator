@@ -1,0 +1,210 @@
+### network=mainnet rpc=https://rpc.hemi.network/rpc  2026-10-29T01:53:36Z
+
+$ cast chain-id --rpc-url https://rpc.hemi.network/rpc
+43111
+[exit 0]
+
+$ cast block-number --rpc-url https://rpc.hemi.network/rpc
+5614342
+[exit 0]
+
+## 1. Deterministic deployer
+$ cast code 0x4e59b44847b379578588920cA78FbF26c0B4956C --rpc-url https://rpc.hemi.network/rpc
+0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3
+[exit 0]
+
+## 2. Permit2 at canonical address
+$ cast code 0x000000000022D473030F116dDEE9F6B43aC78BA3 --rpc-url https://rpc.hemi.network/rpc  # size and keccak shown
+bytes=9152 keccak=0x30002d17c268825d175caba993df71c34b30048f344b2ba63705a3063fa4743a
+first64=0x6040608081526004908136101561001557600080fd5b600090813560e01c8063
+[exit 0]
+
+$ cast call 0x000000000022D473030F116dDEE9F6B43aC78BA3 DOMAIN_SEPARATOR()(bytes32) --rpc-url https://rpc.hemi.network/rpc
+0x1bfbbf0056b6ec1bbca73ea788b4a65c034128fd6543621be486785424550c8f
+[exit 0]
+
+# expected Permit2 DOMAIN_SEPARATOR for chainId=43111 (EIP712Domain(string name,uint256 chainId,address verifyingContract), name=Permit2):
+$ cast keccak 0x8cad95687ba82c2ce50e74f7b754645e5117c3a5bec8151c0726d5857980a8669ac997416e8ff9d2ff6bebeb7149f65cdae5e32e2b90440b566bb3044041d36a000000000000000000000000000000000000000000000000000000000000a867000000000000000000000000000000000022d473030f116ddee9f6b43ac78ba3
+0x1bfbbf0056b6ec1bbca73ea788b4a65c034128fd6543621be486785424550c8f
+[exit 0]
+
+## 3. x402 exact Permit2 proxy at reference address
+$ cast code 0x402085c248EeA27D92E8b30b2C58ed07f9E20001 --rpc-url https://rpc.hemi.network/rpc  # size and keccak shown
+0x (empty)
+[exit 0]
+
+## Token USDC 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA
+$ cast code 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA --rpc-url https://rpc.hemi.network/rpc  # size and keccak shown
+bytes=1798 keccak=0xc2059a483ceeca165dfcc9727922e7c8c7b99710e84eca06cf765c235b133893
+first64=0x60806040526004361061005a5760003560e01c80635c60da1b11610043578063
+[exit 0]
+
+$ cast storage 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc --rpc-url https://rpc.hemi.network/rpc
+0x0000000000000000000000000000000000000000000000000000000000000000
+[exit 0]
+
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA name()(string) --rpc-url https://rpc.hemi.network/rpc
+"Bridged USDC (Stargate)"
+[exit 0]
+
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA symbol()(string) --rpc-url https://rpc.hemi.network/rpc
+"USDC.e"
+[exit 0]
+
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA decimals()(uint8) --rpc-url https://rpc.hemi.network/rpc
+6
+[exit 0]
+
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA version()(string) --rpc-url https://rpc.hemi.network/rpc
+"2"
+[exit 0]
+
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA eip712Domain()(bytes1,string,string,uint256,address,bytes32,uint256[]) --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+[exit 1]
+
+# EIP-3009
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA authorizationState(address,bytes32)(bool) 0x000000000000000000000000000000000000dEaD 0x0000000000000000000000000000000000000000000000000000000000000000 --rpc-url https://rpc.hemi.network/rpc
+false
+[exit 0]
+
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32) 0x000000000000000000000000000000000000dEaD 0x000000000000000000000000000000000000dEaD 1 0 0 0x0000000000000000000000000000000000000000000000000000000000000000 27 0x0000000000000000000000000000000000000000000000000000000000000000 0x0000000000000000000000000000000000000000000000000000000000000000 --rpc-url https://rpc.hemi.network/rpc
+Error: execution reverted: FiatTokenV2: authorization is expired
+
+Context:
+- server returned an error response: error code 3: execution reverted: FiatTokenV2: authorization is expired, data: "0x08c379a00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000002546696174546f6b656e56323a20617574686f72697a6174696f6e2069732065787069726564000000000000000000000000000000000000000000000000000000"
+[exit 1]
+
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes) 0x000000000000000000000000000000000000dEaD 0x000000000000000000000000000000000000dEaD 1 0 0 0x0000000000000000000000000000000000000000000000000000000000000000 0x --rpc-url https://rpc.hemi.network/rpc
+Error: execution reverted: FiatTokenV2: authorization is expired
+
+Context:
+- server returned an error response: error code 3: execution reverted: FiatTokenV2: authorization is expired, data: "0x08c379a00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000002546696174546f6b656e56323a20617574686f72697a6174696f6e2069732065787069726564000000000000000000000000000000000000000000000000000000"
+[exit 1]
+
+# EIP-2612
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA DOMAIN_SEPARATOR()(bytes32) --rpc-url https://rpc.hemi.network/rpc
+0x6fe49ef2438be116233a7505f2b997466e49631ac8e197a2f1f208108d598a11
+[exit 0]
+
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA nonces(address)(uint256) 0x000000000000000000000000000000000000dEaD --rpc-url https://rpc.hemi.network/rpc
+0
+[exit 0]
+
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA permit(address,address,uint256,uint256,uint8,bytes32,bytes32) 0x000000000000000000000000000000000000dEaD 0x000000000000000000000000000000000000dEaD 1 0 27 0x0000000000000000000000000000000000000000000000000000000000000000 0x0000000000000000000000000000000000000000000000000000000000000000 --rpc-url https://rpc.hemi.network/rpc
+Error: execution reverted: FiatTokenV2: permit is expired
+
+Context:
+- server returned an error response: error code 3: execution reverted: FiatTokenV2: permit is expired, data: "0x08c379a00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001e46696174546f6b656e56323a207065726d697420697320657870697265640000"
+[exit 1]
+
+# control: a selector no token implements
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA definitelyNotAFunction_x402() --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+[exit 1]
+
+## Token BTC 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28
+$ cast code 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 --rpc-url https://rpc.hemi.network/rpc  # size and keccak shown
+bytes=2098 keccak=0xc2df43ff808f33707a2e62c626a58366a9c8446ce9543498083e03154e5d3869
+first64=0x608060405234801561000f575f80fd5b50600436106100b1575f3560e01c8063
+[exit 0]
+
+$ cast storage 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc --rpc-url https://rpc.hemi.network/rpc
+0x0000000000000000000000000000000000000000000000000000000000000000
+[exit 0]
+
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 name()(string) --rpc-url https://rpc.hemi.network/rpc
+"Hemi Bitcoin"
+[exit 0]
+
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 symbol()(string) --rpc-url https://rpc.hemi.network/rpc
+"hemiBTC"
+[exit 0]
+
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 decimals()(uint8) --rpc-url https://rpc.hemi.network/rpc
+8
+[exit 0]
+
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 version()(string) --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+[exit 1]
+
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 eip712Domain()(bytes1,string,string,uint256,address,bytes32,uint256[]) --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+[exit 1]
+
+# EIP-3009
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 authorizationState(address,bytes32)(bool) 0x000000000000000000000000000000000000dEaD 0x0000000000000000000000000000000000000000000000000000000000000000 --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+[exit 1]
+
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32) 0x000000000000000000000000000000000000dEaD 0x000000000000000000000000000000000000dEaD 1 0 0 0x0000000000000000000000000000000000000000000000000000000000000000 27 0x0000000000000000000000000000000000000000000000000000000000000000 0x0000000000000000000000000000000000000000000000000000000000000000 --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+[exit 1]
+
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes) 0x000000000000000000000000000000000000dEaD 0x000000000000000000000000000000000000dEaD 1 0 0 0x0000000000000000000000000000000000000000000000000000000000000000 0x --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+[exit 1]
+
+# EIP-2612
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 DOMAIN_SEPARATOR()(bytes32) --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+[exit 1]
+
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 nonces(address)(uint256) 0x000000000000000000000000000000000000dEaD --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+[exit 1]
+
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 permit(address,address,uint256,uint256,uint8,bytes32,bytes32) 0x000000000000000000000000000000000000dEaD 0x000000000000000000000000000000000000dEaD 1 0 27 0x0000000000000000000000000000000000000000000000000000000000000000 0x0000000000000000000000000000000000000000000000000000000000000000 --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+[exit 1]
+
+# control: a selector no token implements
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 definitelyNotAFunction_x402() --rpc-url https://rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+[exit 1]
+
+## Extra A. EIP-712 domain of USDC.e (what an EIP-3009/2612 signer must use)
+$ cast storage 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA 0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3 --rpc-url https://rpc.hemi.network/rpc
+0x0000000000000000000000004f5f42799d1e01662b629ede265baea223e9f9c7
+[exit 0]
+
+# expected DOMAIN_SEPARATOR for name="Bridged USDC (Stargate)" version="2" chainId=43111 verifyingContract=0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA:
+$ cast keccak 0x8b73c3c69bb8fe3d512ecc4cf759cc79239f7b179b0ffacaa9a75d522b39400f223427795cf285d9f741d01447262e9de3ba686f0c4a9e5d37d2e4fc3ace88b2ad7c5bef027816a800da1736444fb58a807ef4c9603b7848673f7e3a68eb14a5000000000000000000000000000000000000000000000000000000000000a867000000000000000000000000ad11a8beb98bbf61dbb1aa0f6d6f2ecd87b35afa
+0x6fe49ef2438be116233a7505f2b997466e49631ac8e197a2f1f208108d598a11
+[exit 0]
+
+## Extra B. Selector scan of runtime code (PUSH4 <selector>); proxies scanned at their implementation
+# USDC.e implementation 0x4f5f42799d1e01662b629ede265baea223e9f9c7 bytes=23464
+  PRESENT a9059cbb transfer(address,uint256) [control]
+  PRESENT 095ea7b3 approve(address,uint256) [control]
+  PRESENT e3ee160e transferWithAuthorization(v,r,s)
+  PRESENT cf092995 transferWithAuthorization(bytes)
+  PRESENT ef55bec6 receiveWithAuthorization(v,r,s)
+  PRESENT e94a0102 authorizationState(address,bytes32)
+  PRESENT d505accf permit(address,address,uint256,uint256,uint8,bytes32,bytes32)
+  PRESENT 7ecebe00 nonces(address)
+  PRESENT 3644e515 DOMAIN_SEPARATOR()
+
+# BTC token 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 bytes=2098
+  PRESENT a9059cbb transfer(address,uint256) [control]
+  PRESENT 095ea7b3 approve(address,uint256) [control]
+  absent  e3ee160e transferWithAuthorization(v,r,s)
+  absent  cf092995 transferWithAuthorization(bytes)
+  absent  ef55bec6 receiveWithAuthorization(v,r,s)
+  absent  e94a0102 authorizationState(address,bytes32)
+  absent  d505accf permit(address,address,uint256,uint256,uint8,bytes32,bytes32)
+  absent  7ecebe00 nonces(address)
+  absent  3644e515 DOMAIN_SEPARATOR()
+
+## Extra C. Permit2 bytecode identity vs Ethereum mainnet (immutables _CACHED_CHAIN_ID and _CACHED_DOMAIN_SEPARATOR substituted)
+$ cast chain-id --rpc-url https://eth.drpc.org
+1
+[exit 0]
+
+eth   bytes=9152 keccak=0xc67d1657868aa5146eaf24fb879fb1fdec3d2d493b3683a61c9c2f4fb2851131 DOMAIN_SEPARATOR=0x866a5aba21966af95d6c7ab78eb2b2fc913915c28be3b9aa07cc04ff903e3f28
+eth occurrences of PUSH32 chainId=1: 1  PUSH32 domainSeparator: 1
+eth code with Hemi immutables keccak=0x30002d17c268825d175caba993df71c34b30048f344b2ba63705a3063fa4743a
+hemi  code                        keccak=0x30002d17c268825d175caba993df71c34b30048f344b2ba63705a3063fa4743a
+RESULT: identical to Ethereum Permit2 modulo chain-specific immutables
+

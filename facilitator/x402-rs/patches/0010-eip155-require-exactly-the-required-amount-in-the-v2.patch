@@ -1,0 +1,122 @@
+From 2d55013b9f1e70825008bc39330747850498fd6b Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 00:20:08 -0400
+Subject: [PATCH 10/18] eip155: require exactly the required amount in the v2
+ exact scheme
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The exact scheme only rejected an authorization below the required amount
+(assert_enough_value). A payload authorizing more, e.g. 5000 for a 1000
+requirement, verified and settled 5000: the payer was charged more than the
+resource costs.
+
+x402 v2 §9 defines invalid_exact_evm_payload_authorization_value_mismatch as
+"Payment amount does not exactly match the required amount", and the TS
+reference facilitator compares with !==. The v2 exact EIP-3009 and Permit2
+paths now use assert_exact_value, which rejects any difference; the v2 exact
+handler reports it as invalid_exact_evm_payload_authorization_value_mismatch.
+The upto scheme, where the amount is a maximum, and v1 are unchanged.
+---
+ .../src/v1_eip155_exact/facilitator.rs        | 31 +++++++++++++++++++
+ .../v2_eip155_exact/facilitator/eip3009.rs    |  4 +--
+ .../v2_eip155_exact/facilitator/permit2.rs    |  6 ++--
+ 3 files changed, 36 insertions(+), 5 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+index 3df9f69..d9cc791 100644
+--- a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
++++ b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+@@ -460,6 +460,25 @@ where
+     }
+ }
+ 
++/// Verifies that the authorized `value` is exactly the required amount, as the `exact` scheme
++/// demands (x402 v2 §9 `invalid_exact_evm_payload_authorization_value_mismatch`: "Payment amount
++/// does not exactly match the required amount"). Over-authorizing is rejected too: the facilitator
++/// would otherwise settle more than the resource costs.
++#[cfg_attr(feature = "telemetry", instrument(skip_all, err, fields(
++    sent = %sent,
++    amount_required = %amount_required
++)))]
++pub fn assert_exact_value<V>(sent: &V, amount_required: &V) -> Result<(), PaymentVerificationError>
++where
++    V: Display + Eq,
++{
++    if sent != amount_required {
++        Err(PaymentVerificationError::InvalidPaymentAmount)
++    } else {
++        Ok(())
++    }
++}
++
+ /// Canonical data required to verify a signature.
+ #[derive(Debug, Clone)]
+ pub struct SignedMessage {
+@@ -1481,6 +1500,18 @@ mod tests {
+         ));
+     }
+ 
++    #[test]
++    fn exact_value_rejects_both_under_and_over_payment() {
++        let required = U256::from(1000);
++        assert!(assert_exact_value(&U256::from(1000), &required).is_ok());
++        for sent in [999u64, 1001, 5000] {
++            assert!(matches!(
++                assert_exact_value(&U256::from(sent), &required),
++                Err(PaymentVerificationError::InvalidPaymentAmount)
++            ));
++        }
++    }
++
+     #[test]
+     fn signature_reverts_are_recognised() {
+         // Permit2 InvalidSigner(), InvalidContractSignature()
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
+index 6cefa12..2f84cbe 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
+@@ -10,7 +10,7 @@ use tracing::instrument;
+ use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider};
+ use crate::v1_eip155_exact::{
+     Eip155ExactError, ExactEvmPayment, IEIP3009, PaymentRequirementsExtra, assert_domain,
+-    assert_enough_balance, assert_enough_value, assert_payment_signed_by_payer, assert_time,
++    assert_enough_balance, assert_exact_value, assert_payment_signed_by_payer, assert_time,
+     explain_failed_eip3009_transfer, settle_payment, verify_payment,
+ };
+ use crate::v2_eip155_exact::Eip3009Payload;
+@@ -119,7 +119,7 @@ pub async fn assert_valid_payment<P: Provider>(
+     assert_time(valid_after, valid_before)?;
+ 
+     let amount_required = accepted.amount;
+-    assert_enough_value(&authorization.value, &amount_required)?;
++    assert_exact_value(&authorization.value, &amount_required)?;
+ 
+     assert_enough_balance(&contract, &authorization.from, amount_required).await?;
+ 
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+index 711a992..83755b6 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+@@ -18,7 +18,7 @@ use crate::chain::erc20::IERC20;
+ use crate::chain::permit2::{EXACT_PERMIT2_PROXY_ADDRESS, PERMIT2_ADDRESS};
+ use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider, MetaTransaction};
+ use crate::v1_eip155_exact::{
+-    Eip155ExactError, StructuredSignature, VALIDATOR_ADDRESS, Validator6492, assert_enough_value,
++    Eip155ExactError, StructuredSignature, VALIDATOR_ADDRESS, Validator6492, assert_exact_value,
+     assert_signed_by_payer, assert_time, is_contract_deployed, is_failed_execution,
+     is_signature_revert, reverted_transfer, tx_hash_from_receipt,
+ };
+@@ -174,9 +174,9 @@ pub fn assert_offchain_valid(
+     let valid_before = authorization.deadline;
+     assert_time(valid_after, valid_before)?;
+ 
+-    // Sufficient amount
++    // Exactly the required amount
+     let amount_required = &accepted.amount;
+-    assert_enough_value(&authorization.permitted.amount, amount_required)?;
++    assert_exact_value(&authorization.permitted.amount, amount_required)?;
+ 
+     // Same token
+     if authorization.permitted.token != accepted.asset {

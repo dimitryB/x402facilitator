@@ -1,0 +1,5 @@
+# Forge script output. A real deployment's broadcast/DeployHemi.s.sol/<chain id>/run-*.json is the
+# record of its transactions and can be committed. Dry runs and lock files are noise. The repo-level
+# pattern contracts/broadcast/*/dry-run/ misses the <chain id> directory that forge adds.
+broadcast/**/dry-run/
+broadcast/**/*.lock

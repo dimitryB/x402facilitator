@@ -6,7 +6,7 @@ dist/
 # Foundry
 contracts/out/
 contracts/cache/
-contracts/broadcast/*/dry-run/
+contracts/broadcast/**/dry-run/
 # Secrets
 .env
 .env.*
@@ -14,3 +14,5 @@ contracts/broadcast/*/dry-run/
 *.key
 # OS
 .DS_Store
+# Local scratch (Colima only shares $HOME with containers)
+.scratch/

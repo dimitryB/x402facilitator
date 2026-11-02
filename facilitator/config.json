@@ -1,0 +1,28 @@
+{
+  "port": 8080,
+  "host": "0.0.0.0",
+  "chains": {
+    "eip155:743111": {
+      "eip1559": true,
+      "receipt_timeout_secs": 60,
+      "signers": ["$FACILITATOR_TESTNET_PRIVATE_KEY"],
+      "rpc": [
+        { "http": "$HEMI_TESTNET_RPC_PRIMARY", "rate_limit": 20 },
+        { "http": "$HEMI_TESTNET_RPC_FALLBACK", "rate_limit": 4 }
+      ]
+    },
+    "eip155:43111": {
+      "eip1559": true,
+      "receipt_timeout_secs": 60,
+      "signers": ["$FACILITATOR_MAINNET_PRIVATE_KEY"],
+      "rpc": [
+        { "http": "$HEMI_MAINNET_RPC_PRIMARY", "rate_limit": 20 },
+        { "http": "$HEMI_MAINNET_RPC_FALLBACK", "rate_limit": 4 }
+      ]
+    }
+  },
+  "schemes": [
+    { "id": "v2-eip155-exact", "chains": "eip155:743111" },
+    { "id": "v2-eip155-exact", "chains": "eip155:43111" }
+  ]
+}

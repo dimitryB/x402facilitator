@@ -1,0 +1,396 @@
+From 279d710278774ee7113dfcb4c02d7f39b111307e Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 22:51:21 -0400
+Subject: [PATCH 03/18] eip155: check the payer's signature first, and reject
+ one an EOA cannot have made
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+x402's exact scheme on EVM checks the signature before balances and allowances
+(scheme_exact_evm.md: EIP-3009 verification step 1; Permit2 verification
+step 1, "must execute these checks in order"). x402-rs read the balance (and,
+for Permit2, the allowance) first, so an unfunded payer with a bad signature
+got insufficient_funds or permit2_allowance_required instead of an invalid
+signature.
+
+Worse, StructuredSignature::try_from_bytes treats a 64/65-byte signature that
+does not recover to the payer as an EIP-1271 signature, so that smart wallets
+work. For an EOA payer (no code) such a signature can never be valid, but it
+was passed to the transfer simulation anyway. The simulation reverted
+("FiatTokenV2: invalid signature", Permit2 InvalidSigner()) and the revert
+surfaced as a transport error: HTTP 500 with unexpected_error, from both
+/verify and /settle.
+
+The v2 exact verify and settle paths, for both EIP-3009 and Permit2, now check
+the signature before anything else is read from the chain: an EOA signature
+must recover to the payer (as before), and an EIP-1271 signature is only
+accepted from a payer that has code. This costs one eth_getCode, only on the
+EIP-1271 path. EIP-6492 signatures (counterfactual wallets) are still checked
+on chain by the validator.
+
+The v2 exact handler reports signature failures with the code x402 v2 §9
+defines for the exact scheme on EVM, invalid_exact_evm_payload_signature.
+---
+ crates/chains/x402-chain-eip155/Cargo.toml    |   3 +
+ .../src/v1_eip155_exact/facilitator.rs        | 117 ++++++++++++++++++
+ .../v2_eip155_exact/facilitator/eip3009.rs    |  30 +++--
+ .../src/v2_eip155_exact/facilitator/mod.rs    |  47 ++++++-
+ .../v2_eip155_exact/facilitator/permit2.rs    |  19 ++-
+ 5 files changed, 198 insertions(+), 18 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/Cargo.toml b/crates/chains/x402-chain-eip155/Cargo.toml
+index c642c45..911e014 100644
+--- a/crates/chains/x402-chain-eip155/Cargo.toml
++++ b/crates/chains/x402-chain-eip155/Cargo.toml
+@@ -67,3 +67,6 @@ alloy-sol-types = { version = "1.6", features = ["json"] }
+ 
+ tracing = { workspace = true, optional = true }
+ tracing-core = { workspace = true, optional = true }
++
++[dev-dependencies]
++tokio = { workspace = true, features = ["macros", "rt"] }
+diff --git a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+index a1e9495..1c4393a 100644
+--- a/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
++++ b/crates/chains/x402-chain-eip155/src/v1_eip155_exact/facilitator.rs
+@@ -752,6 +752,54 @@ pub async fn is_contract_deployed<P: Provider>(
+     Ok(!bytes.is_empty())
+ }
+ 
++/// Rejects a signature that only an EIP-1271 contract could validate when `signer` has no code.
++///
++/// [`StructuredSignature::try_from_bytes`] treats a 64/65-byte signature that does not recover to the
++/// expected signer as an EIP-1271 signature, so that smart wallets keep working. An address without code
++/// cannot validate EIP-1271 signatures, so for such a signer the signature is simply invalid.
++/// Counterfactual wallets are not affected: their signatures are EIP-6492-wrapped and never take this path.
++pub async fn assert_eip1271_signer_has_code<P: Provider>(
++    provider: &P,
++    signer: &Address,
++) -> Result<(), Eip155ExactError> {
++    if is_contract_deployed(provider, signer).await? {
++        Ok(())
++    } else {
++        Err(PaymentVerificationError::InvalidSignature(format!(
++            "Signature was not made by {signer}, which has no code to validate it as an EIP-1271 signature"
++        ))
++        .into())
++    }
++}
++
++/// Checks that `signature` is the payer's, reading nothing from the chain but, when needed, the payer's code.
++///
++/// x402's `exact` scheme on EVM checks the signature first, before balances and allowances
++/// (`scheme_exact_evm.md`: EIP-3009 verification step 1, Permit2 verification step 1). An EOA signature
++/// already recovered to the payer when it was parsed; an EIP-1271 one is only possible from a contract
++/// ([`assert_eip1271_signer_has_code`]); an EIP-6492 one is left to the on-chain validator, because the
++/// wallet may not be deployed yet.
++pub async fn assert_signed_by_payer<P: Provider>(
++    provider: &P,
++    signature: &StructuredSignature,
++    payer: &Address,
++) -> Result<(), Eip155ExactError> {
++    match signature {
++        StructuredSignature::EIP1271(_) => assert_eip1271_signer_has_code(provider, payer).await,
++        StructuredSignature::EOA(_) | StructuredSignature::EIP6492 { .. } => Ok(()),
++    }
++}
++
++/// [`assert_signed_by_payer`] for an EIP-3009 `transferWithAuthorization` payment.
++pub async fn assert_payment_signed_by_payer<P: Provider>(
++    provider: &P,
++    payment: &ExactEvmPayment,
++    eip712_domain: &Eip712Domain,
++) -> Result<(), Eip155ExactError> {
++    let signed_message = payment.as_signed_message(eip712_domain)?;
++    assert_signed_by_payer(provider, &signed_message.signature, &signed_message.address).await
++}
++
+ pub async fn verify_payment<P: Provider>(
+     provider: &P,
+     contract: &IEIP3009::IEIP3009Instance<&P>,
+@@ -1114,3 +1162,72 @@ impl From<alloy_contract::Error> for Eip155ExactError {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use alloy_provider::ProviderBuilder;
++    use alloy_signer::SignerSync;
++    use alloy_signer_local::PrivateKeySigner;
++    use alloy_transport::mock::Asserter;
++
++    fn mocked_provider(asserter: &Asserter) -> impl Provider {
++        ProviderBuilder::new().connect_mocked_client(asserter.clone())
++    }
++
++    #[test]
++    fn signature_by_another_key_is_classified_as_eip1271() {
++        let payer = PrivateKeySigner::random();
++        let other = PrivateKeySigner::random();
++        let hash = B256::repeat_byte(0x42);
++        let own = Bytes::from(payer.sign_hash_sync(&hash).unwrap().as_bytes());
++        let foreign = Bytes::from(other.sign_hash_sync(&hash).unwrap().as_bytes());
++        assert!(matches!(
++            StructuredSignature::try_from_bytes(own, payer.address(), &hash).unwrap(),
++            StructuredSignature::EOA(_)
++        ));
++        assert!(matches!(
++            StructuredSignature::try_from_bytes(foreign, payer.address(), &hash).unwrap(),
++            StructuredSignature::EIP1271(_)
++        ));
++    }
++
++    #[tokio::test]
++    async fn eoa_signature_needs_no_rpc_call() {
++        let payer = PrivateKeySigner::random();
++        let hash = B256::repeat_byte(0x42);
++        let own = Bytes::from(payer.sign_hash_sync(&hash).unwrap().as_bytes());
++        let signature = StructuredSignature::try_from_bytes(own, payer.address(), &hash).unwrap();
++        // No response is queued: any RPC call would fail the check.
++        let asserter = Asserter::new();
++        let result =
++            assert_signed_by_payer(&mocked_provider(&asserter), &signature, &payer.address()).await;
++        assert!(result.is_ok(), "{result:?}");
++    }
++
++    #[tokio::test]
++    async fn eip1271_signature_from_an_address_without_code_is_invalid() {
++        let asserter = Asserter::new();
++        asserter.push_success(&Bytes::new());
++        let signer = Address::repeat_byte(0x11);
++        let result = assert_eip1271_signer_has_code(&mocked_provider(&asserter), &signer).await;
++        assert!(
++            matches!(
++                result,
++                Err(Eip155ExactError::PaymentVerification(
++                    PaymentVerificationError::InvalidSignature(_)
++                ))
++            ),
++            "{result:?}"
++        );
++    }
++
++    #[tokio::test]
++    async fn eip1271_signature_from_a_contract_is_left_to_the_contract() {
++        let asserter = Asserter::new();
++        asserter.push_success(&Bytes::from_static(&[0x60, 0x80, 0x60, 0x40]));
++        let signer = Address::repeat_byte(0x11);
++        let result = assert_eip1271_signer_has_code(&mocked_provider(&asserter), &signer).await;
++        assert!(result.is_ok(), "{result:?}");
++    }
++}
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
+index 6dceaf4..95e1f29 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/eip3009.rs
+@@ -10,7 +10,8 @@ use tracing::instrument;
+ use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider};
+ use crate::v1_eip155_exact::{
+     Eip155ExactError, ExactEvmPayment, IEIP3009, PaymentRequirementsExtra, assert_domain,
+-    assert_enough_balance, assert_enough_value, assert_time, settle_payment, verify_payment,
++    assert_enough_balance, assert_enough_value, assert_payment_signed_by_payer, assert_time,
++    settle_payment, verify_payment,
+ };
+ use crate::v2_eip155_exact::Eip3009Payload;
+ use crate::v2_eip155_exact::types::{Eip3009PaymentPayload, Eip3009PaymentRequirements};
+@@ -83,26 +84,16 @@ pub async fn assert_valid_payment<P: Provider>(
+         return Err(PaymentVerificationError::ChainIdMismatch.into());
+     }
+     let authorization = &payload.authorization;
+-    if authorization.to != accepted.pay_to {
+-        return Err(PaymentVerificationError::RecipientMismatch.into());
+-    }
+-    let valid_after = authorization.valid_after;
+-    let valid_before = authorization.valid_before;
+-    assert_time(valid_after, valid_before)?;
+     let asset_address = accepted.asset;
+     let contract = IEIP3009::new(asset_address.into(), provider);
+ 
+-    let amount_required = accepted.amount;
+-    assert_enough_value(&authorization.value, &amount_required)?;
+-
++    // v2 requirements always carry the EIP-712 name and version, so this reads nothing from the chain.
+     let extra = Some(PaymentRequirementsExtra {
+         name: accepted.extra.name.clone(),
+         version: accepted.extra.version.clone(),
+     });
+     let domain = assert_domain(chain, &contract, &asset_address.into(), &extra).await?;
+ 
+-    assert_enough_balance(&contract, &authorization.from, amount_required).await?;
+-
+     let signature = payload.signature.clone();
+ 
+     let payment = ExactEvmPayment {
+@@ -115,6 +106,21 @@ pub async fn assert_valid_payment<P: Provider>(
+         signature,
+     };
+ 
++    // The signature comes first (x402 exact EVM, EIP-3009 verification step 1), before the balance read.
++    assert_payment_signed_by_payer(contract.provider(), &payment, &domain).await?;
++
++    if authorization.to != accepted.pay_to {
++        return Err(PaymentVerificationError::RecipientMismatch.into());
++    }
++    let valid_after = authorization.valid_after;
++    let valid_before = authorization.valid_before;
++    assert_time(valid_after, valid_before)?;
++
++    let amount_required = accepted.amount;
++    assert_enough_value(&authorization.value, &amount_required)?;
++
++    assert_enough_balance(&contract, &authorization.from, amount_required).await?;
++
+     Ok((contract, payment, domain))
+ }
+ 
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
+index e5ff63a..ca6de42 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
+@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
+ use std::collections::HashMap;
+ use x402_types::chain::ChainProviderOps;
+ use x402_types::proto;
+-use x402_types::proto::v2;
++use x402_types::proto::{PaymentVerificationError, v2};
+ use x402_types::scheme::{
+     ExtensionKey, X402SchemeFacilitator, X402SchemeFacilitatorBuilder, X402SchemeFacilitatorError,
+ };
+@@ -44,6 +44,17 @@ where
+     }
+ }
+ 
++/// Reports signature failures with the code x402 v2 §9 gives them for the exact scheme on EVM,
++/// `invalid_exact_evm_payload_signature`, instead of the chain-agnostic `invalid_signature`.
++fn exact_evm_error(error: X402SchemeFacilitatorError) -> X402SchemeFacilitatorError {
++    match error {
++        X402SchemeFacilitatorError::PaymentVerification(
++            PaymentVerificationError::InvalidSignature(message),
++        ) => PaymentVerificationError::InvalidExactEvmPayloadSignature(message).into(),
++        error => error,
++    }
++}
++
+ /// Configuration for the V2 EIP-155 exact scheme facilitator.
+ ///
+ /// This struct holds optional configuration parameters that control
+@@ -136,7 +147,8 @@ where
+                     &payment_payload,
+                     &payment_requirements,
+                 )
+-                .await?
++                .await
++                .map_err(exact_evm_error)?
+             }
+             types::FacilitatorVerifyRequest::Permit2 {
+                 payment_payload,
+@@ -158,7 +170,8 @@ where
+                     &payment_payload,
+                     &payment_requirements,
+                 )
+-                .await?
++                .await
++                .map_err(|e| exact_evm_error(e.into()))?
+             }
+         };
+         Ok(verify_response.into())
+@@ -192,7 +205,8 @@ where
+                     &payment_payload,
+                     &payment_requirements,
+                 )
+-                .await?
++                .await
++                .map_err(exact_evm_error)?
+             }
+             types::FacilitatorSettleRequest::Permit2 {
+                 payment_requirements,
+@@ -214,7 +228,8 @@ where
+                     &payment_payload,
+                     &payment_requirements,
+                 )
+-                .await?
++                .await
++                .map_err(exact_evm_error)?
+             }
+         };
+         Ok(settle_response.into())
+@@ -268,3 +283,25 @@ where
+         })
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use x402_types::proto::{AsPaymentProblem, ErrorReason};
++
++    #[test]
++    fn signature_failures_use_the_exact_evm_spec_code() {
++        let error =
++            exact_evm_error(PaymentVerificationError::InvalidSignature("bad".into()).into());
++        assert_eq!(
++            error.as_payment_problem().reason(),
++            ErrorReason::InvalidExactEvmPayloadSignature
++        );
++        assert_eq!(error.as_payment_problem().details(), "bad");
++        let other = exact_evm_error(PaymentVerificationError::InsufficientFunds.into());
++        assert_eq!(
++            other.as_payment_problem().reason(),
++            ErrorReason::InsufficientFunds
++        );
++    }
++}
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+index 7635ab9..152ca06 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/permit2.rs
+@@ -19,7 +19,7 @@ use crate::chain::permit2::{EXACT_PERMIT2_PROXY_ADDRESS, PERMIT2_ADDRESS};
+ use crate::chain::{Eip155ChainReference, Eip155MetaTransactionProvider, MetaTransaction};
+ use crate::v1_eip155_exact::{
+     Eip155ExactError, StructuredSignature, VALIDATOR_ADDRESS, Validator6492, assert_enough_value,
+-    assert_time, is_contract_deployed, tx_hash_from_receipt,
++    assert_signed_by_payer, assert_time, is_contract_deployed, tx_hash_from_receipt,
+ };
+ use crate::v2_eip155_exact::eip3009::assert_requirements_match;
+ use crate::v2_eip155_exact::types::{
+@@ -34,6 +34,9 @@ pub async fn verify_permit2_payment<P: Eip155MetaTransactionProvider + ChainProv
+     payment_payload: &Permit2PaymentPayload,
+     payment_requirements: &Permit2PaymentRequirements,
+ ) -> Result<v2::VerifyResponse, Eip155ExactError> {
++    // 0. The signature is the payer's (x402 exact EVM, Permit2 verification step 1)
++    assert_permit2_signed_by_payer(provider.inner(), provider.chain(), payment_payload).await?;
++
+     // 1. Verify offchain constraints
+     assert_offchain_valid(payment_payload, payment_requirements)?;
+ 
+@@ -74,6 +77,9 @@ where
+     P: Eip155MetaTransactionProvider<Error = E> + ChainProviderOps,
+     Eip155ExactError: From<E>,
+ {
++    // 0. The signature is the payer's (x402 exact EVM, Permit2 verification step 1)
++    assert_permit2_signed_by_payer(provider.inner(), provider.chain(), payment_payload).await?;
++
+     // 1. Verify offchain constraints
+     assert_offchain_valid(payment_payload, payment_requirements)?;
+ 
+@@ -223,6 +229,17 @@ impl PreparedExactPermit2 {
+     }
+ }
+ 
++/// Checks that the Permit2 signature is the payer's (x402 exact EVM, Permit2 verification step 1),
++/// before allowance, balance or simulation; see [`assert_signed_by_payer`].
++pub async fn assert_permit2_signed_by_payer<P: Provider>(
++    provider: &P,
++    chain_reference: &Eip155ChainReference,
++    payment_payload: &Permit2PaymentPayload,
++) -> Result<(), Eip155ExactError> {
++    let prepared = PreparedExactPermit2::try_new(chain_reference, payment_payload)?;
++    assert_signed_by_payer(provider, &prepared.structured_signature, &prepared.payer).await
++}
++
+ /// Generic Permit2 settlement execution.
+ ///
+ /// This function handles the common settlement dispatch logic for all Permit2-based

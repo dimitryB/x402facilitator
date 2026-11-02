@@ -1,0 +1,192 @@
+From 2e04316782ad01211ad4b84d6cf356c0c3a7b611 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 22:06:13 -0400
+Subject: [PATCH] eip155: broadcast a transaction to one RPC at a time
+
+alloy's FallbackLayer sends a request to every RPC at once and returns the
+first response, and a JSON-RPC error counts as one. Only the *Sync send
+methods are exempt, so with two RPCs eth_sendRawTransaction went out twice.
+The node that saw a copy second rejected it. When that rejection arrived
+first, the send failed although the other copy was mined: the nonce cache
+was reset, and the failed settle was reported as a replay, because the
+payment's nonce was by then spent. The payer was charged for a settlement
+reported as failed. Against one anvil fork behind both RPC URLs, 8 of 76
+sends failed this way.
+
+eth_sendRawTransaction is now a sequential method. It goes to the
+best-ranked RPC, and moves on only if that RPC cannot be reached. A node's
+own rejection is the answer, so a transaction is no longer sent to a
+second node because the first refused it. Reads still go to all RPCs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../x402-chain-eip155/src/chain/provider.rs   | 142 +++++++++++++++++-
+ 1 file changed, 135 insertions(+), 7 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/chain/provider.rs b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+index 7466604..ccb42b5 100644
+--- a/crates/chains/x402-chain-eip155/src/chain/provider.rs
++++ b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+@@ -108,12 +108,10 @@ impl Eip155ChainProvider {
+             })
+             .collect::<Vec<_>>();
+         let fallback = ServiceBuilder::new()
+-            .layer(
+-                FallbackLayer::default().with_active_transport_count(
+-                    NonZeroUsize::new(transports.len())
+-                        .expect("Non-zero amount of stateless transports"),
+-                ),
+-            )
++            .layer(fallback_layer(
++                NonZeroUsize::new(transports.len())
++                    .expect("Non-zero amount of stateless transports"),
++            ))
+             .service(transports);
+         RpcClient::new(fallback, false)
+     }
+@@ -131,6 +129,19 @@ impl Eip155ChainProvider {
+     }
+ }
+ 
++/// How requests are shared between a chain's RPCs.
++///
++/// A read goes to all of them at once and the first answer wins. A transaction must not, and by default
++/// it does: every RPC gets a copy, and the node that sees a copy second rejects it. The first response
++/// wins even when it is that rejection, so the send fails although the other copy is mined, and the
++/// payer is charged for a settlement reported as failed. A transaction therefore goes to one RPC at a
++/// time, moving on only if that RPC cannot be reached. A node's own rejection is the answer.
++fn fallback_layer(rpcs: NonZeroUsize) -> FallbackLayer {
++    FallbackLayer::default()
++        .with_active_transport_count(rpcs)
++        .with_sequential_method("eth_sendRawTransaction")
++}
++
+ /// Creates a new provider from configuration.
+ ///
+ /// Initializes signers, RPC transports, and the nonce manager.
+@@ -518,7 +529,124 @@ pub async fn assert_contracts_exists<P: Provider>(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::fees_with_tip_floor;
++    use super::{fallback_layer, fees_with_tip_floor};
++    use alloy_provider::mock::{Asserter, MockTransport};
++    use alloy_rpc_client::RpcClient;
++    use alloy_transport::{TransportError, TransportErrorKind, TransportFut};
++    use std::num::NonZeroUsize;
++    use std::sync::Arc;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    use std::task::{Context, Poll};
++    use tower::{Service, ServiceBuilder};
++
++    /// An RPC that counts what it receives and answers on a later poll, as a real one does, so that the
++    /// fallback layer reaches every RPC it is going to before the first answer comes back.
++    #[derive(Clone)]
++    struct CountedRpc {
++        calls: Arc<AtomicUsize>,
++        reachable: bool,
++        rpc: MockTransport,
++    }
++
++    impl CountedRpc {
++        fn new(answers: &Asserter, reachable: bool) -> Self {
++            Self {
++                calls: Arc::default(),
++                reachable,
++                rpc: MockTransport::new(answers.clone()),
++            }
++        }
++
++        fn calls(&self) -> usize {
++            self.calls.load(Ordering::SeqCst)
++        }
++    }
++
++    impl<R, T> Service<R> for CountedRpc
++    where
++        R: Send + 'static,
++        T: Send + 'static,
++        MockTransport:
++            Service<R, Response = T, Error = TransportError, Future = TransportFut<'static, T>>,
++    {
++        type Response = T;
++        type Error = TransportError;
++        type Future = TransportFut<'static, T>;
++
++        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
++            Poll::Ready(Ok(()))
++        }
++
++        fn call(&mut self, request: R) -> Self::Future {
++            self.calls.fetch_add(1, Ordering::SeqCst);
++            let (mut rpc, reachable) = (self.rpc.clone(), self.reachable);
++            Box::pin(async move {
++                tokio::task::yield_now().await;
++                if !reachable {
++                    return Err(TransportErrorKind::custom_str("connection refused"));
++                }
++                rpc.call(request).await
++            })
++        }
++    }
++
++    fn client(rpcs: &[&CountedRpc]) -> RpcClient {
++        let count = NonZeroUsize::new(rpcs.len()).unwrap();
++        let rpcs: Vec<_> = rpcs.iter().map(|rpc| (*rpc).clone()).collect();
++        RpcClient::new(
++            ServiceBuilder::new()
++                .layer(fallback_layer(count))
++                .service(rpcs),
++            false,
++        )
++    }
++
++    #[tokio::test]
++    async fn a_transaction_goes_to_one_rpc_and_a_read_to_all_of_them() {
++        let answers = Asserter::new();
++        for _ in 0..3 {
++            answers.push_success(&"0x01");
++        }
++        let (primary, fallback) = (
++            CountedRpc::new(&answers, true),
++            CountedRpc::new(&answers, true),
++        );
++        let client = client(&[&primary, &fallback]);
++        let send = client.request::<_, String>("eth_sendRawTransaction", ("0x00",));
++        send.await.unwrap();
++        assert_eq!(primary.calls() + fallback.calls(), 1);
++        let read = client.request::<_, String>("eth_call", ("0x00",));
++        read.await.unwrap();
++        assert_eq!(primary.calls() + fallback.calls(), 3);
++    }
++
++    #[tokio::test]
++    async fn a_transaction_moves_on_from_an_rpc_it_cannot_reach() {
++        let answers = Asserter::new();
++        answers.push_success(&"0x01");
++        let (dead, live) = (
++            CountedRpc::new(&answers, false),
++            CountedRpc::new(&answers, true),
++        );
++        let send =
++            client(&[&dead, &live]).request::<_, String>("eth_sendRawTransaction", ("0x00",));
++        send.await.unwrap();
++        assert_eq!(live.calls(), 1);
++    }
++
++    #[tokio::test]
++    async fn a_node_that_rejects_a_transaction_is_the_answer() {
++        let answers = Asserter::new();
++        answers.push_failure_msg("nonce too low");
++        let (primary, fallback) = (
++            CountedRpc::new(&answers, true),
++            CountedRpc::new(&answers, true),
++        );
++        let send = client(&[&primary, &fallback])
++            .request::<_, String>("eth_sendRawTransaction", ("0x00",));
++        assert!(send.await.is_err());
++        assert_eq!(primary.calls() + fallback.calls(), 1);
++    }
+ 
+     // Hemi testnet on 2026-10-29: base fee 252 wei, no tips in the last ten blocks, so alloy's
+     // estimate is a 1-wei tip and a max fee of 2 * 252 + 1; eth_maxPriorityFeePerGas is 1_000_000.

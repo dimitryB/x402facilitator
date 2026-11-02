@@ -1,0 +1,100 @@
+From b3c9d83f664b48ac6fb947c82606cf93f8dded51 Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Sun, 1 Nov 2026 17:05:18 -0500
+Subject: [PATCH 26/26] eip155: bound a send and its receipt wait together
+
+Patch 0022 claimed a settlement stays under the 90 s the TS SDK gives
+/settle, but it added up only the sends and the receipt wait. With both
+RPCs stalling sends, no block mined and each read 2 s late, /settle took
+92.7 s, and the SDK threw before the hash came back.
+
+send_transaction now has one budget, the receipt timeout plus 5 s,
+which also covers its reads and any lookup. A slow send shortens the
+receipt wait; when the budget is gone the transaction is reported as
+pending with its hash. The 60 s timeout leaves 25 s for the checks
+before the send.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../x402-chain-eip155/src/chain/provider.rs   | 33 ++++++++++++++++---
+ 1 file changed, 29 insertions(+), 4 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/chain/provider.rs b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+index dd923ac..6f7f1f0 100644
+--- a/crates/chains/x402-chain-eip155/src/chain/provider.rs
++++ b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+@@ -170,8 +170,7 @@ impl Eip155ChainProvider {
+ ///
+ /// A read goes to every RPC and the first answer wins, but a transaction waits for its one RPC, so a node
+ /// that accepts the connection and never answers would hold a settlement for ever. It counts as
+-/// unreachable after this long: the send moves on, and the failure counts against the RPC's rank. With a
+-/// chain's two RPCs the send plus the 60 s receipt wait stays under the 90 s the TS SDK gives `/settle`.
++/// unreachable after this long: the send moves on, and the failure counts against the RPC's rank.
+ const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+ 
+ /// How long one RPC gets to answer a lookup of a transaction by hash. It is asked again.
+@@ -183,6 +182,17 @@ const LOOKUP_WINDOW: Duration = Duration::from_secs(25);
+ /// The pause between lookups of a transaction by hash.
+ const LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
+ 
++/// What a send may add to the receipt timeout. Sending and waiting for the receipt together stay within
++/// the receipt timeout plus this, however slow the RPCs are. The 60 s receipt timeout then leaves 25 s
++/// of the 90 s the TS SDK gives `/settle` for the checks before the send.
++const SEND_ALLOWANCE: Duration = Duration::from_secs(5);
++
++/// How long to wait for a receipt when `spent` of the send's time has gone. Zero reports the transaction
++/// as pending at once.
++fn receipt_wait(receipt_timeout: Duration, spent: Duration) -> Duration {
++    receipt_timeout.min((receipt_timeout + SEND_ALLOWANCE).saturating_sub(spent))
++}
++
+ /// An HTTP transport whose requests end after `timeout`.
+ fn rpc_http(url: url::Url, timeout: Duration) -> Http<reqwest::Client> {
+     let client = reqwest::Client::builder()
+@@ -353,6 +363,7 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+         &self,
+         tx: MetaTransaction,
+     ) -> Result<TransactionReceipt, Self::Error> {
++        let started = Instant::now();
+         let from_address = tx.from.unwrap_or_else(|| self.next_signer_address());
+         let mut txr = TransactionRequest::default()
+             .with_to(tx.to)
+@@ -452,7 +463,10 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+ 
+         // Get receipt with timeout
+         // Default timeout of 30 seconds is reasonable for most EVM chains
+-        let timeout = std::time::Duration::from_secs(self.receipt_timeout_secs);
++        let timeout = receipt_wait(
++            Duration::from_secs(self.receipt_timeout_secs),
++            started.elapsed(),
++        );
+ 
+         let watcher = pending_tx
+             .with_required_confirmations(tx.confirmations)
+@@ -639,7 +653,7 @@ pub async fn assert_contracts_exists<P: Provider>(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{fallback_layer, fees_with_tip_floor, is_method_not_found, rpc_http};
++    use super::{fallback_layer, fees_with_tip_floor, is_method_not_found, receipt_wait, rpc_http};
+     use alloy_provider::mock::{Asserter, MockTransport};
+     use alloy_rpc_client::RpcClient;
+     use alloy_transport::{TransportError, TransportErrorKind, TransportFut};
+@@ -745,6 +759,17 @@ mod tests {
+         assert_eq!(live.calls(), 1);
+     }
+ 
++    #[test]
++    fn a_slow_send_shortens_the_receipt_wait() {
++        let receipt_timeout = Duration::from_secs(60);
++        let wait = |spent| receipt_wait(receipt_timeout, Duration::from_secs(spent));
++        assert_eq!(wait(2), Duration::from_secs(60));
++        assert_eq!(wait(5), Duration::from_secs(60));
++        assert_eq!(wait(20), Duration::from_secs(45));
++        assert_eq!(wait(65), Duration::ZERO);
++        assert_eq!(wait(90), Duration::ZERO);
++    }
++
+     #[tokio::test]
+     async fn only_a_missing_method_counts_as_a_node_without_it() {
+         let answers = Asserter::new();

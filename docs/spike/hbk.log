@@ -1,0 +1,43 @@
+### mainnet
+$ cast code 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12 --rpc-url https://rpc.hemi.network/rpc  # size shown
+bytes=8415
+
+$ cast call 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12 'getLastHeader()((uint32,bytes32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://rpc.hemi.network/rpc
+(973622 [9.736e5], 0x00000000000000000001f2dc3f0fed055da48b9c4f6882e5e6e9bcea811aa1de, 0x0000000000000000000000000000000000000000000000000000000020006000, 0x000000000000000000002d63710953e243aab5d31f10d05118fb693a6a4fc32a, 47272054330508127029871240988359071216824514677887036960365702853618981260942 [4.727e76], 1793236498 [1.793e9], 386007187 [3.86e8])
+
+$ cast code 0x0000000000000000000000000000000000000044 --rpc-url https://rpc.hemi.network/rpc
+0x
+
+### testnet
+$ cast code 0xeC9fa5daC1118963933e1A675a4EEA0009b7f215 --rpc-url https://testnet.rpc.hemi.network/rpc  # size shown
+bytes=10266
+
+$ cast call 0xeC9fa5daC1118963933e1A675a4EEA0009b7f215 'getLastHeader()((uint32,bytes32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+
+$ cast code 0x0000000000000000000000000000000000000044 --rpc-url https://testnet.rpc.hemi.network/rpc
+0x
+
+### mainnet
+$ cast call 0x0000000000000000000000000000000000000044 0x --rpc-url https://rpc.hemi.network/rpc
+0x000edb4000000000000000000000ef139f7e636444f6cdc705b8b35ff74f17a8c2d928d72001e000000000000000000000007d5abab3b2c016e7511454ec2aced3c96d7a3057efc7b94c4238831d350664fcf7834d97fcf6f0e812665070e1c9db5d2c
+### testnet
+$ cast call 0x0000000000000000000000000000000000000044 0x --rpc-url https://testnet.rpc.hemi.network/rpc
+0x004fb0b4000000000000005367f1d845dcb37df644f5b52c9afd1184a4be590f9916acd0241220000000000000255be863d537aad542881856ced44e2534fb98fd080e55f7f1cbc3bcef8f102bb42d97ea749dbbadbe19574d5fe8a0b8dd307aef69c1
+# D-012 re-check with the documented BitcoinHeader struct (hemilabs/docs@61aced7 hbk-smart-contract.md)
+$ curl -sS https://raw.githubusercontent.com/hemilabs/docs/61aced77175307475fea525d864496b95a21e913/building-bitcoin-apps/hemi-bitcoin-kit-hbk/hbk-smart-contract.md | grep -A10 'struct BitcoinHeader'
+struct BitcoinHeader {
+  uint32 height;                 // Block height
+  bytes32 blockHash;             // Block hash
+  uint32 version;                // Version
+  bytes32 previousBlockHash;     // Previous block hash
+  bytes32 merkleRoot;            // Merkle root
+  uint32 timestamp;              // Timestamp
+  uint32 bits;                   // Bits
+  uint32 nonce;                  // Nonce
+}
+$ cast call 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12 'getLastHeader()((uint32,bytes32,uint32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://rpc.hemi.network/rpc
+(973644 [9.736e5], 0x00000000000000000001263978371155791d58c2e4ad51afcf737be312fcd87d, 584622080 [5.846e8], 0x00000000000000000001e71307152f2006b2cca991ac4b7badb640be94a54b97, 0xf07d1cbde858cf498f4115
+$ cast call 0xeC9fa5daC1118963933e1A675a4EEA0009b7f215 'getLastHeader()((uint32,bytes32,uint32,bytes32,bytes32,uint32,uint32,uint32))' --rpc-url https://testnet.rpc.hemi.network/rpc
+Error: server returned an error response: error code 3: execution reverted, data: "0x"
+

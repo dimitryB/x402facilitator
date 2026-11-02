@@ -1,0 +1,535 @@
+From 90f57806e1cd501d065c47d1bb6a8da370e8912b Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 11:58:32 -0500
+Subject: [PATCH] eip155: a lagging RPC cannot hide a settlement's receipt
+
+A read goes to every RPC and the first answer wins, and null from a node
+that has not seen the block is an answer. A fast RPC that lags therefore
+hid a receipt the other RPC had, for as long as it lagged. The transfer
+was mined and payTo paid, but the settle and every retry answered
+settlement_pending. A stock seller retries once and then refuses, so the
+buyer was charged and not served.
+
+That took two routes. A retry read the receipt through the shared client.
+The first settle waited in alloy's get_receipt, which ends the wait with
+an error if one read is null once its block watcher has seen the
+transaction, so a brief lag was enough, in under a second. The watcher
+reads through the shared client too, so a node frozen at an old block
+held the whole 60 s receipt wait.
+
+find_receipt asks each RPC on its own and takes the first real receipt.
+Only a receipt ends the search early, and an RPC that stalls holds up no
+other. Both routes use it, so the first settle polls every RPC in place
+of alloy's watcher, every 7 s as alloy did, with a last look when the
+wait ends. With no RPC holding the receipt the answer is
+settlement_pending, as before.
+
+The wait no longer reads block numbers, so a receipt is the one
+confirmation a settlement waits for. MetaTransaction.confirmations was
+always 1 and is gone.
+
+The lookups now run through each RPC's rate limiter, shared with the
+fallback client. Every settlement makes them now, so the 4 per second on
+the public RPC has to cover them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../x402-chain-eip155/src/chain/provider.rs   | 293 +++++++++++++-----
+ .../src/v2_eip155_exact/facilitator/mod.rs    |  11 +-
+ 2 files changed, 226 insertions(+), 78 deletions(-)
+
+diff --git a/crates/chains/x402-chain-eip155/src/chain/provider.rs b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+index 430813a..5e376b7 100644
+--- a/crates/chains/x402-chain-eip155/src/chain/provider.rs
++++ b/crates/chains/x402-chain-eip155/src/chain/provider.rs
+@@ -4,8 +4,8 @@ use alloy_provider::fillers::{
+     BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
+ };
+ use alloy_provider::{
+-    Identity, PendingTransactionBuilder, PendingTransactionError, Provider, ProviderBuilder,
+-    RootProvider, WalletProvider,
++    Identity, PendingTransactionError, Provider, ProviderBuilder, RootProvider, WalletProvider,
++    WatchTxError,
+ };
+ use alloy_rpc_client::RpcClient;
+ use alloy_rpc_types_eth::{BlockId, TransactionReceipt, TransactionRequest};
+@@ -19,7 +19,8 @@ use std::ops::Deref;
+ use std::sync::atomic::{AtomicUsize, Ordering};
+ use std::sync::{Arc, LazyLock};
+ use std::time::{Duration, Instant};
+-use tower::ServiceBuilder;
++use tokio::task::JoinSet;
++use tower::{Layer, ServiceBuilder};
+ use x402_types::chain::{ChainId, ChainProviderOps, FromConfig};
+ 
+ #[cfg(feature = "telemetry")]
+@@ -86,7 +87,8 @@ pub struct Eip155ChainProvider {
+     signer_cursor: Arc<AtomicUsize>,
+     /// Nonce manager for resetting nonces on transaction failures.
+     nonce_manager: PendingNonceManager,
+-    /// One client per RPC, for the question that needs every RPC's answer: see `find_transaction`.
++    /// One client per RPC, for the questions that need every RPC's answer: see `find_transaction` and
++    /// `find_receipt`.
+     lookup_rpcs: Vec<RootProvider>,
+ }
+ 
+@@ -119,9 +121,11 @@ impl Eip155ChainProvider {
+         }
+     }
+ 
++    /// The client that shares requests between a chain's RPCs, and one client per RPC. An RPC's rate
++    /// limit covers the requests of both.
+     #[allow(unused_variables)] // chain_id is needed for tracing only here
+-    pub fn rpc_client(chain_id: ChainId, rpc: &[RpcConfig]) -> RpcClient {
+-        let transports = rpc
++    pub fn rpc_clients(chain_id: ChainId, rpc: &[RpcConfig]) -> (RpcClient, Vec<RootProvider>) {
++        let (transports, lookup_rpcs): (Vec<_>, Vec<_>) = rpc
+             .iter()
+             .filter_map(|provider_config| {
+                 let scheme = provider_config.http.scheme();
+@@ -133,19 +137,19 @@ impl Eip155ChainProvider {
+                 #[cfg(feature = "telemetry")]
+                 tracing::info!(chain=%chain_id, rpc_url=%rpc_url, rate_limit=?provider_config.rate_limit, "Using HTTP transport");
+                 let rate_limit = provider_config.rate_limit.unwrap_or(u32::MAX);
+-                let service = ServiceBuilder::new()
+-                    .layer(ThrottleLayer::new(rate_limit))
+-                    .service(rpc_http(rpc_url, RPC_REQUEST_TIMEOUT));
+-                Some(service)
++                let throttle = ThrottleLayer::new(rate_limit);
++                let lookups = throttle.layer(rpc_http(rpc_url.clone(), LOOKUP_REQUEST_TIMEOUT));
++                let service = throttle.layer(rpc_http(rpc_url, RPC_REQUEST_TIMEOUT));
++                Some((service, RootProvider::new(RpcClient::new(lookups, false))))
+             })
+-            .collect::<Vec<_>>();
++            .unzip();
+         let fallback = ServiceBuilder::new()
+             .layer(fallback_layer(
+                 NonZeroUsize::new(transports.len())
+                     .expect("Non-zero amount of stateless transports"),
+             ))
+             .service(transports);
+-        RpcClient::new(fallback, false)
++        (RpcClient::new(fallback, false), lookup_rpcs)
+     }
+ 
+     /// Round-robin selection of next signer from wallet.
+@@ -168,8 +172,8 @@ impl Eip155ChainProvider {
+ /// unreachable after this long: the send moves on, and the failure counts against the RPC's rank.
+ const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+ 
+-/// How long one RPC gets to answer a lookup of a transaction by hash. Close to `RPC_REQUEST_TIMEOUT`:
+-/// an RPC that is slow but answers must not hide a transaction it knows.
++/// How long one RPC gets to answer a lookup of a transaction or its receipt. Close to
++/// `RPC_REQUEST_TIMEOUT`: an RPC that is slow but answers must not hide a transaction it knows.
+ const LOOKUP_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+ 
+ /// How long a transaction is looked for after a send no node answered: two of Hemi's 12 s blocks.
+@@ -178,6 +182,11 @@ const LOOKUP_WINDOW: Duration = Duration::from_secs(25);
+ /// The pause between lookups of a transaction by hash.
+ const LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
+ 
++/// The pause between looks for a receipt: alloy's poll interval for a remote RPC, as in the wait this
++/// replaced. Every look goes to every RPC and counts against its rate limit, so with one RPC left a
++/// shorter pause would take requests from the reads of the payments behind this one.
++const RECEIPT_INTERVAL: Duration = Duration::from_secs(7);
++
+ /// What a send may add to the receipt timeout. A slow send shortens the receipt wait and the search so
+ /// that the whole takes about the receipt timeout plus this, which with the 60 s timeout leaves 25 s of
+ /// the 90 s the TS SDK gives `/settle` for the checks before the send. This is a target, not a limit:
+@@ -228,6 +237,42 @@ fn rpc_http(url: url::Url, timeout: Duration) -> Http<reqwest::Client> {
+     Http::with_client(client, url)
+ }
+ 
++/// A transaction's receipt, from whichever of `rpcs` has it first, looked for until `wait` has gone.
++///
++/// A shared request takes the first answer, and `null` from a node that lags is an answer, so a fast
++/// stale RPC would hide a receipt the others have for as long as it lags: a mined payment would be
++/// reported as pending. Each RPC is therefore asked on its own, and one that stalls holds up no other.
++/// Only a receipt ends the search early. Every RPC is asked at least once, so a `wait` of zero is one look.
++async fn find_receipt(
++    rpcs: &[RootProvider],
++    tx_hash: TxHash,
++    wait: Duration,
++) -> Option<TransactionReceipt> {
++    let deadline = Instant::now() + wait;
++    let mut lookups = JoinSet::new();
++    for rpc in rpcs {
++        let rpc = rpc.clone();
++        lookups.spawn(async move {
++            loop {
++                if let Ok(Some(receipt)) = rpc.get_transaction_receipt(tx_hash).await {
++                    return Some(receipt);
++                }
++                let left = deadline.saturating_duration_since(Instant::now());
++                if left.is_zero() {
++                    return None;
++                }
++                tokio::time::sleep(RECEIPT_INTERVAL.min(left)).await;
++            }
++        });
++    }
++    while let Some(lookup) = lookups.join_next().await {
++        if let Ok(Some(receipt)) = lookup {
++            return Some(receipt);
++        }
++    }
++    None
++}
++
+ /// How requests are shared between a chain's RPCs.
+ ///
+ /// A read goes to all of them at once and the first answer wins. A transaction must not, and by default
+@@ -284,14 +329,7 @@ impl FromConfig<Eip155ChainConfig> for Eip155ChainProvider {
+         let signer_cursor = Arc::new(AtomicUsize::new(0));
+ 
+         // 2. Transports
+-        let client = Self::rpc_client(config.chain_id(), config.rpc());
+-        let lookup_rpcs = config
+-            .rpc()
+-            .iter()
+-            .filter(|rpc| matches!(rpc.http.scheme(), "http" | "https"))
+-            .map(|rpc| rpc_http(rpc.http.deref().clone(), LOOKUP_REQUEST_TIMEOUT))
+-            .map(|http| RootProvider::new(RpcClient::new(http, false)))
+-            .collect();
++        let (client, lookup_rpcs) = Self::rpc_clients(config.chain_id(), config.rpc());
+ 
+         // 3. Provider
+         // Create nonce manager explicitly so we can store a reference for error handling
+@@ -352,8 +390,8 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+     ///
+     /// If submission fails and no RPC knows the transaction's hash, the nonce for the sending address
+     /// is reset to force a fresh query on the next transaction. If an RPC knows it, the transaction is
+-    /// on its way, and this carries on as for a send that succeeded. If the transaction was submitted but its receipt does not arrive
+-    /// (timeout or RPC error), the nonce is kept, because the transaction may still be mined, and
++    /// on its way, and this carries on as for a send that succeeded. If the transaction was submitted but no RPC has its receipt
++    /// in time, the nonce is kept, because the transaction may still be mined, and
+     /// the error carries its hash ([`MetaTransactionSendError::ReceiptUnavailable`]).
+     ///
+     /// # Gas Pricing Strategy
+@@ -462,32 +500,28 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+ 
+         // Send transaction with error handling for nonce reset
+         let send_started = Instant::now();
+-        let pending_tx = match self.inner.send_tx_envelope(signed).await {
+-            Ok(pending) => pending,
+-            // A failed send proves nothing if an RPC took the transaction and then stalled: the next RPC
+-            // rejects the copy while the first one's is mined. A node that knows the hash settles it.
+-            Err(e) => {
+-                let search = lookup_search(
+-                    send_started.elapsed() >= RPC_REQUEST_TIMEOUT,
+-                    &e,
+-                    time_left(
+-                        Duration::from_secs(self.receipt_timeout_secs),
+-                        started.elapsed(),
+-                    ),
+-                );
+-                if self.find_transaction(tx_hash, search).await {
+-                    #[cfg(feature = "telemetry")]
+-                    tracing::warn!(tx = %tx_hash, error = %e, "Send failed, but an RPC has the transaction");
+-                    PendingTransactionBuilder::new(self.inner.root().clone(), tx_hash)
+-                } else {
+-                    #[cfg(feature = "telemetry")]
+-                    tracing::warn!(tx = %tx_hash, error = %e, "Send failed, and no RPC has the transaction");
+-                    // Transaction submission failed - reset nonce to force requery
+-                    self.nonce_manager.reset_nonce(from_address).await;
+-                    return Err(MetaTransactionSendError::Transport(e));
+-                }
++        // A failed send proves nothing if an RPC took the transaction and then stalled: the next RPC
++        // rejects the copy while the first one's is mined. A node that knows the hash settles it.
++        if let Err(e) = self.inner.send_tx_envelope(signed).await {
++            let search = lookup_search(
++                send_started.elapsed() >= RPC_REQUEST_TIMEOUT,
++                &e,
++                time_left(
++                    Duration::from_secs(self.receipt_timeout_secs),
++                    started.elapsed(),
++                ),
++            );
++            if self.find_transaction(tx_hash, search).await {
++                #[cfg(feature = "telemetry")]
++                tracing::warn!(tx = %tx_hash, error = %e, "Send failed, but an RPC has the transaction");
++            } else {
++                #[cfg(feature = "telemetry")]
++                tracing::warn!(tx = %tx_hash, error = %e, "Send failed, and no RPC has the transaction");
++                // Transaction submission failed - reset nonce to force requery
++                self.nonce_manager.reset_nonce(from_address).await;
++                return Err(MetaTransactionSendError::Transport(e));
+             }
+-        };
++        }
+ 
+         // Logged before waiting for the receipt, so the hash of every transaction that went out can
+         // be found even if the receipt never arrives or nobody reads the response.
+@@ -501,23 +535,24 @@ impl Eip155MetaTransactionProvider for Eip155ChainProvider {
+             started.elapsed(),
+         );
+ 
+-        let watcher = pending_tx
+-            .with_required_confirmations(tx.confirmations)
+-            .with_timeout(Some(timeout));
+-
+-        match watcher.get_receipt().await {
+-            Ok(receipt) => Ok(receipt),
+-            Err(e) => {
++        match self.find_receipt(tx_hash, timeout).await {
++            Some(receipt) => Ok(receipt),
++            None => {
++                let source = PendingTransactionError::from(WatchTxError::Timeout);
+                 #[cfg(feature = "telemetry")]
+-                tracing::warn!(tx = %tx_hash, error = %e, "Transaction receipt not available; settlement pending");
+-                // Receipt fetch failed (timeout or other error), but the transaction was accepted for
+-                // broadcast and may still be mined. Keep its nonce: resetting would let the next
+-                // transaction query a node that has not seen this one and reuse the nonce, replacing or
+-                // racing it. Report the hash so the caller can reconcile on chain.
+-                Err(MetaTransactionSendError::ReceiptUnavailable { tx_hash, source: e })
++                tracing::warn!(tx = %tx_hash, error = %source, "Transaction receipt not available; settlement pending");
++                // No RPC had the receipt in time, but the transaction was accepted for broadcast and
++                // may still be mined. Keep its nonce: resetting would let the next transaction query a
++                // node that has not seen this one and reuse the nonce, replacing or racing it. Report
++                // the hash so the caller can reconcile on chain.
++                Err(MetaTransactionSendError::ReceiptUnavailable { tx_hash, source })
+             }
+         }
+     }
++
++    async fn find_receipt(&self, tx_hash: TxHash, wait: Duration) -> Option<TransactionReceipt> {
++        find_receipt(&self.lookup_rpcs, tx_hash, wait).await
++    }
+ }
+ 
+ #[derive(Debug, thiserror::Error)]
+@@ -526,8 +561,7 @@ pub enum MetaTransactionSendError {
+     Transport(#[from] TransportError),
+     #[error(transparent)]
+     PendingTransaction(#[from] PendingTransactionError),
+-    /// The transaction was broadcast, but its receipt did not arrive (timeout or RPC error while
+-    /// waiting). It may still be mined.
++    /// The transaction was broadcast, but no RPC had its receipt in time. It may still be mined.
+     #[error("transaction {tx_hash} was broadcast, but its receipt is not available: {source}")]
+     ReceiptUnavailable {
+         tx_hash: TxHash,
+@@ -578,14 +612,13 @@ impl Eip155SignerAddresses for Eip155ChainProvider {
+     }
+ }
+ 
+-/// Meta-transaction parameters: target address, calldata, and required confirmations.
++/// Meta-transaction parameters: target address and calldata. A settlement waits for the receipt, which
++/// is one confirmation.
+ pub struct MetaTransaction {
+     /// Target contract address.
+     pub to: Address,
+     /// Transaction calldata (encoded function call).
+     pub calldata: Bytes,
+-    /// Number of block confirmations to wait for.
+-    pub confirmations: u64,
+     /// Optional sender address.
+     pub from: Option<Address>,
+ }
+@@ -595,7 +628,6 @@ impl MetaTransaction {
+         Self {
+             to,
+             calldata,
+-            confirmations: 1,
+             from: None,
+         }
+     }
+@@ -623,6 +655,13 @@ pub trait Eip155MetaTransactionProvider {
+         &self,
+         tx: MetaTransaction,
+     ) -> impl Future<Output = Result<TransactionReceipt, Self::Error>> + Send;
++
++    /// A transaction's receipt from any RPC that has it, looked for until `wait` has gone.
++    fn find_receipt(
++        &self,
++        tx_hash: TxHash,
++        wait: Duration,
++    ) -> impl Future<Output = Option<TransactionReceipt>> + Send;
+ }
+ 
+ impl<T: Eip155MetaTransactionProvider> Eip155MetaTransactionProvider for Arc<T> {
+@@ -643,6 +682,14 @@ impl<T: Eip155MetaTransactionProvider> Eip155MetaTransactionProvider for Arc<T>
+     ) -> impl Future<Output = Result<TransactionReceipt, Self::Error>> + Send {
+         (**self).send_transaction(tx)
+     }
++
++    fn find_receipt(
++        &self,
++        tx_hash: TxHash,
++        wait: Duration,
++    ) -> impl Future<Output = Option<TransactionReceipt>> + Send {
++        (**self).find_receipt(tx_hash, wait)
++    }
+ }
+ 
+ /// Whether an RPC answered that it does not have the method (JSON-RPC -32601).
+@@ -687,9 +734,11 @@ pub async fn assert_contracts_exists<P: Provider>(
+ #[cfg(test)]
+ mod tests {
+     use super::{
+-        LOOKUP_WINDOW, fallback_layer, fees_with_tip_floor, is_method_not_found, lookup_search,
+-        receipt_wait, rpc_http,
++        LOOKUP_WINDOW, RECEIPT_INTERVAL, fallback_layer, fees_with_tip_floor, find_receipt,
++        is_method_not_found, lookup_search, receipt_wait, rpc_http,
+     };
++    use alloy_primitives::TxHash;
++    use alloy_provider::RootProvider;
+     use alloy_provider::mock::{Asserter, MockTransport};
+     use alloy_rpc_client::RpcClient;
+     use alloy_transport::{TransportError, TransportErrorKind, TransportFut};
+@@ -697,7 +746,7 @@ mod tests {
+     use std::sync::Arc;
+     use std::sync::atomic::{AtomicUsize, Ordering};
+     use std::task::{Context, Poll};
+-    use std::time::Duration;
++    use std::time::{Duration, Instant};
+     use tower::{Service, ServiceBuilder};
+ 
+     /// An RPC that counts what it receives and answers on a later poll, as a real one does, so that the
+@@ -871,6 +920,108 @@ mod tests {
+         assert!(answer.is_err());
+     }
+ 
++    fn lookup_rpc(answers: &Asserter) -> RootProvider {
++        RootProvider::new(RpcClient::new(MockTransport::new(answers.clone()), false))
++    }
++
++    fn null_receipt() -> serde_json::Value {
++        serde_json::Value::Null
++    }
++
++    fn mined_receipt() -> serde_json::Value {
++        serde_json::json!({
++            "transactionHash": TxHash::ZERO,
++            "transactionIndex": "0x0",
++            "blockHash": TxHash::ZERO,
++            "blockNumber": "0x1",
++            "from": "0x0000000000000000000000000000000000000001",
++            "to": "0x0000000000000000000000000000000000000002",
++            "cumulativeGasUsed": "0x1",
++            "gasUsed": "0x1",
++            "effectiveGasPrice": "0x1",
++            "contractAddress": null,
++            "logs": [],
++            "logsBloom": format!("0x{}", "00".repeat(256)),
++            "type": "0x2",
++            "status": "0x1",
++        })
++    }
++
++    #[tokio::test]
++    async fn a_null_from_one_rpc_does_not_hide_the_receipt_on_another() {
++        for lagging_rpc_first in [true, false] {
++            let (lagging, healthy) = (Asserter::new(), Asserter::new());
++            lagging.push_success(&null_receipt());
++            healthy.push_success(&mined_receipt());
++            let (lagging, healthy) = (lookup_rpc(&lagging), lookup_rpc(&healthy));
++            let rpcs = if lagging_rpc_first {
++                [lagging, healthy]
++            } else {
++                [healthy, lagging]
++            };
++            let found = find_receipt(&rpcs, TxHash::ZERO, Duration::ZERO).await;
++            assert!(found.is_some());
++        }
++    }
++
++    #[tokio::test]
++    async fn a_failing_rpc_does_not_hide_the_receipt_on_another() {
++        let (failing, healthy) = (Asserter::new(), Asserter::new());
++        failing.push_failure_msg("try later");
++        healthy.push_success(&mined_receipt());
++        let rpcs = [lookup_rpc(&failing), lookup_rpc(&healthy)];
++        let found = find_receipt(&rpcs, TxHash::ZERO, Duration::ZERO).await;
++        assert!(found.is_some());
++    }
++
++    #[tokio::test]
++    async fn no_rpc_with_the_receipt_means_it_is_not_found() {
++        let (lagging, failing) = (Asserter::new(), Asserter::new());
++        lagging.push_success(&null_receipt());
++        failing.push_failure_msg("try later");
++        let rpcs = [lookup_rpc(&lagging), lookup_rpc(&failing)];
++        let found = find_receipt(&rpcs, TxHash::ZERO, Duration::ZERO).await;
++        assert!(found.is_none());
++    }
++
++    #[tokio::test]
++    async fn a_stalled_rpc_holds_up_no_other() {
++        // Connections queue on the listener, and nothing ever reads them.
++        let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let url = format!("http://{}", stalled.local_addr().unwrap());
++        let stalled = rpc_http(url.parse().unwrap(), Duration::from_secs(60));
++        let stalled = RootProvider::new(RpcClient::new(stalled, false));
++        let healthy = Asserter::new();
++        healthy.push_success(&mined_receipt());
++        let rpcs = [stalled, lookup_rpc(&healthy)];
++        let found = find_receipt(&rpcs, TxHash::ZERO, Duration::ZERO);
++        let found = tokio::time::timeout(Duration::from_secs(5), found);
++        assert!(found.await.unwrap().is_some());
++    }
++
++    #[tokio::test]
++    async fn the_search_goes_on_until_a_receipt_appears() {
++        let answers = Asserter::new();
++        answers.push_success(&null_receipt());
++        answers.push_success(&mined_receipt());
++        let rpcs = [lookup_rpc(&answers)];
++        let found = find_receipt(&rpcs, TxHash::ZERO, Duration::from_millis(50)).await;
++        assert!(found.is_some());
++    }
++
++    #[tokio::test]
++    async fn the_search_takes_a_last_look_when_its_wait_ends() {
++        let answers = Asserter::new();
++        answers.push_success(&null_receipt());
++        answers.push_success(&null_receipt());
++        let rpcs = [lookup_rpc(&answers)];
++        let started = Instant::now();
++        let wait = Duration::from_millis(50);
++        assert!(find_receipt(&rpcs, TxHash::ZERO, wait).await.is_none());
++        assert!(started.elapsed() >= wait && started.elapsed() < RECEIPT_INTERVAL);
++        assert!(answers.read_q().is_empty());
++    }
++
+     #[tokio::test]
+     async fn a_node_that_rejects_a_transaction_is_the_answer() {
+         let answers = Asserter::new();
+diff --git a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
+index a0ad21e..3bb8e48 100644
+--- a/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
++++ b/crates/chains/x402-chain-eip155/src/v2_eip155_exact/facilitator/mod.rs
+@@ -13,6 +13,7 @@ use alloy_primitives::{B256, TxHash};
+ use alloy_provider::Provider;
+ use serde::{Deserialize, Serialize};
+ use std::collections::HashMap;
++use std::time::Duration;
+ use x402_types::chain::ChainProviderOps;
+ use x402_types::facilitator::SettleCaller;
+ use x402_types::proto;
+@@ -184,8 +185,8 @@ where
+             ),
+         };
+         let transaction = tx_hash.to_string();
+-        match self.provider.inner().get_transaction_receipt(tx_hash).await {
+-            Ok(Some(receipt)) => match tx_hash_from_receipt(&receipt) {
++        match self.provider.find_receipt(tx_hash, Duration::ZERO).await {
++            Some(receipt) => match tx_hash_from_receipt(&receipt) {
+                 // Nobody would receive this success: leave the record for the next retry.
+                 Ok(_) if !caller.is_waiting() => Ok(v2::SettleResponse::Success {
+                     payer,
+@@ -206,14 +207,10 @@ where
+                     Err(reverted.into())
+                 }
+             },
+-            Ok(None) => Err(X402SchemeFacilitatorError::SettlementPending {
++            None => Err(X402SchemeFacilitatorError::SettlementPending {
+                 transaction,
+                 details: format!("Transaction {tx_hash} is not confirmed yet"),
+             }),
+-            Err(e) => Err(X402SchemeFacilitatorError::SettlementPending {
+-                transaction,
+-                details: format!("Transaction {tx_hash} is not confirmed yet: {e}"),
+-            }),
+         }
+     }
+ }
