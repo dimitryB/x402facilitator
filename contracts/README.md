@@ -158,7 +158,7 @@ Details:
 `deploy.sh` was exercised end to end against local anvil forks of both chains (ports 48545 and 48546):
 testnet broadcast with the fallback key, rerun as a no-op, mainnet refused without a mainnet key, with
 the testnet key, and without the confirmation, the script-level gate on a direct `forge script --broadcast`,
-and a confirmed mainnet-fork broadcast. It has not been run with `--broadcast` against a live network.
+and a confirmed mainnet-fork broadcast. On 2026-10-29 it deployed all three contracts on Hemi testnet; the record is in `broadcast/DeployHemi.s.sol/743111/`. It has not been run with `--broadcast` on mainnet.
 
 ## Explorer verification
 
@@ -182,9 +182,8 @@ What is realistically verifiable, as found on 2026-10-28:
 - eth-bytecode-db already holds sources for all three creation codes. A `sources:search` query with each
   committed initcode returned 39 matches for Permit2 (`Permit2`, solc 0.8.17), 4 for the validator
   (`UniversalSigValidator`, solc 0.8.30) and 3 for the proxy (`x402ExactPermit2Proxy`, solc 0.8.28).
-  Every match is `PARTIAL`. Once deployed, all three may therefore show as verified, at best
-  partially, with no submission at all. This is expected, not observed: none of the three addresses
-  has code on Hemi testnet yet, and the mainnet explorer cannot be reached from here.
+  Every match is `PARTIAL`. On Hemi testnet all three now show as partial matches through that
+  database, with no submission at all. The mainnet explorer cannot be reached from here.
 - The proxy cannot get a full match. The deployed initcode was built with CBOR metadata whose IPFS
   hash depends on the original build environment (the reference repo says so in `Deploy.s.sol`). The
   standard-JSON input `verify.sh` submits compiles (checked with solc 0.8.28 directly) to bytecode of
@@ -196,7 +195,6 @@ What is realistically verifiable, as found on 2026-10-28:
   via-IR, 1,000,000 runs) and the `UniversalSigValidator` source in eth-bytecode-db (solc 0.8.30, prague,
   via-IR, no metadata).
 
-`verify.sh` has not been run against live deployments. On 2026-10-28 it was run against Hemi testnet,
-before anything was deployed, and correctly reported "not deployed" for all three. Its status parsing
+On Hemi testnet, `verify.sh` reports all three contracts as partial matches through the bytecode database. On 2026-10-28, before anything was deployed, it correctly reported "not deployed" for all three. Its status parsing
 was checked against a verified contract (Multicall3), an unverified one (the deployer) and an empty
 address.

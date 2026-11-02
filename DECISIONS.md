@@ -913,6 +913,12 @@ The pass was not clean on one point: a comment in `.env.example` said the mainne
 
 No code changed, so hemi.13 stands.
 
+The fourteenth pass, on the commit with those fixes, was clean: all eight items passed and it found no major issue. It also sent about 178 malformed requests to a fork, and all were answered in JSON with 200, 400 or 413, with no 5xx and no crash. Its three minor notes are fixed: `contracts/README.md` was stale about the testnet deployment, one date was wrong, and "a stalled RPC costs nothing" did not hold under load.
+
+The last is now a limit. In a burst of 30 concurrent payments on a fork with the primary dead, the fallback's throttle held throughput to about 0.3 payments a second, `/verify` took up to 88 s and `/settle` up to 86 s, all 30 were mined, and one answered `settlement_pending`.
+
+Passes 9 to 14 all passed the Definition of done. Pass 13 found no code or funds issue, only the comment above, and pass 14 was clean, on the same image. The brief's condition of two passes in a row is met on that reading. Pass 13 was not fully clean by the stricter rule used here.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).
