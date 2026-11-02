@@ -261,7 +261,7 @@ silicon), with the base images already pulled:
   patches.
 - `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
   113 s for hemi.3; 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches); 113 s for hemi.5
-  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11; 287 s for hemi.12; 194 s for hemi.13.
+  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 118 s and 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11; 287 s for hemi.12; 194 s for hemi.13.
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.

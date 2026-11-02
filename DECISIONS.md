@@ -560,7 +560,7 @@ Other choices and known limits of the patch set:
 
 hemi.8 adds patch 0019 (D-018). On 2026-10-29 its no-cache build took 119 s, and the e2e suite passed: 10 files, 103 tests.
 
-hemi.9 adds patches 0020 and 0021 (D-019). On 2026-10-30 a build that reused the cached dependency layer took 20 s, and the e2e suite passed: 11 files, 104 tests. No no-cache build was run then, because the workstation's Docker disk was full. On 2026-11-01 one of hemi.9 took 143 s, and the suite passed on it: 11 files, 104 tests.
+hemi.9 adds patches 0020 and 0021 (D-019). On 2026-10-30 a build that reused the cached dependency layer took 20 s, and the e2e suite passed: 11 files, 104 tests. No no-cache build was run then, because the workstation's Docker disk was full. On 2026-11-01 one of hemi.9 took 143 s, and the suite passed on it: 11 files, 104 tests. An earlier no-cache build that day took 118 s, and the suite passed on that one too, in 141 s.
 
 Verified on 2026-10-29 against a no-cache hemi.7 build (113 s):
 
