@@ -56,7 +56,7 @@ The settlement receipt comes back base64-encoded in the `PAYMENT-RESPONSE` heade
 buyer/demo-fork.sh
 ```
 
-The forks are pinned to the same blocks as the e2e tests (`FORK_BLOCK_TESTNET`, `FORK_BLOCK_MAINNET`). That makes runs reproducible. It also lets `scripts/fork.sh` retry on dRPC if the public Hemi RPC rate-limits a fork at startup. Don't point an unpinned testnet fork at dRPC: its `eth_blockNumber` lags about 2.9M blocks (DECISIONS.md D-015).
+The forks are pinned to the same blocks as the e2e tests (`FORK_BLOCK_TESTNET`, `FORK_BLOCK_MAINNET`). That makes runs reproducible. It also lets `scripts/fork.sh` retry on dRPC if the public Hemi RPC rate-limits a fork at startup. Don't point an unpinned testnet fork at dRPC: its `eth_blockNumber` lags by over a million blocks (DECISIONS.md D-015).
 
 Transactions in this demo exist only on the local forks. The buyer prints their explorer links marked "(local fork: not on the explorer)".
 

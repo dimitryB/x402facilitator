@@ -15,7 +15,7 @@
 #
 # If the upstream refuses at startup (the public RPC rate-limits at ~300 req/min), the script
 # retries once against dRPC. On testnet it does so only with a pinned block: dRPC testnet's
-# eth_blockNumber lags ~2.9M blocks (DECISIONS.md D-015), so an unpinned fork would start there.
+# eth_blockNumber lags by over a million blocks (DECISIONS.md D-015), so an unpinned fork would start there.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD

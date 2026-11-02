@@ -287,7 +287,7 @@ cargo test -p x402-types -p x402-facilitator-local -p x402-chain-eip155 \
 ```
 
 Every patch was checked one by one: `cargo fmt --check`, `cargo clippy --tests -D warnings`, and the
-tests, with 51 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
+tests, with 63 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
 the built image on anvil forks.
 
 ## The one non-spec field: `invalidReasonDetails`
@@ -1301,10 +1301,11 @@ is gone, because a receipt is the one confirmation the wait gives.
 
 These lookups now use each RPC's rate limit, shared with the fallback client, so the 4 per second on the
 public RPC covers them. With a stalled RPC and no receipt yet, a retry answers after its 8 s lookup limit, and
-the last look of a first settle can run 8 s past the wait.
+the last look of a first settle can run 8 s past the wait, plus any queue at the throttle.
 
-**Left as it is.** The other reads still take the first answer. They all happen before a send, or after one
-that failed, so a stale answer costs a rejection, a revert or a stuck send, and none can hide a payment that landed. The
+**Left as it is.** The other reads still take the first answer. They happen before a send, or after one
+that failed, so a stale answer costs a rejection, a revert or a stuck send. On a replay the payment has already
+moved: see **A replay through a lagging RPC** in the top-level README. The
 one to know about is the nonce read in `PendingNonceManager`, at first use and after a failed send. A stale nonce is
 rejected, or queues behind a transaction the node has not seen, so that settlement fails or stays pending. See
 D-025.

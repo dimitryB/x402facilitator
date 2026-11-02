@@ -483,7 +483,7 @@ Against the stock image, the e2e suite found that x402-rs 2.0.2 does not return 
 
 The cause of the signature case: x402-rs treats a 65-byte signature that does not recover to `from` as an EIP-1271 signature and leaves it to the on-chain simulation. The simulation's revert then surfaces as a transport error.
 
-No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.13` (hemi.7 until patch 0019, D-018; hemi.8 until patches 0020 and 0021, D-019; hemi.9 until patch 0022, D-020; hemi.10 until patches 0023 to 0026, D-021; hemi.11 until patch 0027, D-022; hemi.12 until 0027 was corrected, D-023). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
+No config setting changes any of this, so the facilitator is now built from `facilitator/Dockerfile`: x402-rs `e75adda`, plus the patches in `facilitator/x402-rs/patches/`, plus a build-only workspace trim. The image is tagged `hemi-x402-facilitator:e75adda-hemi.14` (hemi.7 until patch 0019, D-018; hemi.8 until patches 0020 and 0021, D-019; hemi.9 until patch 0022, D-020; hemi.10 until patches 0023 to 0026, D-021; hemi.11 until patch 0027, D-022; hemi.12 until 0027 was corrected, D-023; hemi.13 until patch 0028, D-025). Each patch is small, unit-tested and written to go upstream. None changes where funds go; 0010 narrows what is accepted to the exact amount. `facilitator/x402-rs/README.md` has the per-patch detail, the resulting check order and draft upstream texts. Nothing has been published.
 
 | Patch | Change |
 |------|------|
@@ -944,15 +944,15 @@ The interval is 7 s, alloy's own for a remote RPC. A first version polled every 
 | hemi.13 | 0.31 | 79 s | 74 s | 30 | 0 |
 | hemi.14 | 0.34 | 46 s | 71 s | 30 | 0 |
 
-**Cost.** With a stalled RPC and no receipt yet, a retry answers after its 8 s lookup limit, where the shared read answered at once, and the last look of a first settle can run 8 s past the wait. That makes the worst send and wait 73 s, which still leaves 17 s of the TS SDK's 90 s for the checks before the send. An RPC error during a retry now reads the same as `null`, so `details` no longer carry it. These cases all still answer `settlement_pending`, which is right for them.
+**Cost.** With a stalled RPC and no receipt yet, a retry answers after its 8 s lookup limit, where the shared read answered at once, and the last look of a first settle can run 8 s past the wait. With a send that fits its budget and no queue at the throttle, that makes the worst send and wait 73 s, which still leaves 17 s of the TS SDK's 90 s for the checks before the send. An RPC error during a retry now reads the same as `null`, so `details` no longer carry it. These cases all still answer `settlement_pending`, which is right for them.
 
-**The other first-answer reads were audited and left.** A receipt is the only chain read that happens after a payment has moved. The rest happen before a send, or after one that failed, so a stale answer costs a rejection, a revert or a stuck send, and none can hide a payment that landed:
+**The other first-answer reads were audited and left.** A receipt is the only read that confirms an accepted send. The rest happen before a send, or after one that failed, so a stale answer costs a rejection, a revert or a stuck send. On a replay the payment has already moved, and D-026 has that case:
 
 | Read | Stale answer costs |
 |------|------|
 | Balance, allowance and simulation | A false rejection, or a transaction that reverts and costs gas |
 | Fee and gas estimates | A settlement that reverts, or waits in the mempool as `settlement_pending` |
-| `authorizationState` and the Permit2 bitmap after a failure | The message only: both answers are `invalid_transaction_state` |
+| `authorizationState` and the Permit2 bitmap after a failure | After a revert, the message only: both answers are `invalid_transaction_state`. After a send that failed without a revert and landed, `unexpected_settle_error`, the exception in README **Ambiguous broadcast** |
 | Nonce in `PendingNonceManager`, at first use and after a failed send | A low nonce is rejected, or queues behind a transaction the node has not seen |
 
 The nonce is the one to watch. A frozen RPC that keeps winning that read would make settlements fail, or sit pending, until it recovers. That costs availability and hides no payment, so it stays out of this patch, and it is listed in README "Limits and open items".
@@ -964,6 +964,38 @@ hemi.14 changes how every settlement waits, so both assets were then paid live o
 `/settle` took 16.5 s and 16.1 s. They answered 6.2 s and 0.6 s after the mining block's timestamp, which fits the 7 s interval. The gap between the two buyer responses was 18.8 s, against 18.4 s on hemi.13, from one run of each.
 
 This run shows that real RPCs answer the new lookups on the normal path. It had no stale RPC, or none the log shows, so the stale cases are still proven on forks only.
+
+## D-026. Fifteenth critic pass: the first review of hemi.14
+
+All eight Definition-of-done items passed, with no major issue. This was the first critic pass on patch 0028. A no-cache build applied all 28 patches in 118 s, and the rebuilt binary has the same sha256 as the image that ran the live payments. In the critic's own runs, the e2e suite passed 13 files and 116 tests in 362 s, `forge test` passed 17, and `buyer/demo-fork.sh` settled all four payments, also from a fresh clone. All four cases in `tests/e2e/10-stale-rpc.test.ts` failed on hemi.13 and passed on hemi.14.
+
+Its measurements agree with D-025. Nine sequential settles on 12 s blocks averaged 12.09 s on hemi.14 and 12.15 s on hemi.13. The burst of 30 payments ran at 0.33 payments a second against 0.29, from one run of each. With the primary's receipt answers stalled, or answering a 429, a JSON-RPC error, an HTML body or a partial receipt, each settle succeeded through the fallback in under a second.
+
+It found five minor issues. None can send funds anywhere but `payTo` or charge twice. The slow lookups can leave a buyer charged and not served.
+
+| Finding | Trigger | Outcome |
+|------|------|------|
+| README said lookups had no throttle and were rare | None, docs only | Corrected |
+| README said a read error can end the receipt wait early. Since 0028 only a receipt does | None, docs only | Deleted |
+| D-025 said a receipt is the only read after a payment has moved. A replay is another | A lagging RPC that answers first, plus a resent payment header | D-025 reworded, new limit |
+| The 8 s lookup limit can hide a receipt that hemi.13's 10 s read returned | Every RPC answering receipts in 8 to 10 s | New limit, code unchanged |
+| "The worst send and wait 73 s" is not a ceiling | Slow reads on every RPC, read from the code | D-025 reworded |
+
+**The replay.** On a fork of hemi.14, with a fast primary one block behind on `eth_call` and `eth_estimateGas`, `/verify` passed a spent payment. `/settle` then sent a transaction that reverted and cost gas, and answered `invalid_transaction_state`. `payTo` stayed at the one payment. Patch 0028 does not touch those reads. The critic also read that a send that failed without a revert and then landed can end in `unexpected_settle_error` under a stale read. `reverted_transfer` does pass such errors through. This was not measured.
+
+**The slow lookups.** With both RPCs answering receipts in 9 s and a 24 s receipt timeout, on a fork, hemi.14 answered `settlement_pending` after 32.8 s and again on a retry after 8.0 s, and succeeded once the RPCs recovered. hemi.13 settled in 18.6 s. That is a regression from 0028 in a narrow band, and it contradicts the constant's own comment. A 10 s limit would fix it and take the worst send and wait to 75 s. The code stays as it is: this takes every RPC in a 2-second band, the answer is the documented `settlement_pending`, and a change would need hemi.15 with a new live run and new critic passes.
+
+D-025's sample of 41 receipts in 230 s left no artifact, and that count only fits a sample of both chains, which it doesn't say. The critic's own 150 s sample had 27 receipts, none `null` from dRPC.
+
+To compare an older image, a retag alone does not work: `tests/setup/global.ts` runs `docker compose build`, which restores the current tag from cache.
+
+No code changed, so hemi.14 stands.
+
+The sixteenth pass, on those doc edits, was clean: all eight items passed and it found no major issue. The e2e suite passed 13 files and 116 tests in 321 s, `forge test` passed 17, and `buyer/demo-fork.sh` settled all four payments. It sent 4,890 malformed requests with no 5xx, and the facilitator kept answering. It checked the fork measurements above against the code and did not repeat them.
+
+Its seven minor notes were all in the docs, and they are fixed. The x402-rs README kept a clause this entry removed from D-025, and its unit-test count is now 63. The image tag in D-016 had stopped at hemi.13. README **Ambiguous broadcast** now names the stale-read exception. The "73 s" holds only with no queue at the throttle, because the 8 s limit starts after it. The summary above the findings table said no issue could lose funds, which read too broadly beside the slow lookups. dRPC testnet's lag is now about 1.65M blocks, so the two places that said 2.9M say over a million.
+
+Passes 15 and 16 were both clean on hemi.14, with no code change between them, so the brief's condition of two passes in a row is met, on the stricter rule too. No critic has read the last doc fixes, which change no code.
 
 ## Pre-spike context: what the reference code requires
 
