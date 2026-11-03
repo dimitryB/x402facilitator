@@ -727,7 +727,7 @@ The alternative was `eip1559: false`, which needs no image change, since `eth_ga
 
 ### Open questions
 
-- Q-1. Cross-check the mainnet token addresses on `explorer.hemi.xyz` from a network that isn't blocked (D-002). They currently rest on Hemi's token list and on-chain `name`/`symbol`/`decimals` reads. On 2026-10-29 a retry from this workstation still hit the TLS block, and no alternative mainnet explorer host resolved (`hemi.blockscout.com` and `hemi.explorer.caldera.xyz` return 404; `explorer.hemi.network` does not resolve). Needs someone on another network: `curl -sS 'https://explorer.hemi.xyz/api/v2/tokens?q=USDC.e'` and `?q=hemiBTC`.
+- Q-1. Closed by D-027: both mainnet token addresses match the explorer's records. `curl` from this workstation still hits the TLS block, so the explorer was read in a browser. On 2026-10-29 no alternative mainnet explorer host resolved (`hemi.blockscout.com` and `hemi.explorer.caldera.xyz` return 404; `explorer.hemi.network` does not resolve).
 - Q-2. Why the testnet hBK contract's `getLastHeader()` reverts while precompile `0x44` answers (D-012): likely a different hBK release or ABI on testnet. Phase 2.
 
 
@@ -996,6 +996,63 @@ The sixteenth pass, on those doc edits, was clean: all eight items passed and it
 Its seven minor notes were all in the docs, and they are fixed. The x402-rs README kept a clause this entry removed from D-025, and its unit-test count is now 63. The image tag in D-016 had stopped at hemi.13. README **Ambiguous broadcast** now names the stale-read exception. The "73 s" holds only with no queue at the throttle, because the 8 s limit starts after it. The summary above the findings table said no issue could lose funds, which read too broadly beside the slow lookups. dRPC testnet's lag is now about 1.65M blocks, so the two places that said 2.9M say over a million.
 
 Passes 15 and 16 were both clean on hemi.14, with no code change between them, so the brief's condition of two passes in a row is met, on the stricter rule too. No critic has read the last doc fixes, which change no code.
+
+## D-027. Q-1: explorer cross-check of the mainnet tokens
+
+Both mainnet token addresses match the explorer's records, so Q-1 is closed and `shared/hemi.json` does not change. The explorer's search misses USDC.e, so that check needed a direct lookup by address.
+
+`curl` still can't reach `explorer.hemi.xyz` from this workstation (D-002), and a cloud session was refused by its own egress proxy (`curl: (56) CONNECT tunnel failed, response 403`). The two searches and the direct lookup were opened in a browser on this workstation on 2026-11-02 and the responses pasted into the session. They are saved in `docs/spike/q1-explorer/`.
+
+```
+GET https://explorer.hemi.xyz/api/v2/tokens?q=hemiBTC    # 38 items, next_page_params null
+{"address":"0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28","decimals":"8","holders":"6093","name":"Hemi Bitcoin","symbol":"hemiBTC","total_supply":"2711201034","type":"ERC-20"}
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 "name()(string)" / "symbol()(string)" / "decimals()(uint8)" / "totalSupply()(uint256)" --rpc-url https://rpc.hemi.network/rpc
+"Hemi Bitcoin"  "hemiBTC"  8  2711201034
+
+GET https://explorer.hemi.xyz/api/v2/tokens?q=USDC.e     # 9 items, next_page_params null, 0xad11…5afA not among them
+GET https://explorer.hemi.xyz/api/v2/tokens/0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA
+{"address":"0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA","decimals":"6","holders":"5334","name":"Bridged USDC (Stargate)","symbol":"USDC.e","total_supply":"376380862031","type":"ERC-20"}
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA "name()(string)" / "symbol()(string)" / "decimals()(uint8)" / "totalSupply()(uint256)" --rpc-url https://rpc.hemi.network/rpc
+"Bridged USDC (Stargate)"  "USDC.e"  6  376380862031
+```
+
+The nine USDC.e results are `0x614e…0A2f`, six ICHI vaults and two option-style tokens that expired on 2026-08-15. Why the search misses `0xad11…5afA` is unknown: the explorer's own record has symbol `USDC.e`.
+
+These reads, taken before the direct lookup, tie that address to the tokens in the search results and to Stargate:
+
+```
+$ cast call 0x614eB485DE3c6C49701b40806AC1B985ad6F0A2f "asset()(address)" --rpc-url https://rpc.hemi.network/rpc
+0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA
+$ cast call <each ICHI vault in the search> "token1()(address)" --rpc-url https://rpc.hemi.network/rpc
+0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA    # all six
+$ cast logs --json --from-block 5549782 --to-block 5649782 --address 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA 'Mint(address,address,uint256)' --rpc-url https://rpc.hemi.network/rpc
+52 logs, every one with minter 0x45f1a95a4d3f3836523f5c83673c797f4d4d263b
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA "isMinter(address)(bool)" 0x45f1A95A4D3f3836523F5c83673c797F4D4d263B --rpc-url https://rpc.hemi.network/rpc
+true
+$ cast call 0x45f1A95A4D3f3836523F5c83673c797F4D4d263B "token()(address)" / "stargateType()(uint8)" --rpc-url https://rpc.hemi.network/rpc
+0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA  1
+```
+
+`hemilabs/token-list` version 4.2.0, dated 2026-10-22, still lists the address, and it has no other USDC or hemiBTC entry on 43111. Stargate's own API and docs could not be read, because `stargate.finance` and `docs.stargate.finance` reset the connection from this workstation.
+
+Some tokens in these searches copy a symbol or name. None is in this repo, and none is in Hemi's token list. Buy by address, never by symbol.
+
+| Address | Symbol | What it is | Holders |
+|------|------|------|------|
+| `0x614eB485DE3c6C49701b40806AC1B985ad6F0A2f` | `USDC.e` | Vault share, `asset()` is `0xad11…5afA` | 6 |
+| `0xD172B64AA13d892bb5EB35f3482058eAE0BC5B2a` | `hemiBTC` | Vault share, `asset()` is `0xAA40…ef28` | 1,230 |
+| `0x7288e5f79Fa29794242Fa6423DF6e8Fc048c4B32` | `HBTC` | Named `HemiBTC`, 18 decimals. Not read on chain | 1 |
+
+Separately, `hemi.drpc.org`, `hemi-testnet.drpc.org` and `drpc.org` all reset the connection from this workstation at 2026-11-03T00:02Z, though `hemi.drpc.org` had answered read-only checks earlier that day. `stargate.finance` and `docs.stargate.finance` do the same. The reset goes by hostname, so dRPC itself isn't shown to be down, and the block is not the same as D-002's, which answers with 256 bytes of 0xFF:
+
+```
+$ openssl s_client -connect 172.66.146.203:443 -servername hemi.drpc.org -brief
+write:errno=54
+$ openssl s_client -connect 172.66.146.203:443 -servername example.com -brief
+CONNECTION ESTABLISHED  Protocol version: TLSv1.3
+```
+
+The Hemi public RPCs answered throughout. While this lasts, a run from this workstation has one working RPC, so it should run from another network, which `contracts/verify.sh mainnet` needs anyway. `hemi-mainnet.infura.io` does answer from here (401 without a key), so an Infura key is the fallback.
 
 ## Pre-spike context: what the reference code requires
 

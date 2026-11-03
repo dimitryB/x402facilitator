@@ -244,10 +244,10 @@ The script stops if either payment does not come back settled. dRPC testnet's st
 
 The mainnet facilitator needs two contracts that do not exist on Hemi mainnet yet: the x402 exact proxy and the EIP-6492 validator. Permit2 is already there. Deploying them is the only mainnet transaction this project needs. The estimated cost is under 0.00001 ETH in total; see D-005 for the breakdown.
 
-1. From a network that can reach explorer.hemi.xyz, cross-check the mainnet token addresses (Q-1 in DECISIONS.md) and record the output. The brief requires addresses checked on the explorer before use, and the spike machine could not reach it:
+1. The brief requires token addresses checked on the explorer before use. That is done: both match `shared/hemi.json` (D-027). To repeat it, look each token up by address, in a browser if `curl` can't reach the explorer. Searching for `USDC.e` does not return the token:
    ```bash
-   curl -sS 'https://explorer.hemi.xyz/api/v2/tokens?q=USDC.e'
-   curl -sS 'https://explorer.hemi.xyz/api/v2/tokens?q=hemiBTC'
+   curl -sS 'https://explorer.hemi.xyz/api/v2/tokens/0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA'
+   curl -sS 'https://explorer.hemi.xyz/api/v2/tokens/0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28'
    ```
    Then simulate. This sends nothing:
    ```bash
@@ -271,7 +271,7 @@ The mainnet facilitator needs two contracts that do not exist on Hemi mainnet ye
    ```bash
    SELLER_NETWORKS=eip155:43111 npm run start -w seller
    ```
-6. Pay on mainnet. This spends real funds: 0.001 USDC.e, or 1 sat plus a one-time approval for hemiBTC. `BUYER_PRIVATE_KEY` must hold mainnet USDC.e; for `--asset btc` it must hold hemiBTC and a little ETH for the approval.
+6. Pay on mainnet. This spends real funds: 0.001 USDC.e, or 1 sat plus a one-time approval for hemiBTC. `BUYER_PRIVATE_KEY` must hold mainnet USDC.e; for `--asset btc` it must hold hemiBTC and a little ETH for the approval. Buy tokens by address, not by symbol: vault shares on Hemi use the symbols `USDC.e` and `hemiBTC` too (D-027).
    ```bash
    ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet
    ```
@@ -332,7 +332,7 @@ Latest results, from 2026-11-02 against a no-cache build of hemi.14:
 
 - **Mainnet USDC.e and EIP-3009:** the testnet has no EIP-3009 token, so that path is proven only on a local fork of mainnet until a mainnet payment runs.
 - **Explorer verification:** on testnet all three contracts show as partial matches. A full match isn't possible for the proxy, because its original build embedded metadata (`contracts/README.md`).
-- **Mainnet explorer:** blocked from the machine that ran the spike. Mainnet token addresses rest on Hemi's token list and on-chain reads (D-002, Q-1).
+- **Mainnet explorer:** `curl` is blocked from the machine that ran the spike, so the token addresses were checked in a browser (D-002, D-027). `contracts/verify.sh mainnet` uses `curl`, so it needs a network that can reach the explorer.
 - **Combined failures:** when one payload fails several checks, the code reported follows the TS reference facilitator, not the order written in `scheme_exact_evm.md`. Checks that need no RPC (recipient, validity window, exact amount, token, Permit2 spender) run before the allowance and balance reads. So an expired payment from an unfunded payer gets `…_valid_before`, not `insufficient_funds`. Single-failure cases, which the Definition of done covers, return the spec's code. `tests/e2e/04b-payload-checks.test.ts` ("combined failures") pins the behaviour. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) ("Check order") cites the reference line by line and lists the two places this facilitator differs from it.
 - **Nonce gap after a timeout:** after `settlement_pending`, the facilitator keeps that tx's nonce, so a tx that may still mine is never replaced. If the tx is later dropped from every mempool, retries keep answering `settlement_pending` with the dead hash, because nothing rebroadcasts it, and later settles on that chain queue behind the gap. Settlement on that chain stops until a restart, which re-reads the nonce from the chain. After a restart, one settlement can still fail with "nonce too low" for each queued tx that mines. Each such failure takes about 27 seconds, because the transaction is searched for first, and it costs nothing. The next settlement succeeds.
 - **Nonce gap during a search:** while a failed send is searched for, its nonce stays taken, for about 25 seconds. Settlements that arrive then use later nonces. If the search finds nothing, they stay queued until a later settlement fills the gap. They answer `settlement_pending`, and a stock seller refuses them, so the buyer can be charged later and not served. It takes every RPC losing a send, plus traffic in that window.
