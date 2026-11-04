@@ -4,7 +4,7 @@ An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hem
 
 It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and twenty-eight small patches. Eighteen make its error responses match the x402 v2 spec, one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018), and nine keep a settlement's outcome correct under load and when RPCs stall, lag or fail (D-019 to D-025). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
-**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). No mainnet payment has run yet. See [Definition of done](#definition-of-done).
+**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). The first mainnet payment, 0.001 USDC.e, settled on 2026-11-04 in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031). No hemiBTC payment has run on mainnet yet. See [Definition of done](#definition-of-done).
 
 | Path | What it is |
 |------|------|
@@ -283,12 +283,14 @@ The mainnet facilitator needs two contracts that Hemi mainnet lacked: the x402 e
    ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet
    ```
 
-**Mainnet transactions run so far:** the deployment, on 2026-11-04 from `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875`. Both succeeded (D-029):
+**Mainnet transactions run so far:** the deployment and one payment. The deployment ran on 2026-11-04 from `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875`, and both of its transactions succeeded (D-029):
 
 - EIP-6492 validator: [`0x9d5d7876…0721e`](https://explorer.hemi.xyz/tx/0x9d5d7876579c12f86440bd2e74750bb0748b9d4a07a9836c69bbe6332aa0721e)
 - x402 exact Permit2 proxy: [`0x237bd41c…2ec79`](https://explorer.hemi.xyz/tx/0x237bd41c34b314dfa686311685bde4dbfe63e4c5becd66293a91198aa182ec79)
 
-Step 4's read-only checks passed on both chains and sent nothing (D-030). No mainnet payment has run yet. Explorer verification (step 3) has not run, because the explorer is blocked from the deploying machine.
+Step 4's read-only checks passed on both chains and sent nothing (D-030).
+
+**Mainnet payments:** 0.001 USDC.e by EIP-3009, on 2026-11-04, settled in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031). It was a single `Transfer` of 1000 units from buyer `0x35C8…3786` to payTo `0x647C…866f`. The facilitator paid 0.0000013 ETH of gas and held no tokens. No hemiBTC payment has run on mainnet yet. Explorer verification (step 3) has not run, because the explorer is blocked from the deploying machine.
 
 ## Tests
 
@@ -339,12 +341,12 @@ Latest results, from 2026-11-02 against a no-cache build of hemi.14:
 | Failed signature and insufficient balance return the spec's error shapes, with tests | Met on forks, and live on both chains through `/verify` | `tests/e2e/03-bad-signature.test.ts`, `04-insufficient-balance.test.ts`, D-016, D-030 |
 | Facilitator never holds funds, shown by reading the proxy and config | Met | [Why the facilitator never holds funds](#why-the-facilitator-never-holds-funds); balance and log checks in `02-settle.test.ts` |
 | RPC failover: tests pass with the primary RPC on a dead port | Met | every e2e test except files 08, 09 and 10 runs that way; `tests/e2e/05-rpc-failover.test.ts`, D-015. A stalled RPC is covered by `09-stalled-rpc.test.ts`, and a stale one by `10-stale-rpc.test.ts` |
-| README covers spike, addresses, Permit2 approval, seller setup, mainnet steps and mainnet tx hash | Met; the mainnet hash is "none yet" | this file |
+| README covers spike, addresses, Permit2 approval, seller setup, mainnet steps and mainnet tx hash | Met; the mainnet payment hash is [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) | this file, D-031 |
 | DECISIONS.md has an entry, with command and output, for every verify item | Met | D-002 to D-012 |
 
 ## Limits and open items
 
-- **Mainnet USDC.e and EIP-3009:** the testnet has no EIP-3009 token, so that path is proven only on a local fork of mainnet until a mainnet payment runs.
+- **Mainnet USDC.e and EIP-3009:** the testnet has no EIP-3009 token, so the e2e suite tests that path on a local fork of mainnet. It has also settled live once, in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031).
 - **Explorer verification:** on testnet all three contracts show as partial matches. A full match isn't possible for the proxy, because its original build embedded metadata (`contracts/README.md`).
 - **Mainnet explorer:** `curl` is blocked from the machine that ran the spike, so the token addresses were checked in a browser (D-002, D-027). `contracts/verify.sh mainnet` uses `curl`, so it needs a network that can reach the explorer.
 - **Combined failures:** when one payload fails several checks, the code reported follows the TS reference facilitator, not the order written in `scheme_exact_evm.md`. Checks that need no RPC (recipient, validity window, exact amount, token, Permit2 spender) run before the allowance and balance reads. So an expired payment from an unfunded payer gets `…_valid_before`, not `insufficient_funds`. Single-failure cases, which the Definition of done covers, return the spec's code. `tests/e2e/04b-payload-checks.test.ts` ("combined failures") pins the behaviour. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) ("Check order") cites the reference line by line and lists the two places this facilitator differs from it.

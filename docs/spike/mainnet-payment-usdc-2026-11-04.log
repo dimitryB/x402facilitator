@@ -1,0 +1,70 @@
+# First mainnet payment: 0.001 USDC.e by EIP-3009 through hemi.14, 2026-11-04 (DECISIONS.md D-031)
+# Before, read at block 5662179 (2026-11-04T17:21:02Z) from https://rpc.hemi.network/rpc; dRPC at the same block
+buyer  0x35C8182E886382D1133a3Daf980470D3646D3786 USDC.e 1000  ETH 50000000000000  nonce 0
+payTo  0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f USDC.e 0     ETH 0  nonce 0
+signer 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 USDC.e 0     ETH 200892749205210  nonce 2
+proxy  0x402085c248EeA27D92E8b30b2C58ed07f9E20001 USDC.e 0
+
+$ FACILITATOR_CONFIG=config.mainnet.json docker compose up -d
+$ curl -s localhost:8080/supported
+{"extensions":[],"kinds":[{"extra":{},"network":"eip155:43111","scheme":"exact","x402Version":2}],"signers":{"eip155:43111":["0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875"]}}
+$ SELLER_NETWORKS=eip155:43111 npm run start -w seller
+$ curl -i "localhost:4021/echo?hello=hemi"    # PAYMENT-REQUIRED header, base64-decoded
+{"scheme":"exact","network":"eip155:43111","asset":"0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA","amount":"1000","payTo":"0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f","maxTimeoutSeconds":300,"extra":{"assetTransferMethod":"eip3009","name":"Bridged USDC (Stargate)","version":"2"}}
+{"scheme":"exact","network":"eip155:43111","asset":"0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28","amount":"1","payTo":"0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f","maxTimeoutSeconds":300,"extra":{"assetTransferMethod":"permit2"}}
+
+$ ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet    # started 2026-11-04T17:21:30Z
+[buyer] buyer 0x35C8182E886382D1133a3Daf980470D3646D3786 holds 0.001 USDC.e
+[buyer] GET http://localhost:4021/echo?hello=hemi
+[buyer] paying 1000 base units of USDC.e (0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA) on eip155:43111 to 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f via eip3009
+[buyer] asset:    USDC.e 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA (eip155:43111)
+[buyer] response: {"echo":{"hello":"hemi"},"timestamp":"2026-11-04T17:21:31.573Z"}
+[buyer] tx:       0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d
+[buyer] explorer: https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d
+[buyer] buyer balance: 0.001 USDC.e -> 0 USDC.e
+[buyer] payTo balance: 0 USDC.e -> 0.001 USDC.e
+
+# Seller log
+[seller] listening on http://localhost:4021  facilitator http://localhost:8080  payTo 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f
+[seller]   eip155:43111  1000 of 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA  {"assetTransferMethod":"eip3009","name":"Bridged USDC (Stargate)","version":"2"}
+[seller]   eip155:43111  1 of 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28  {"assetTransferMethod":"permit2"}
+[seller] verified 1000 of 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA on eip155:43111 from 0x35C8182E886382D1133a3Daf980470D3646D3786
+[seller] settled 1000 of 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA on eip155:43111 from 0x35C8182E886382D1133a3Daf980470D3646D3786: tx 0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d
+
+# Facilitator log (docker compose logs facilitator, colour removed)
+2026-11-04T17:21:15.393625Z  INFO x402_chain_eip155::chain::provider: Using HTTP transport chain=eip155:43111 rpc_url=https://hemi.drpc.org/ rate_limit=Some(20)
+2026-11-04T17:21:15.403073Z  INFO x402_chain_eip155::chain::provider: Using HTTP transport chain=eip155:43111 rpc_url=https://rpc.hemi.network/rpc rate_limit=Some(4)
+2026-11-04T17:21:16.088334Z  INFO x402_chain_eip155::chain::provider: Using EVM provider chain=eip155:43111 signers=[0x1155c33c3ef5d0dee61c98d21f2e22c053a60875]
+2026-11-04T17:21:16.088408Z  INFO x402_types::scheme: Registered scheme handler chain_id=eip155:43111 scheme=exact id="v2-eip155-exact"
+2026-11-04T17:21:16.088502Z  INFO x402_facilitator::run: Starting server at http://0.0.0.0:8080
+2026-11-04T17:21:16.414612Z  INFO http_request{otel.kind="server" otel.name=GET /supported method=GET uri=/supported version=HTTP/1.1}: x402_facilitator_local::util::telemetry: status=200 elapsed=0ms
+2026-11-04T17:21:17.242584Z  INFO http_request{otel.kind="server" otel.name=GET /supported method=GET uri=/supported version=HTTP/1.1}: x402_facilitator_local::util::telemetry: status=200 elapsed=0ms
+2026-11-04T17:21:31.586479Z  INFO http_request{otel.kind="server" otel.name=POST /verify method=POST uri=/verify version=HTTP/1.1}: x402_facilitator_local::util::telemetry: status=200 elapsed=389ms
+2026-11-04T17:21:32.842918Z  INFO http_request{otel.kind="server" otel.name=POST /settle method=POST uri=/settle version=HTTP/1.1}:post_settle:settle{otel.kind="internal" chain_id=eip155:43111 payer=0x35C8182E886382D1133a3Daf980470D3646D3786 pay_to=0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f}:settle_eip3009_payment:call_transferWithAuthorization_1{from=0x35C8182E886382D1133a3Daf980470D3646D3786 to=0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f value=1000 valid_after=0 valid_before=1793813191 nonce=0xd5a0c21f1d4cb1e7a989bdf14444de815ab815f09bcbfae330ce261c1b198014 signature=0x2ee5c745e5cd06dc4788d4111330ad66a6829b4fb1db363344341149bbe3a9d45c98f830b7c4052ed8de35dbd2798a8e71ff57bae5da57e9cd811166ee0d43011b token_contract=0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA sig_kind="EOA" otel.kind="client"}: x402_chain_eip155::chain::provider: Transaction broadcast tx=0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d from=0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 to=0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA
+2026-11-04T17:21:40.269416Z  INFO http_request{otel.kind="server" otel.name=POST /settle method=POST uri=/settle version=HTTP/1.1}:post_settle:settle{otel.kind="internal" chain_id=eip155:43111 payer=0x35C8182E886382D1133a3Daf980470D3646D3786 pay_to=0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f}:settle_eip3009_payment: x402_chain_eip155::v1_eip155_exact::facilitator: transfer succeeded status="ok" tx=0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d
+2026-11-04T17:21:40.269483Z  INFO http_request{otel.kind="server" otel.name=POST /settle method=POST uri=/settle version=HTTP/1.1}: x402_facilitator_local::util::telemetry: status=200 elapsed=8678ms
+
+# Read back from https://rpc.hemi.network/rpc and https://hemi.drpc.org; both returned the same receipt
+$ cast receipt 0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d --json
+{"status":"0x1","blockNumber":"0x5665e6","from":"0x1155c33c3ef5d0dee61c98d21f2e22c053a60875","to":"0xad11a8beb98bbf61dbb1aa0f6d6f2ecd87b35afa","gasUsed":"0x188a8","effectiveGasPrice":"0xf433c","l1Fee":"0x10bf267e4c0","logs":[{"address":"0xad11a8beb98bbf61dbb1aa0f6d6f2ecd87b35afa","topics":["0x98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5","0x00000000000000000000000035c8182e886382d1133a3daf980470d3646d3786","0xd5a0c21f1d4cb1e7a989bdf14444de815ab815f09bcbfae330ce261c1b198014"],"data":"0x"},{"address":"0xad11a8beb98bbf61dbb1aa0f6d6f2ecd87b35afa","topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef","0x00000000000000000000000035c8182e886382d1133a3daf980470d3646d3786","0x000000000000000000000000647c8d7129c0e995b36ef8aaa98f610d5e8f866f"],"data":"0x00000000000000000000000000000000000000000000000000000000000003e8"}]}
+# topic0 0x98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5 = AuthorizationUsed(address,bytes32); 0xddf252ad… = Transfer; 0x3e8 = 1000
+fee = gasUsed 100520 * effectiveGasPrice 1000252 + l1Fee 1150823163072 = 1251368494112 wei
+$ cast tx 0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d {nonce,value,to,from,maxPriorityFeePerGas,maxFeePerGas,type}
+nonce=2 value=0 to=0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA from=0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 maxPriorityFeePerGas=0xf4240 maxFeePerGas=0xf4438 type=0x2
+$ cast calldata-decode 'transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)' $(cast tx 0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d input) | head -6
+0x35C8182E886382D1133a3Daf980470D3646D3786
+0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f
+1000
+0
+1793813191 [1.793e9]
+0xd5a0c21f1d4cb1e7a989bdf14444de815ab815f09bcbfae330ce261c1b198014
+
+# After, block 5662182 and later
+buyer  0x35C8182E886382D1133a3Daf980470D3646D3786 USDC.e 0     ETH 50000000000000  nonce 0
+payTo  0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f USDC.e 1000  ETH 0  nonce 0
+signer 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 USDC.e 0     ETH 199641380711098  nonce 3   (drop 1251368494112 wei = the fee)
+proxy  0x402085c248EeA27D92E8b30b2C58ed07f9E20001 USDC.e 0
+$ cast call 0xad11…5afA 'authorizationState(address,bytes32)(bool)' 0x35C8…3786 0xd5a0c21f…8014
+true
+
+$ kill <seller pid>; docker compose down

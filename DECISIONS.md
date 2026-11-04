@@ -1183,6 +1183,62 @@ The facilitator log has no settle lines. For each failed verify it logs the whol
 
 No payment has run on mainnet. Step 5 needs a separate go.
 
+## D-031. First mainnet payment: 0.001 USDC.e by EIP-3009
+
+Run on Dimitry's go ("Go, pay USDC.e") on 2026-11-04 at 17:21Z, as README "Mainnet deployment" steps 4 to 6, with hemi.14 and the mainnet-only config. It was one payment, sent once. The go covered USDC.e only, so hemiBTC has not been paid. The full output is in `docs/spike/mainnet-payment-usdc-2026-11-04.log`.
+
+Before, at block 5662179, read from both RPCs: the buyer `0x35C8…3786` held 1000 units (0.001 USDC.e), payTo `0x647C…866f` held 0, and the signer `0x1155…0875` had 200892749205210 wei at nonce 2. Neither the signer nor the proxy held USDC.e. The seller's 402 offered exactly 1000 units of `0xad11…5afA` on `eip155:43111` to `0x647C…866f`, by `eip3009` with domain `Bridged USDC (Stargate)` version `2`. It also offered 1 sat of hemiBTC.
+
+```
+$ FACILITATOR_CONFIG=config.mainnet.json docker compose up -d
+$ SELLER_NETWORKS=eip155:43111 npm run start -w seller
+$ ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet
+[buyer] paying 1000 base units of USDC.e (0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA) on eip155:43111 to 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f via eip3009
+[buyer] response: {"echo":{"hello":"hemi"},"timestamp":"2026-11-04T17:21:31.573Z"}
+[buyer] tx:       0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d
+[buyer] buyer balance: 0.001 USDC.e -> 0 USDC.e
+[buyer] payTo balance: 0 USDC.e -> 0.001 USDC.e
+[seller] verified 1000 of 0xad11…5afA on eip155:43111 from 0x35C8182E886382D1133a3Daf980470D3646D3786
+[seller] settled 1000 of 0xad11…5afA on eip155:43111 from 0x35C8…3786: tx 0xa9b7c8c5…a53d
+facilitator: POST /verify status=200 elapsed=389ms; POST /settle status=200 elapsed=8678ms
+```
+
+Read back separately from the Hemi public RPC and dRPC. Both returned the same receipt:
+
+```
+$ cast receipt 0xa9b7c8c5…a53d
+status 0x1  block 5662182  from 0x1155…0875 (signer)  to 0xad11…5afA (USDC.e)
+gasUsed 100520  effectiveGasPrice 1000252  l1Fee 1150823163072  fee 1251368494112 wei
+logs, both from USDC.e, no others:
+  AuthorizationUsed(authorizer 0x35C8…3786, nonce 0xd5a0c21f…8014)
+  Transfer(from 0x35C8…3786, to 0x647C…866f, value 1000)
+$ cast tx 0xa9b7c8c5…a53d        nonce 2, value 0, type 2, maxPriorityFeePerGas 1000000 (0.001 gwei)
+$ cast calldata-decode transferWithAuthorization(...)   from 0x35C8…3786, to 0x647C…866f, value 1000, validAfter 0, validBefore 1793813191
+$ cast call 0xad11…5afA "authorizationState(address,bytes32)(bool)" 0x35C8…3786 0xd5a0c21f…8014
+true
+```
+
+After:
+
+| Wallet | USDC.e | ETH | Nonce |
+|------|------|------|------|
+| Buyer `0x35C8…3786` | 1000 → 0 | 50000000000000, unchanged | 0, unchanged |
+| payTo `0x647C…866f` | 0 → 1000 | 0 | 0 |
+| Signer `0x1155…0875` | 0 | 200892749205210 → 199641380711098 | 2 → 3 |
+| Proxy `0x4020…0001` | 0 | | |
+
+What this shows:
+
+- **Funds:** USDC.e went from the buyer to payTo in one exact transfer of the price. The facilitator only paid gas, and its ETH fell by exactly the receipt's fee, about 0.0000013 ETH.
+- **No buyer gas:** the buyer sent nothing and paid no gas. Mainnet USDC.e needs only a signature (D-001).
+- **Tip:** the settlement used the tip floor of 0.001 gwei (D-018).
+- **Replay:** the authorization is spent on chain, so it cannot be replayed.
+- **Order:** the seller verified before settling. The full settle took 8.7 s.
+
+The EIP-3009 path, until now tested only on a fork of mainnet, has now worked live. The signer keeps 0.00020 ETH, about 160 such settlements at this fee. The buyer now holds no USDC.e. A hemiBTC payment needs its own go. The buyer still holds 10 sats of hemiBTC and 0.00005 ETH for the one-time Permit2 approval.
+
+Both services were stopped afterwards. Explorer verification of the contracts (step 3) has still not run.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).
