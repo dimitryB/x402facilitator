@@ -1,0 +1,31 @@
+$ HEMI_MAINNET_FORK_BLOCK=5656750 forge test   # 2026-11-03T23:15:26Z
+No files changed, compilation skipped
+
+Ran 3 tests for test/DeployData.t.sol:DeployDataTest
+[PASS] test_calldataFilesMatchCanonicalAddresses() (gas: 129951)
+[PASS] test_replayReproducesCanonicalRuntimeCode() (gas: 6926722)
+[PASS] test_vendoredProxySourceMatchesDeployedCodeModuloMetadata() (gas: 1492469)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 3.14ms (4.24ms CPU time)
+
+Ran 7 tests for test/DeployHemi.fork.t.sol:HemiTestnetForkTest
+[PASS] test_deploysMissingContracts() (gas: 10700)
+[PASS] test_permit2DomainSeparatorIsThisChains() (gas: 3833)
+[PASS] test_proxyPointsAtCanonicalPermit2() (gas: 3484)
+[PASS] test_rerunIsNoop() (gas: 159111)
+[PASS] test_runtimeCodeIsCanonical() (gas: 8263)
+[PASS] test_settle_USDCe() (gas: 359129)
+[PASS] test_settle_hBTC() (gas: 352776)
+Suite result: ok. 7 passed; 0 failed; 0 skipped; finished in 4.05s (3.25s CPU time)
+
+Ran 7 tests for test/DeployHemi.fork.t.sol:HemiMainnetForkTest
+[PASS] test_deploysMissingContracts() (gas: 10700)
+[PASS] test_permit2DomainSeparatorIsThisChains() (gas: 3855)
+[PASS] test_proxyPointsAtCanonicalPermit2() (gas: 3484)
+[PASS] test_rerunIsNoop() (gas: 159077)
+[PASS] test_runtimeCodeIsCanonical() (gas: 8240)
+[PASS] test_settle_USDCe_viaPermit2() (gas: 464049)
+[PASS] test_settle_hemiBTC() (gas: 352775)
+Suite result: ok. 7 passed; 0 failed; 0 skipped; finished in 4.05s (3.68s CPU time)
+
+Ran 3 test suites in 4.05s (8.11s CPU time): 17 tests passed, 0 failed, 0 skipped (17 total tests)
+exit=0

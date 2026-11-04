@@ -1054,6 +1054,50 @@ CONNECTION ESTABLISHED  Protocol version: TLSv1.3
 
 The Hemi public RPCs answered throughout. While this lasts, a run from this workstation has one working RPC, so it should run from another network, which `contracts/verify.sh mainnet` needs anyway. `hemi-mainnet.infura.io` does answer from here (401 without a key), so an Infura key is the fallback.
 
+## D-028. Mainnet checks with the real signer, before deployment
+
+Nothing was sent on mainnet. The signer is a fresh key made with `scripts/new-key.sh` on 2026-11-03 and stored in `.env` as both `DEPLOYER_PRIVATE_KEY` and `FACILITATOR_MAINNET_PRIVATE_KEY`. Its address is `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875`. The key itself was never printed.
+
+Balances at block 5656743 (2026-11-03T23:13:47Z), from `cast balance`, `balanceOf` and `cast nonce` on `https://rpc.hemi.network/rpc`:
+
+| Wallet | ETH (wei) | USDC.e (base units) | hemiBTC (sat) | Nonce |
+|------|------|------|------|------|
+| Signer `0x1155…0875` | 205000000000000 | 0 | 0 | 0 |
+| Buyer `0x35C8…3786` | 50000000000000 | 1000 | 10 | 0 |
+| payTo `0x647C…866f` | 0 | 0 | 0 | 0 |
+
+The buyer's hemiBTC allowance to Permit2 is 0, so its first hemiBTC payment sends one `approve`. 1000 base units of USDC.e pay for exactly one USDC.e payment.
+
+The simulation went through the public RPC, because dRPC is blocked from here (D-027). The full output is in `docs/spike/mainnet-simulation-2026-11-03.log`:
+
+```
+$ contracts/deploy.sh mainnet
+   signer: DEPLOYER_PRIVATE_KEY
+Permit2                    0x000000000022D473030F116dDEE9F6B43aC78BA3   present
+EIP-6492 validator         0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B   DEPLOY       579233   899374374541 0.000001478753341257
+x402 exact Permit2 proxy   0x402085c248EeA27D92E8b30b2C58ed07f9E20001   DEPLOY       722776  1049186306119 0.000001772144445671
+   L2 gas price now: 1000252 wei. Estimated total: 0.000003250897786928 ETH for 2 contract(s).
+  signer (HEMI_DEPLOY_PRIVATE_KEY): 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+  signer balance (wei): 205000000000000
+  checks passed: code hashes, Permit2 DOMAIN_SEPARATOR, proxy PERMIT2()
+  contracts deployed in this run: 2
+Estimated amount required: 0.00000181099728284 ETH
+exit=0
+```
+
+The signer holds about 63 times the estimate. forge's own "amount required" leaves out the L1 data fee, which is why it is lower than the script's total. forge's dry-run files are git-ignored, and its "sensitive values" file holds only the RPC URL.
+
+```
+$ HEMI_MAINNET_FORK_BLOCK=5656750 forge test      # docs/spike/mainnet-fork-tests-2026-11-03.log
+Ran 3 test suites in 4.05s (8.11s CPU time): 17 tests passed, 0 failed, 0 skipped (17 total tests)
+$ FORK_BLOCK_MAINNET=5656750 npm test -w tests    # read by tests/lib/env.ts; testnet fork at its default block
+ Test Files  13 passed (13)
+      Tests  116 passed (116)
+   Duration  370.48s
+```
+
+Both suites pass with mainnet state from 2026-11-03, 42,450 blocks after the pinned default. The suite stopped its forks and containers when it finished.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

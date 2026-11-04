@@ -253,7 +253,11 @@ The mainnet facilitator needs two contracts that do not exist on Hemi mainnet ye
    ```bash
    contracts/deploy.sh mainnet
    ```
-2. Put a funded mainnet key in `.env` as `DEPLOYER_PRIVATE_KEY`, not on the command line. The script reads `.env` itself and refuses if that key equals `FACILITATOR_TESTNET_PRIVATE_KEY`. Then deploy:
+2. Put a funded mainnet key in `.env` as `DEPLOYER_PRIVATE_KEY`, not on the command line. The script reads `.env` itself and refuses if that key equals `FACILITATOR_TESTNET_PRIVATE_KEY`. To make one fresh key that pays for both the deployment and the facilitator's gas:
+   ```bash
+   scripts/new-key.sh DEPLOYER_PRIVATE_KEY FACILITATOR_MAINNET_PRIVATE_KEY
+   ```
+   It writes the key into `.env` under both names and prints only the address to fund. It refuses to replace a name that already has a value. `.env` is then the only copy of the key, so back it up. Then deploy:
    ```bash
    CONFIRM_MAINNET_DEPLOY=yes contracts/deploy.sh mainnet --broadcast
    ```
@@ -262,7 +266,7 @@ The mainnet facilitator needs two contracts that do not exist on Hemi mainnet ye
    ```bash
    contracts/verify.sh mainnet
    ```
-4. Set `FACILITATOR_MAINNET_PRIVATE_KEY` in `.env` to a gas-only key with a little ETH. Then start the facilitator. Use the mainnet-only config, or plain `docker compose up` once the testnet contracts are also deployed:
+4. Set `FACILITATOR_MAINNET_PRIVATE_KEY` in `.env` to a gas-only key with a little ETH, unless step 2's script already did. Then start the facilitator. Use the mainnet-only config, or plain `docker compose up` once the testnet contracts are also deployed:
    ```bash
    FACILITATOR_CONFIG=config.mainnet.json docker compose up -d
    ```

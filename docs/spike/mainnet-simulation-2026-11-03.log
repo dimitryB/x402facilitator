@@ -1,0 +1,50 @@
+$ contracts/deploy.sh mainnet   # 2026-11-03T23:14:50Z, no --broadcast
+== Hemi mainnet (chain id 43111) via https://rpc.hemi.network
+   signer: DEPLOYER_PRIVATE_KEY
+
+contract                   address                                      status       L2 gas   L1 fee (wei)  est. cost (ETH)
+Permit2                    0x000000000022D473030F116dDEE9F6B43aC78BA3   present 
+EIP-6492 validator         0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B   DEPLOY       579233   899374374541 0.000001478753341257
+x402 exact Permit2 proxy   0x402085c248EeA27D92E8b30b2C58ed07f9E20001   DEPLOY       722776  1049186306119 0.000001772144445671
+
+   L2 gas price now: 1000252 wei. Estimated total: 0.000003250897786928 ETH for 2 contract(s).
+   (L1 fee from GasPriceOracle.getL1Fee over the calldata; forge sets a 130% gas limit, actual cost is gas used.)
+
+== Simulation (no transactions sent)
+No files changed, compilation skipped
+Script ran successfully.
+
+== Logs ==
+  mode: simulation (no transactions are sent)
+  signer (HEMI_DEPLOY_PRIVATE_KEY): 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+  signer balance (wei): 205000000000000
+  chain id: 43111
+  [skip]   Permit2: code already at 0x000000000022D473030F116dDEE9F6B43aC78BA3
+  [deploy] EIP-6492 validator -> 0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B
+  [deploy] x402 exact Permit2 proxy -> 0x402085c248EeA27D92E8b30b2C58ed07f9E20001
+  checks passed: code hashes, Permit2 DOMAIN_SEPARATOR, proxy PERMIT2()
+  contracts deployed in this run: 2
+
+## Setting up 1 EVM.
+
+==========================
+
+Chain 43111
+
+Estimated gas price: 0.001000504 gwei
+
+Estimated total gas used for script: 1810085
+
+Estimated amount required: 0.00000181099728284 ETH
+
+==========================
+
+SIMULATION COMPLETE. To broadcast these transactions, add --broadcast and wallet configuration(s) to the previous command. See forge script --help for more.
+
+Transactions saved to: <repo>/contracts/broadcast/DeployHemi.s.sol/43111/dry-run/run-latest.json
+
+Sensitive values saved to: <repo>/contracts/cache/DeployHemi.s.sol/43111/dry-run/run-latest.json
+
+
+Simulation only. Re-run with --broadcast to send the transactions.
+exit=0
