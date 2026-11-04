@@ -164,7 +164,7 @@ and a confirmed mainnet-fork broadcast. On 2026-10-29 it deployed all three cont
 
 ```sh
 contracts/verify.sh testnet
-contracts/verify.sh mainnet     # explorer.hemi.xyz is blocked on this workstation's ISP; run elsewhere,
+contracts/verify.sh mainnet     # the spike machine's ISP filters explorer.hemi.xyz (D-034); run elsewhere,
                                 # or set HEMI_MAINNET_EXPLORER_URL
 ```
 
@@ -183,7 +183,9 @@ What is realistically verifiable, as found on 2026-10-28:
   committed initcode returned 39 matches for Permit2 (`Permit2`, solc 0.8.17), 4 for the validator
   (`UniversalSigValidator`, solc 0.8.30) and 3 for the proxy (`x402ExactPermit2Proxy`, solc 0.8.28).
   Every match is `PARTIAL`. On Hemi testnet all three now show as partial matches through that
-  database, with no submission at all. The mainnet explorer cannot be reached from here.
+  database, with no submission at all. On Hemi mainnet the validator and the proxy verified the same way
+  on 2026-11-04, once looked up in a browser. Permit2, for which Blockscout has no creation transaction,
+  did not (D-034).
 - The proxy cannot get a full match. The deployed initcode was built with CBOR metadata whose IPFS
   hash depends on the original build environment (the reference repo says so in `Deploy.s.sol`). The
   standard-JSON input `verify.sh` submits compiles (checked with solc 0.8.28 directly) to bytecode of

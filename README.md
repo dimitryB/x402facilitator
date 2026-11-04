@@ -266,6 +266,7 @@ The mainnet facilitator needs two contracts that Hemi mainnet lacked: the x402 e
    ```bash
    contracts/verify.sh mainnet
    ```
+   On mainnet this needed no submission: once looked up, Blockscout's bytecode database verified the validator and the proxy (D-034).
 4. Set `FACILITATOR_MAINNET_PRIVATE_KEY` in `.env` to a gas-only key with a little ETH, unless step 2's script already did. Then start the facilitator. Use the mainnet-only config, or plain `docker compose up` once the testnet contracts are also deployed:
    ```bash
    FACILITATOR_CONFIG=config.mainnet.json docker compose up -d
@@ -295,7 +296,7 @@ Step 4's read-only checks passed on both chains and sent nothing (D-030).
 - 0.001 USDC.e by EIP-3009: [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d). Facilitator gas 0.0000013 ETH (D-031).
 - 1 sat of hemiBTC by Permit2: [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27), after the buyer's one-time `approve(Permit2, max)` in [`0x2798788a…6a56`](https://explorer.hemi.xyz/tx/0x2798788aa8454916a17f1b332603a7aa2cf3e297374cd519cbdaed1985cc6a56). Facilitator gas 0.0000010 ETH, buyer's approval 0.0000004 ETH (D-032).
 
-Explorer verification (step 3) has not run, because the explorer is blocked from the deploying machine.
+Explorer verification (step 3) needed no submission: Blockscout's bytecode database verified the validator and the proxy once they were looked up. Permit2, which was already on mainnet, shows as unverified (D-034).
 
 ## Tests
 
@@ -352,8 +353,8 @@ Latest results, from 2026-11-02 against a no-cache build of hemi.14:
 ## Limits and open items
 
 - **Mainnet USDC.e and EIP-3009:** the testnet has no EIP-3009 token, so the e2e suite tests that path on a local fork of mainnet. It has also settled live once, in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031).
-- **Explorer verification:** on testnet all three contracts show as partial matches. A full match isn't possible for the proxy, because its original build embedded metadata (`contracts/README.md`).
-- **Mainnet explorer:** `curl` is blocked from the machine that ran the spike, so the token addresses were checked in a browser (D-002, D-027). `contracts/verify.sh mainnet` uses `curl`, so it needs a network that can reach the explorer.
+- **Explorer verification:** on testnet all three contracts show as partial matches. On mainnet the validator and the proxy are verified; Permit2, for which Blockscout has no creation transaction, is not (D-034). A full match isn't possible for the proxy, because its original build embedded metadata (`contracts/README.md`).
+- **Mainnet explorer:** the spike machine's ISP filters `explorer.hemi.xyz`. Plain HTTP goes to the ISP's warning page and ordinary HTTPS fails, while `testnet.explorer.hemi.xyz` on the same IPs works (D-002, D-034). A browser mostly gets through, so the token addresses and the verification status were read in one (D-027, D-034). `contracts/verify.sh mainnet` uses `curl`, so on that connection it stops at its reachability check.
 - **Combined failures:** when one payload fails several checks, the code reported follows the TS reference facilitator, not the order written in `scheme_exact_evm.md`. Checks that need no RPC (recipient, validity window, exact amount, token, Permit2 spender) run before the allowance and balance reads. So an expired payment from an unfunded payer gets `…_valid_before`, not `insufficient_funds`. Single-failure cases, which the Definition of done covers, return the spec's code. `tests/e2e/04b-payload-checks.test.ts` ("combined failures") pins the behaviour. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) ("Check order") cites the reference line by line and lists the two places this facilitator differs from it.
 - **Nonce gap after a timeout:** after `settlement_pending`, the facilitator keeps that tx's nonce, so a tx that may still mine is never replaced. If the tx is later dropped from every mempool, retries keep answering `settlement_pending` with the dead hash, because nothing rebroadcasts it, and later settles on that chain queue behind the gap. Settlement on that chain stops until a restart, which re-reads the nonce from the chain. After a restart, one settlement can still fail with "nonce too low" for each queued tx that mines. Each such failure takes about 27 seconds, because the transaction is searched for first, and it costs nothing. The next settlement succeeds.
 - **Nonce gap during a search:** while a failed send is searched for, its nonce stays taken, for about 25 seconds. Settlements that arrive then use later nonces. If the search finds nothing, they stay queued until a later settlement fills the gap. They answer `settlement_pending`, and a stock seller refuses them, so the buyer can be charged later and not served. It takes every RPC losing a send, plus traffic in that window.

@@ -1337,6 +1337,45 @@ The critic otherwise found no path in `new-key.sh` that prints or loses a key, a
 
 The facilitator image is unchanged (hemi.14). Passes 16 and 17 both passed every item with no major issue. The changes since pass 16 are the deployment, the live checks, the payments, `new-key.sh` and the new read-only script, none of them in the facilitator. No critic has read this entry's fixes to `new-key.sh`.
 
+## D-034. Mainnet explorer verification, and why curl can't reach the explorer
+
+This was step 3 of README "Mainnet deployment", on 2026-11-04 from about 18:05Z to 18:12Z. Nothing was submitted, and `contracts/verify.sh mainnet` did not run.
+
+**Why the CLI fails.** Dimitry reported the explorer was reachable in a browser, failing only now and then with a "can't provide secure access" error. From this workstation at the same time, every TLS client failed on `explorer.hemi.xyz` alone:
+
+- macOS curl (LibreSSL): `tlsv1 alert protocol version`.
+- Node fetch and Python urllib (OpenSSL): `WRONG_VERSION_NUMBER`.
+- The app's built-in browser: navigation failed, while `testnet.explorer.hemi.xyz/api/v2/stats` loaded.
+
+Raw TLS handshakes to one Cloudflare IP, `104.18.22.222`, from Python, changing only the server name:
+
+```
+SNI explorer.hemi.xyz            first bytes back: ff ff ff ff ff ff …   (not TLS)
+SNI testnet.explorer.hemi.xyz    16 03 03 …  TLS 1.3 handshake
+SNI hemi.xyz                     16 03 03 …  TLS 1.3 handshake
+SNI www.cloudflare.com           16 03 03 …  TLS 1.3 handshake
+$ curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' http://explorer.hemi.xyz/          # 18:10:57Z
+302 https://<the ISP's warning page>?url=http://explorer.hemi.xyz/&token=<redacted>
+$ curl … http://testnet.explorer.hemi.xyz/
+301 https://testnet.explorer.hemi.xyz/
+```
+
+This confirms and sharpens D-002. The workstation's ISP filters the one hostname `explorer.hemi.xyz`. Plain HTTP is redirected to its warning page, and a TCP TLS connection gets non-TLS bytes back. The browser most likely gets through over HTTP/3 (QUIC on UDP), which the filter doesn't touch; that was not measured. The occasional browser error fits a fallback to TCP. Nothing here tells whether other networks fail too. No attempt was made to route around the filter.
+
+**Verification status**, read in Brave by Dimitry and pasted here. The three address responses are saved in `docs/spike/mainnet-explorer/`. The first look at `/api/v2/smart-contracts/<address>` returned bytecode only for all three contracts, which is Blockscout's answer for an unverified contract. A few minutes later, `/api/v2/addresses/<address>` gave:
+
+| Contract | `is_verified` | `name` | Creation tx | Creator |
+|------|------|------|------|------|
+| x402 exact proxy `0x4020…0001` | true | `x402ExactPermit2Proxy` | `0x237bd41c…2ec79` | `0x4e59…956C` |
+| EIP-6492 validator `0xdAcD…2a3B` | true | `UniversalSigValidator` | `0x9d5d7876…0721e` | `0x4e59…956C` |
+| Permit2 `0x0000…8BA3` | false | null | null | null |
+
+As on testnet, the first request made Blockscout search its shared bytecode database (contracts/README.md "Explorer verification"), and that verified the two contracts this project deployed. The address endpoint doesn't say whether a match is full or partial. Every database match found on 2026-10-28 was partial, and the proxy can only be partial.
+
+Blockscout knows no creation transaction or creation bytecode for Permit2, and the lookup did not verify it. This project did not deploy it. Its code was checked against the canonical code hash (D-004), which is what the facilitator relies on. Verifying it would mean submitting Uniswap's Permit2 source (solc 0.8.17, via-IR, 1,000,000 runs) from a connection the filter doesn't touch. It changes nothing on chain, so it stays undone.
+
+Step 3 is done for the contracts this project deployed. README and contracts/README now say so, and describe the filter instead of a block.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).
