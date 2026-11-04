@@ -1163,7 +1163,7 @@ PASS  /supported networks: 200 {...,"kinds":[{...,"network":"eip155:43111",...},
 ...
 PASS  signer eip155:43111 sent nothing: pending nonce 2 -> 2
 PASS  signer eip155:743111 sent nothing: pending nonce 15 -> 15
-all checks passed                                   # 25 checks
+all checks passed                                   # 24 checks
 $ docker compose down
 ```
 
@@ -1177,11 +1177,11 @@ Every verdict came back HTTP 200 with `isValid: false`, in the spec's §5.4.2 sh
 | Signed for 5x the price, presented at the price | `invalid_exact_evm_payload_authorization_value_mismatch` | same |
 | Network `eip155:1`, or testnet on the mainnet-only config | `invalid_network` | |
 
-The funded buyer `0x35C8…3786` held 1000 USDC.e units and 10 hemiBTC sats on mainnet, both with Permit2 allowance 0. On testnet it held 22556078 USDC.e units and 89994 hBTC sats, both approved. In the wrong-key cases the signature was rejected first. On balance and allowance alone, mainnet USDC.e and both testnet assets would have passed, and mainnet hemiBTC would have answered `permit2_allowance_required`. This is the DoD's failed-signature and insufficient-balance item, now on the live chains as well as on forks.
+The funded buyer `0x35C8…3786` held 1000 USDC.e units and 10 hemiBTC sats on mainnet, both with Permit2 allowance 0. On testnet it held 22556078 USDC.e units and 89994 hBTC sats, both approved. In the wrong-key cases the signature was rejected first. On balance and allowance alone, mainnet USDC.e and both testnet assets would have passed, and mainnet hemiBTC would have answered `permit2_allowance_required`. So the DoD's failed-signature case now holds live on both chains. Its insufficient-balance case holds live only for mainnet USDC.e. Every Permit2 asset, which includes all of testnet, checks the allowance first, so an unfunded payer gets `permit2_allowance_required` instead. On forks, `04-insufficient-balance.test.ts` covers that case under both transfer methods.
 
 The facilitator log has no settle lines. For each failed verify it logs the whole request body at WARN, signatures included. A logged authorization can only pay the `payTo` it names, but the log should be treated as private.
 
-No payment has run on mainnet. Step 5 needs a separate go.
+No payment has run on mainnet. The payments (step 6) need a separate go.
 
 ## D-031. First mainnet payment: 0.001 USDC.e by EIP-3009
 
@@ -1238,6 +1238,104 @@ What this shows:
 The EIP-3009 path, until now tested only on a fork of mainnet, has now worked live. The signer keeps 0.00020 ETH, about 160 such settlements at this fee. The buyer now holds no USDC.e. A hemiBTC payment needs its own go. The buyer still holds 10 sats of hemiBTC and 0.00005 ETH for the one-time Permit2 approval.
 
 Both services were stopped afterwards. Explorer verification of the contracts (step 3) has still not run.
+
+## D-032. Second mainnet payment: 1 sat of hemiBTC by Permit2
+
+Run on Dimitry's go ("Go, pay hemiBTC") on 2026-11-04 at 17:30Z, set up as D-031. It was one payment, sent once. The full output is in `docs/spike/mainnet-payment-hemibtc-2026-11-04.log`.
+
+Before, at block 5662223, read from both RPCs:
+
+- **Buyer `0x35C8…3786`:** 10 sats of hemiBTC, Permit2 allowance 0, and 50000000000000 wei.
+- **No custody:** payTo, the signer, the proxy and Permit2 held no hemiBTC.
+- **Signer:** nonce 3.
+- **Approval estimate:** 47024 gas.
+
+The seller's 402 offered exactly 1 sat of `0xAA40…ef28` ("Hemi Bitcoin", 8 decimals) to `0x647C…866f`, by `permit2`.
+
+```
+$ ALLOW_MAINNET=yes npm run pay -w buyer -- --asset btc --network mainnet
+[buyer] paying 1 base units of hemiBTC (0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28) on eip155:43111 to 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f via permit2
+[buyer] approve(Permit2, max) sent: 0x2798788aa8454916a17f1b332603a7aa2cf3e297374cd519cbdaed1985cc6a56
+[buyer] response: {"echo":{"hello":"hemi"},"timestamp":"2026-11-04T17:30:38.999Z"}
+[buyer] tx:       0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27
+[buyer] buyer balance: 0.0000001 hemiBTC -> 0.00000009 hemiBTC
+[buyer] payTo balance: 0 hemiBTC -> 0.00000001 hemiBTC
+[seller] verified 1 of 0xAA40…ef28 on eip155:43111 from 0x35C8182E886382D1133a3Daf980470D3646D3786
+[seller] settled 1 of 0xAA40…ef28 on eip155:43111 from 0x35C8…3786: tx 0xaa3d89f4…3b27
+facilitator: POST /verify status=200 elapsed=722ms; POST /settle status=200 elapsed=8937ms; no WARN or ERROR lines
+```
+
+Read back separately from the Hemi public RPC and dRPC. Each receipt was byte-identical on both:
+
+```
+$ cast receipt 0x2798788a…6a56     # the buyer's one-time approval
+status 0x1  block 5662227  from 0x35C8…3786 (buyer)  to 0xAA40…ef28 (hemiBTC)  nonce 0
+input approve(0x000000000022D473030F116dDEE9F6B43aC78BA3, 2^256-1)
+logs: Approval(owner 0x35C8…3786, spender Permit2, 2^256-1)
+gasUsed 46641  effectiveGasPrice 1000252  l1Fee 345153091200  fee 391805844732 wei, paid by the buyer
+
+$ cast receipt 0xaa3d89f4…3b27     # the settlement
+status 0x1  block 5662228  from 0x1155…0875 (signer)  to 0x4020…0001 (x402 exact proxy)  nonce 3
+input settle(((0xAA40…ef28, 1), nonce 7135…6282, deadline 1793813738), owner 0x35C8…3786, (to 0x647C…866f, validAfter 0), signature)
+logs, no others:
+  hemiBTC Transfer(from 0x35C8…3786, to 0x647C…866f, value 1)
+  proxy   Settled()
+gasUsed 102102  effectiveGasPrice 1000252  l1Fee 891238098926  fee 993365828630 wei, paid by the signer
+$ cast call Permit2 "nonceBitmap(address,uint256)(uint256)" 0x35C8…3786 <nonce >> 8>     # bit 74 set: the nonce is spent
+```
+
+After:
+
+| Wallet | hemiBTC | ETH | Nonce |
+|------|------|------|------|
+| Buyer `0x35C8…3786` | 10 → 9 | 50000000000000 → 49608194155268 (the approval fee) | 0 → 1 |
+| payTo `0x647C…866f` | 0 → 1 | 0 | 0 |
+| Signer `0x1155…0875` | 0 | 199641380711098 → 198648014882468 (the settlement fee) | 3 → 4 |
+| Proxy `0x4020…0001` | 0 | | |
+| Permit2 `0x0000…8BA3` | 0 | | |
+
+What this shows:
+
+- **Funds:** the token moved from the buyer straight to payTo in one Transfer of the price. The proxy and Permit2 held nothing before or after, and the facilitator only paid gas.
+- **Permit2 path:** the path every Permit2 asset uses ran live on mainnet through the newly deployed proxy (D-029). The buyer's only transaction was the one-time approval, as README "For buyers" says.
+- **Allowance:** the approval stays at max for later payments. The SignatureTransfer path does not reduce it.
+- **Tips:** both transactions tipped 0.001 gwei.
+- **Order:** the seller verified before settling, and the full settle took 8.9 s.
+
+Both mainnet payments in the brief have now run. The signer keeps 0.000199 ETH. The buyer holds 9 sats of hemiBTC, 0 USDC.e and 0.0000496 ETH. Both services were stopped afterwards. Explorer verification of the contracts (step 3) has still not run.
+
+## D-033. Seventeenth critic pass: the mainnet work
+
+A fresh-context critic ran the Definition of done from the README on 2026-11-04. It covered everything since D-026: commits 1325d54 to 3eb0670 and the uncommitted D-032. It was barred from sending live transactions, calling `/settle` on a live facilitator, reading `.env`, and editing or committing files.
+
+All eight items passed, with no major issue. Its own checks:
+
+- **Live mainnet claims:** all five mainnet receipts were byte-identical on the Hemi public RPC and dRPC. Every block, fee, nonce, input, log, code hash and balance in README and D-028 to D-032 matched the chain. That includes the spent EIP-3009 authorization, the Permit2 nonce bit, and the zero token balances of the signer, the proxy and Permit2.
+- **Live facilitator:** with `config.json`, `/supported` listed both networks and both signers. `tests/live/verify-failures.ts` passed 24 checks on both chains, and README step 4's own command passed 12 on mainnet alone. Neither signer's nonce moved.
+- **Suites on forks:** the e2e suite passed 13 files and 116 tests in 305 s. `forge test` passed 17. `buyer/demo-fork.sh` settled all four payments.
+
+It found seven minor issues. None can send funds anywhere but `payTo`.
+
+| Finding | Trigger | Outcome |
+|------|------|------|
+| `scripts/new-key.sh` missed a key written as `NAME = 0x…` and appended a second one. Node's env-file loader and compose then read the new, unfunded key | A hand-edited `.env` with spaces around `=` | Fixed: spaces are accepted. A line that names the key in any other form, such as `NAME: value`, is refused |
+| `new-key.sh` replaced a symlinked `.env` with a plain file, so the link's target never got the key | `.env` as a symlink | Fixed: refused |
+| `contracts/README.md` still said `deploy.sh` had not broadcast on mainnet | None, docs only | Corrected |
+| D-030 said 25 checks on both chains; the log has 24 | None, docs only | Corrected |
+| README and D-030 claimed a live insufficient-balance answer on both chains. Permit2 assets answer `permit2_allowance_required` first, so only mainnet USDC.e showed one | None, docs only | Reworded |
+| D-030 called paying step 5; it is step 6 | None, docs only | Corrected |
+| README's spike section said the contracts were deployed on testnet only. The two payment logs gave read times as block times | None, docs only | Corrected |
+
+The critic also flagged that the hemiBTC evidence log was untracked while README cited it. It goes in with this entry's commit.
+
+`new-key.sh` was retested on scratch files under macOS bash 3.2, and all 15 cases passed:
+
+- **The two new cases:** a spaced key with a value is refused, and a spaced empty one is filled in place. A symlink and the colon form are both refused.
+- **Earlier cases, still holding:** a comment that mentions the name is ignored. Empty names are filled and missing ones appended. The file ends at mode 600, with no temp file left. The printed address matches the key that sourcing and Node's `--env-file` read, and no key appears in the output. A rerun, a bad name, a duplicate and no arguments are all refused. `export NAME=""` in a CRLF file is filled, and a missing file is created.
+
+The critic otherwise found no path in `new-key.sh` that prints or loses a key, and nothing wrong in `tests/live/verify-failures.ts`.
+
+The facilitator image is unchanged (hemi.14). Passes 16 and 17 both passed every item with no major issue. The changes since pass 16 are the deployment, the live checks, the payments, `new-key.sh` and the new read-only script, none of them in the facilitator. No critic has read this entry's fixes to `new-key.sh`.
 
 ## Pre-spike context: what the reference code requires
 

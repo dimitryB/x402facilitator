@@ -1,5 +1,5 @@
 # First mainnet payment: 0.001 USDC.e by EIP-3009 through hemi.14, 2026-11-04 (DECISIONS.md D-031)
-# Before, read at block 5662179 (2026-11-04T17:21:02Z) from https://rpc.hemi.network/rpc; dRPC at the same block
+# Before, read at 2026-11-04T17:21:02Z from https://rpc.hemi.network/rpc, when its latest block was 5662179 (block time 17:20:59Z); dRPC at the same block
 buyer  0x35C8182E886382D1133a3Daf980470D3646D3786 USDC.e 1000  ETH 50000000000000  nonce 0
 payTo  0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f USDC.e 0     ETH 0  nonce 0
 signer 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 USDC.e 0     ETH 200892749205210  nonce 2

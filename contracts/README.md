@@ -158,7 +158,7 @@ Details:
 `deploy.sh` was exercised end to end against local anvil forks of both chains (ports 48545 and 48546):
 testnet broadcast with the fallback key, rerun as a no-op, mainnet refused without a mainnet key, with
 the testnet key, and without the confirmation, the script-level gate on a direct `forge script --broadcast`,
-and a confirmed mainnet-fork broadcast. On 2026-10-29 it deployed all three contracts on Hemi testnet; the record is in `broadcast/DeployHemi.s.sol/743111/`. It has not been run with `--broadcast` on mainnet.
+and a confirmed mainnet-fork broadcast. On 2026-10-29 it deployed all three contracts on Hemi testnet; the record is in `broadcast/DeployHemi.s.sol/743111/`. On 2026-11-04 it deployed the validator and the proxy on Hemi mainnet, where Permit2 already existed; the record is in `broadcast/DeployHemi.s.sol/43111/` (D-029).
 
 ## Explorer verification
 

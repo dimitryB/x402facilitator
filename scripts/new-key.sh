@@ -7,7 +7,8 @@
 # Names must end in _PRIVATE_KEY. A name that .env lacks is appended; a name that is present but
 # empty (as .env.example leaves them) is filled in place. If any name already has a value the script
 # refuses and writes nothing, so it can never overwrite a key that may hold funds. To replace a key,
-# delete its line by hand first.
+# delete its line by hand first. It also refuses if the file is a symlink, or if a line mentions a
+# name in a form it cannot parse, since that line might hold a key the loaders would still read.
 #
 # .env stays mode 600 and is the only copy of the key: back it up before funding the address.
 # NEW_KEY_ENV_FILE points the script at another file (tests use a scratch copy).
@@ -27,18 +28,30 @@ for n in "${NAMES[@]}"; do
 done
 command -v cast >/dev/null || die "cast not found (install Foundry)"
 
-# NAME=value, optionally indented or prefixed with export. Comment lines don't match.
-ASSIGN='^([[:space:]]*(export[[:space:]]+)?)([A-Za-z_][A-Za-z0-9_]*)=(.*)$'
+# NAME=value, optionally indented, prefixed with export, or with spaces around "=" (Node's env-file
+# loader and docker compose read all of these). Comment lines don't match.
+ASSIGN='^([[:space:]]*(export[[:space:]]+)?)([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$'
 wanted() { case $seen in *" $1 "*) return 0 ;; esac; return 1; }
 is_empty() { local v=${1//[[:space:]]/}; [ -z "$v" ] || [ "$v" = '""' ] || [ "$v" = "''" ]; }
 
+# mv would replace a symlink with a plain file and leave the key out of the file it points to.
+[ -L "$ENV_FILE" ] && die "$ENV_FILE is a symlink; nothing written (point NEW_KEY_ENV_FILE at the file itself)"
+
 if [ -f "$ENV_FILE" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
-    [[ $line =~ $ASSIGN ]] || continue
-    name=${BASH_REMATCH[3]} value=${BASH_REMATCH[4]}
-    if wanted "$name" && ! is_empty "$value"; then
-      die "$name already has a value in $ENV_FILE; nothing written (delete that line by hand to replace it)"
+    if [[ $line =~ $ASSIGN ]]; then
+      name=${BASH_REMATCH[3]} value=${BASH_REMATCH[4]}
+      if wanted "$name" && ! is_empty "$value"; then
+        die "$name already has a value in $ENV_FILE; nothing written (delete that line by hand to replace it)"
+      fi
+      continue
     fi
+    # Any other non-comment line that mentions a wanted name (NAME: value, for one) may hold a key
+    # that a loader reads but this script can't see. Refuse rather than guess.
+    [[ $line =~ ^[[:space:]]*# ]] && continue
+    for n in "${NAMES[@]}"; do
+      case $line in *"$n"*) die "$ENV_FILE has a line for $n that this script cannot parse; nothing written (fix it by hand)" ;; esac
+    done
   done < "$ENV_FILE"
 fi
 

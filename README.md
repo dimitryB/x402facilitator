@@ -4,7 +4,7 @@ An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hem
 
 It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and twenty-eight small patches. Eighteen make its error responses match the x402 v2 spec, one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018), and nine keep a settlement's outcome correct under load and when RPCs stall, lag or fail (D-019 to D-025). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
-**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). The first mainnet payment, 0.001 USDC.e, settled on 2026-11-04 in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031). No hemiBTC payment has run on mainnet yet. See [Definition of done](#definition-of-done).
+**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). On 2026-11-04 live mainnet payments settled in USDC.e, in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031), and in hemiBTC, in [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27) (D-032). See [Definition of done](#definition-of-done).
 
 | Path | What it is |
 |------|------|
@@ -31,7 +31,7 @@ Each asset's transfer method was decided by read-only on-chain checks on both ne
 - **Mainnet USDC.e** is Circle's FiatToken v2.2. It implements EIP-3009 and EIP-2612, and its EIP-712 domain is name `Bridged USDC (Stargate)`, version `2` (D-009, D-010).
 - **Testnet USDC.e** is a different contract, a plain tunnel-bridged ERC-20 with neither standard. The testnet cannot exercise the mainnet USDC.e path, so that path is tested on a local fork of mainnet.
 - **hemiBTC and hBTC** implement neither standard (D-011). hemiBTC has no testnet deployment, so testnet uses hBTC, the tunnel's BTC representation (D-008).
-- **Contracts required by x402-rs** must exist before it will start a chain: canonical Permit2, the x402 exact proxy and the EIP-6492 validator. At the time of the spike only mainnet Permit2 existed. `contracts/` deploys the rest (D-001, D-004 to D-006), which is done on testnet; see [Contracts](#contracts-and-addresses) for what exists now.
+- **Contracts required by x402-rs** must exist before it will start a chain: canonical Permit2, the x402 exact proxy and the EIP-6492 validator. At the time of the spike only mainnet Permit2 existed. `contracts/` deploys the rest (D-001, D-004 to D-006), which is done on both networks; see [Contracts](#contracts-and-addresses) for what exists now.
 
 ## Contracts and addresses
 
@@ -283,14 +283,19 @@ The mainnet facilitator needs two contracts that Hemi mainnet lacked: the x402 e
    ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet
    ```
 
-**Mainnet transactions run so far:** the deployment and one payment. The deployment ran on 2026-11-04 from `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875`, and both of its transactions succeeded (D-029):
+**Mainnet transactions run so far:** the deployment and two payments. The deployment ran on 2026-11-04 from `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875`, and both of its transactions succeeded (D-029):
 
 - EIP-6492 validator: [`0x9d5d7876…0721e`](https://explorer.hemi.xyz/tx/0x9d5d7876579c12f86440bd2e74750bb0748b9d4a07a9836c69bbe6332aa0721e)
 - x402 exact Permit2 proxy: [`0x237bd41c…2ec79`](https://explorer.hemi.xyz/tx/0x237bd41c34b314dfa686311685bde4dbfe63e4c5becd66293a91198aa182ec79)
 
 Step 4's read-only checks passed on both chains and sent nothing (D-030).
 
-**Mainnet payments:** 0.001 USDC.e by EIP-3009, on 2026-11-04, settled in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031). It was a single `Transfer` of 1000 units from buyer `0x35C8…3786` to payTo `0x647C…866f`. The facilitator paid 0.0000013 ETH of gas and held no tokens. No hemiBTC payment has run on mainnet yet. Explorer verification (step 3) has not run, because the explorer is blocked from the deploying machine.
+**Mainnet payments**, both on 2026-11-04 from buyer `0x35C8…3786` to payTo `0x647C…866f`. Each was a single `Transfer` of the price, and the facilitator paid only the gas and held no tokens:
+
+- 0.001 USDC.e by EIP-3009: [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d). Facilitator gas 0.0000013 ETH (D-031).
+- 1 sat of hemiBTC by Permit2: [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27), after the buyer's one-time `approve(Permit2, max)` in [`0x2798788a…6a56`](https://explorer.hemi.xyz/tx/0x2798788aa8454916a17f1b332603a7aa2cf3e297374cd519cbdaed1985cc6a56). Facilitator gas 0.0000010 ETH, buyer's approval 0.0000004 ETH (D-032).
+
+Explorer verification (step 3) has not run, because the explorer is blocked from the deploying machine.
 
 ## Tests
 
@@ -338,10 +343,10 @@ Latest results, from 2026-11-02 against a no-cache build of hemi.14:
 | `docker compose up` starts the facilitator; `/supported` lists both networks with `exact` | Met on forks (`docker-compose.fork.yml`) and live: on 2026-11-04 `config.json` listed `eip155:43111` and `eip155:743111` | `tests/e2e/01-supported.test.ts`, D-013, D-016, D-030 |
 | One `/verify` then `/settle` on testnet in USDC.e, tx linked on the explorer | Met: [`0x0bca64a7…b6c5`](https://testnet.explorer.hemi.xyz/tx/0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5) | [docs/testnet-run.md](docs/testnet-run.md), `tests/e2e/02-settle.test.ts` |
 | One settle on testnet in hemiBTC (hBTC, per D-008) | Met: [`0x5f511cb0…fb0d`](https://testnet.explorer.hemi.xyz/tx/0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d) | [docs/testnet-run.md](docs/testnet-run.md), `tests/e2e/02-settle.test.ts` |
-| Failed signature and insufficient balance return the spec's error shapes, with tests | Met on forks, and live on both chains through `/verify` | `tests/e2e/03-bad-signature.test.ts`, `04-insufficient-balance.test.ts`, D-016, D-030 |
+| Failed signature and insufficient balance return the spec's error shapes, with tests | Met on forks. Live through `/verify`: a failed signature on both chains, and insufficient balance on mainnet USDC.e, where Permit2 assets answer `permit2_allowance_required` first | `tests/e2e/03-bad-signature.test.ts`, `04-insufficient-balance.test.ts`, D-016, D-030 |
 | Facilitator never holds funds, shown by reading the proxy and config | Met | [Why the facilitator never holds funds](#why-the-facilitator-never-holds-funds); balance and log checks in `02-settle.test.ts` |
 | RPC failover: tests pass with the primary RPC on a dead port | Met | every e2e test except files 08, 09 and 10 runs that way; `tests/e2e/05-rpc-failover.test.ts`, D-015. A stalled RPC is covered by `09-stalled-rpc.test.ts`, and a stale one by `10-stale-rpc.test.ts` |
-| README covers spike, addresses, Permit2 approval, seller setup, mainnet steps and mainnet tx hash | Met; the mainnet payment hash is [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) | this file, D-031 |
+| README covers spike, addresses, Permit2 approval, seller setup, mainnet steps and mainnet tx hash | Met; the mainnet payment hashes are [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (USDC.e) and [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27) (hemiBTC) | this file, D-031, D-032 |
 | DECISIONS.md has an entry, with command and output, for every verify item | Met | D-002 to D-012 |
 
 ## Limits and open items
