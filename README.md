@@ -4,7 +4,7 @@ An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hem
 
 It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and twenty-eight small patches. Eighteen make its error responses match the x402 v2 spec, one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018), and nine keep a settlement's outcome correct under load and when RPCs stall, lag or fail (D-019 to D-025). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
-**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). Mainnet waits for an explicit go to deploy two contracts; no mainnet transaction has been sent. See [Definition of done](#definition-of-done).
+**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). No mainnet payment has run yet. See [Definition of done](#definition-of-done).
 
 | Path | What it is |
 |------|------|
@@ -12,7 +12,7 @@ It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned 
 | [`contracts/`](contracts/) | Foundry project that deploys Permit2, the EIP-6492 validator and the x402 exact proxy to their canonical addresses |
 | [`seller/`](seller/) | Demo paid endpoint `GET /echo` ($0.001), accepting USDC.e and hemiBTC |
 | [`buyer/`](buyer/) | Demo buyer using `@x402/fetch`; pays the seller and prints the settlement tx |
-| [`tests/`](tests/) | End-to-end tests of `/verify` and `/settle` on local forks of both Hemi chains |
+| [`tests/`](tests/) | End-to-end tests of `/verify` and `/settle` on local forks of both Hemi chains, plus read-only live checks |
 | [`sdk-patch/`](sdk-patch/) | Draft upstream patch adding Hemi to the x402 TypeScript SDK's default assets |
 | [`shared/hemi.json`](shared/hemi.json) | Every Hemi address used here, in one file |
 | [`DECISIONS.md`](DECISIONS.md) | The spike and every decision, with commands and outputs |
@@ -41,8 +41,8 @@ The same addresses on both networks. Each contract is replayed from its original
 |------|------|------|------|
 | Deterministic deployer | `0x4e59b44847b379578588920cA78FbF26c0B4956C` | present | present |
 | Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | present (genuine, D-004) | deployed 2026-10-29, [tx](https://testnet.explorer.hemi.xyz/tx/0xa50c7ded891f840ba67b6fd92c74a5acba7d630d166cd8da18004e64c876c638) |
-| x402 exact Permit2 proxy | `0x402085c248EeA27D92E8b30b2C58ed07f9E20001` | not yet deployed: needs the mainnet go | deployed 2026-10-29, [tx](https://testnet.explorer.hemi.xyz/tx/0x0b2c46fa31d97c43588f9a78fb3eec469f664033495d342979408253481ec863) |
-| EIP-6492 validator | `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` | not yet deployed: needs the mainnet go | deployed 2026-10-29, [tx](https://testnet.explorer.hemi.xyz/tx/0xec5e69e3ee1a477a54df8b549d5191b8ecb0761bf43b2d7df0db8055929c740e) |
+| x402 exact Permit2 proxy | `0x402085c248EeA27D92E8b30b2C58ed07f9E20001` | deployed 2026-11-04, [tx](https://explorer.hemi.xyz/tx/0x237bd41c34b314dfa686311685bde4dbfe63e4c5becd66293a91198aa182ec79) | deployed 2026-10-29, [tx](https://testnet.explorer.hemi.xyz/tx/0x0b2c46fa31d97c43588f9a78fb3eec469f664033495d342979408253481ec863) |
+| EIP-6492 validator | `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` | deployed 2026-11-04, [tx](https://explorer.hemi.xyz/tx/0x9d5d7876579c12f86440bd2e74750bb0748b9d4a07a9836c69bbe6332aa0721e) | deployed 2026-10-29, [tx](https://testnet.explorer.hemi.xyz/tx/0xec5e69e3ee1a477a54df8b549d5191b8ecb0761bf43b2d7df0db8055929c740e) |
 | Multicall3 | `0xcA11bde05977b3631167028862bE2a173976CA11` | present | present |
 
 Assets (source: Hemi's token list, which feeds the tunnel UI, plus on-chain reads; D-007, D-008):
@@ -81,7 +81,7 @@ This starts both forks, the facilitator (pointed at the forks) and the seller. I
 
 ### The facilitator
 
-x402-rs refuses to start if any configured chain lacks Permit2, the x402 exact proxy or the EIP-6492 validator. Pick the config that matches what is deployed. Since 2026-10-29 testnet has all three, so `config.testnet.json` works live. Mainnet still lacks the proxy and the validator (see [Contracts](#contracts-and-addresses)), so `config.json` and `config.mainnet.json` fail on live networks until the mainnet go.
+x402-rs refuses to start if any configured chain lacks Permit2, the x402 exact proxy or the EIP-6492 validator. Pick the config that matches what is deployed. Testnet has had all three since 2026-10-29, and mainnet since 2026-11-04 (D-029), so all three configs work live (D-030).
 
 ```bash
 # Local forks, works now. Primaries point at a dead port; fallbacks at the forks.
@@ -90,10 +90,10 @@ docker compose -f docker-compose.yml -f docker-compose.fork.yml up -d
 curl -s localhost:8080/supported | jq      # lists eip155:743111 and eip155:43111, scheme exact
 docker compose -f docker-compose.yml -f docker-compose.fork.yml down && scripts/fork.sh down   # teardown
 
-# Live networks: needs the contracts on each configured chain.
-FACILITATOR_CONFIG=config.testnet.json docker compose up   # testnet only: after the testnet deployment
-FACILITATOR_CONFIG=config.mainnet.json docker compose up   # mainnet only: after the mainnet deployment
-docker compose up                                          # both chains (config.json): after both
+# Live networks.
+FACILITATOR_CONFIG=config.testnet.json docker compose up   # testnet only
+FACILITATOR_CONFIG=config.mainnet.json docker compose up   # mainnet only
+docker compose up                                          # both chains (config.json)
 ```
 
 If a contract or key is missing, the container exits with the reason. A missing contract shows as `Contract at address … does not exist`. An empty `FACILITATOR_*_PRIVATE_KEY` shows as `Invalid evm private key: invalid string length`. If every RPC stalls at startup, it exits after about 10 seconds with `error sending request for url (…)`. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently, so after an RPC outage at startup, start it again by hand.
@@ -242,7 +242,7 @@ The script stops if either payment does not come back settled. dRPC testnet's st
 
 ## Mainnet deployment
 
-The mainnet facilitator needs two contracts that do not exist on Hemi mainnet yet: the x402 exact proxy and the EIP-6492 validator. Permit2 is already there. Deploying them is the only mainnet transaction this project needs. The estimated cost is under 0.00001 ETH in total; see D-005 for the breakdown.
+The mainnet facilitator needs two contracts that Hemi mainnet lacked: the x402 exact proxy and the EIP-6492 validator. Permit2 was already there. Steps 1 and 2 deployed them on 2026-11-04, for 0.0000041 ETH in total (D-029). The steps stay here for reference; `deploy.sh` skips contracts that already exist.
 
 1. The brief requires token addresses checked on the explorer before use. That is done: both match `shared/hemi.json` (D-027). To repeat it, look each token up by address, in a browser if `curl` can't reach the explorer. Searching for `USDC.e` does not return the token:
    ```bash
@@ -270,7 +270,10 @@ The mainnet facilitator needs two contracts that do not exist on Hemi mainnet ye
    ```bash
    FACILITATOR_CONFIG=config.mainnet.json docker compose up -d
    ```
-   It is reachable from this machine only. Read **Reachability** under [The facilitator](#the-facilitator) before setting `FACILITATOR_BIND`.
+   It is reachable from this machine only. Read **Reachability** under [The facilitator](#the-facilitator) before setting `FACILITATOR_BIND`. To check it without sending anything, run the live `/verify` checks. They call `/supported` and `/verify` only, never `/settle`, and sign every payload with a throwaway key. This passed on 2026-11-04 (D-030):
+   ```bash
+   npx tsx tests/live/verify-failures.ts --networks eip155:43111 --signer eip155:43111=<signer address>
+   ```
 5. Start a seller that offers mainnet. It reads `SELLER_PAY_TO` from `.env`:
    ```bash
    SELLER_NETWORKS=eip155:43111 npm run start -w seller
@@ -280,7 +283,12 @@ The mainnet facilitator needs two contracts that do not exist on Hemi mainnet ye
    ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet
    ```
 
-**Mainnet transactions run so far: none.** No mainnet tx hash exists yet. This section will carry the deployment and payment hashes once they run.
+**Mainnet transactions run so far:** the deployment, on 2026-11-04 from `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875`. Both succeeded (D-029):
+
+- EIP-6492 validator: [`0x9d5d7876…0721e`](https://explorer.hemi.xyz/tx/0x9d5d7876579c12f86440bd2e74750bb0748b9d4a07a9836c69bbe6332aa0721e)
+- x402 exact Permit2 proxy: [`0x237bd41c…2ec79`](https://explorer.hemi.xyz/tx/0x237bd41c34b314dfa686311685bde4dbfe63e4c5becd66293a91198aa182ec79)
+
+Step 4's read-only checks passed on both chains and sent nothing (D-030). No mainnet payment has run yet. Explorer verification (step 3) has not run, because the explorer is blocked from the deploying machine.
 
 ## Tests
 
@@ -288,6 +296,8 @@ The mainnet facilitator needs two contracts that do not exist on Hemi mainnet ye
 npm test -w tests              # end-to-end on local forks, with dead primary RPCs
 (cd contracts && forge test)   # deployment, codehash and settle-path tests on forks
 ```
+
+`tests/live/verify-failures.ts` is separate from the suite. It runs read-only `/supported` and `/verify` failure checks against a facilitator on the live chains and never calls `/settle` (D-030).
 
 The end-to-end suite starts both forks and the facilitator image from this repo. Both primary RPCs point at a dead port, so every test also exercises RPC failover, except files 08, 09 and 10, which need two RPCs that answer. Every payload is built with the stock `@x402/evm` client. The suite covers:
 
@@ -323,10 +333,10 @@ Latest results, from 2026-11-02 against a no-cache build of hemi.14:
 
 | Item | Status | Evidence |
 |------|------|------|
-| `docker compose up` starts the facilitator; `/supported` lists both networks with `exact` | Met on forks (`docker-compose.fork.yml`). Live on testnet with the testnet config, which lists `eip155:743111`. Both networks live need the mainnet contracts, which need the go | `tests/e2e/01-supported.test.ts`, D-013, D-016 |
+| `docker compose up` starts the facilitator; `/supported` lists both networks with `exact` | Met on forks (`docker-compose.fork.yml`) and live: on 2026-11-04 `config.json` listed `eip155:43111` and `eip155:743111` | `tests/e2e/01-supported.test.ts`, D-013, D-016, D-030 |
 | One `/verify` then `/settle` on testnet in USDC.e, tx linked on the explorer | Met: [`0x0bca64a7…b6c5`](https://testnet.explorer.hemi.xyz/tx/0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5) | [docs/testnet-run.md](docs/testnet-run.md), `tests/e2e/02-settle.test.ts` |
 | One settle on testnet in hemiBTC (hBTC, per D-008) | Met: [`0x5f511cb0…fb0d`](https://testnet.explorer.hemi.xyz/tx/0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d) | [docs/testnet-run.md](docs/testnet-run.md), `tests/e2e/02-settle.test.ts` |
-| Failed signature and insufficient balance return the spec's error shapes, with tests | Met | `tests/e2e/03-bad-signature.test.ts`, `04-insufficient-balance.test.ts`, D-016 |
+| Failed signature and insufficient balance return the spec's error shapes, with tests | Met on forks, and live on both chains through `/verify` | `tests/e2e/03-bad-signature.test.ts`, `04-insufficient-balance.test.ts`, D-016, D-030 |
 | Facilitator never holds funds, shown by reading the proxy and config | Met | [Why the facilitator never holds funds](#why-the-facilitator-never-holds-funds); balance and log checks in `02-settle.test.ts` |
 | RPC failover: tests pass with the primary RPC on a dead port | Met | every e2e test except files 08, 09 and 10 runs that way; `tests/e2e/05-rpc-failover.test.ts`, D-015. A stalled RPC is covered by `09-stalled-rpc.test.ts`, and a stale one by `10-stale-rpc.test.ts` |
 | README covers spike, addresses, Permit2 approval, seller setup, mainnet steps and mainnet tx hash | Met; the mainnet hash is "none yet" | this file |

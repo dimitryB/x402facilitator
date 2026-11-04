@@ -1098,6 +1098,91 @@ $ FORK_BLOCK_MAINNET=5656750 npm test -w tests    # read by tests/lib/env.ts; te
 
 Both suites pass with mainnet state from 2026-11-03, 42,450 blocks after the pinned default. The suite stopped its forks and containers when it finished.
 
+## D-029. Mainnet deployment of the validator and the exact proxy
+
+Run on Dimitry's go, 2026-11-04 at 00:06Z, from `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875` (D-028). The script's simulation ran again first, then the broadcast, then its read-only post-check. The full output is in `docs/spike/mainnet-deploy-2026-11-03.log`; the file is named for the local date.
+
+```
+$ CONFIRM_MAINNET_DEPLOY=yes contracts/deploy.sh mainnet --broadcast
+  [skip]   Permit2: code already at 0x000000000022D473030F116dDEE9F6B43aC78BA3
+  [deploy] EIP-6492 validator -> 0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B
+  [deploy] x402 exact Permit2 proxy -> 0x402085c248EeA27D92E8b30b2C58ed07f9E20001
+ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
+  https://explorer.hemi.xyz/tx/0x9d5d7876579c12f86440bd2e74750bb0748b9d4a07a9836c69bbe6332aa0721e status=0x1 gasUsed=0x8aa4b
+  https://explorer.hemi.xyz/tx/0x237bd41c34b314dfa686311685bde4dbfe63e4c5becd66293a91198aa182ec79 status=0x1 gasUsed=0xad23f
+== Post-deployment check (simulation, should deploy nothing)
+  checks passed: code hashes, Permit2 DOMAIN_SEPARATOR, proxy PERMIT2()
+  contracts deployed in this run: 0
+All three contracts are in place on Hemi mainnet.
+exit=0
+```
+
+Read back separately from both RPCs. dRPC answered again by then. Both gave the same answers:
+
+```
+$ cast receipt <hash> --json --rpc-url {https://rpc.hemi.network/rpc, https://hemi.drpc.org}
+0x9d5d7876  block 5657008  status 0x1  from 0x1155…0875  to 0x4e59…956C  gasUsed 567883  effectiveGasPrice 1000252  l1Fee 1286310174263  fee 1854336280779 wei
+0x237bd41c  block 5657009  status 0x1  from 0x1155…0875  to 0x4e59…956C  gasUsed 709183  effectiveGasPrice 1000252  l1Fee 1543552799895  fee 2252914514011 wei
+$ cast tx <hash> input    # compared with contracts/deploy-data/
+0x9d5d7876  input == validator6492.calldata.hex   nonce 0  value 0
+0x237bd41c  input == exact-proxy.calldata.hex     nonce 1  value 0
+$ cast keccak $(cast code <address>)
+0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B  0x9b83857bbb34de3ba755156ba9bee06532be5ff539bf5de301a28606c76d6cab   # = VALIDATOR_CODEHASH
+0x402085c248EeA27D92E8b30b2C58ed07f9E20001  0xce6429c0bb49284660683287c0a8fe548a88379072327d026626909d202048b9   # = EXACT_PROXY_CODEHASH
+$ cast call 0x402085c248EeA27D92E8b30b2C58ed07f9E20001 "PERMIT2()(address)"
+0x000000000022D473030F116dDEE9F6B43aC78BA3
+$ cast balance / cast nonce 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+200892749205210 wei, nonce 2
+```
+
+The two fees add up to 4107250794790 wei, about 0.0000041 ETH. That is exactly what the signer's balance fell by. The L1 data fee had risen since D-028's simulation, so the script's estimate at broadcast time was 0.0000044 ETH. The signer keeps 0.00020 ETH for settlement gas.
+
+`contracts/verify.sh mainnet` has not run. `curl` to `explorer.hemi.xyz` still fails here with `tlsv1 alert protocol version` (D-002). Both contracts are what the code hashes say, and verification only adds source on the explorer.
+
+## D-030. The facilitator live on mainnet: /supported and /verify failures, read-only
+
+Run on 2026-11-04 from 01:20Z to 01:21Z, after D-029, as step 4 of README "Mainnet deployment". Nothing was sent. The checks call `GET /supported` and `POST /verify` only. The new script `tests/live/verify-failures.ts` refuses to call `/settle` at all. Every payload it sends is signed by a throwaway key it makes itself, so it reads no key from `.env`. The full output is in `docs/spike/mainnet-verify-checks-2026-11-03.log`.
+
+First the mainnet-only config, then `config.json` with both chains. Both started cleanly with hemi.14. x402-rs checks at startup that Permit2, the proxy and the validator exist on every configured chain, and before D-029 the mainnet config could not start (README "The facilitator").
+
+```
+$ FACILITATOR_CONFIG=config.mainnet.json docker compose up -d
+$ npx tsx tests/live/verify-failures.ts --networks eip155:43111 \
+    --signer eip155:43111=0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 --funded-payer 0x35C8182E886382D1133a3Daf980470D3646D3786
+PASS  /supported networks: 200 {"extensions":[],"kinds":[{"extra":{},"network":"eip155:43111","scheme":"exact","x402Version":2}],"signers":{"eip155:43111":["0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875"]}}
+...
+PASS  unserved network eip155:743111: 200 {"invalidMessage":"Unsupported chain","invalidReason":"invalid_network",...}
+PASS  signer eip155:43111 sent nothing: pending nonce 2 -> 2
+all checks passed                                   # 14 checks
+
+$ docker compose down && docker compose up -d       # config.json
+$ npx tsx tests/live/verify-failures.ts --networks eip155:43111,eip155:743111 \
+    --signer eip155:43111=0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 \
+    --signer eip155:743111=0xD2B2fc8093f8A734c42B90762FD2B2F8464631af --funded-payer 0x35C8182E886382D1133a3Daf980470D3646D3786
+PASS  /supported networks: 200 {...,"kinds":[{...,"network":"eip155:43111",...},{...,"network":"eip155:743111",...}],"signers":{"eip155:43111":["0x1155…0875"],"eip155:743111":["0xD2B2…31af"]}}
+...
+PASS  signer eip155:43111 sent nothing: pending nonce 2 -> 2
+PASS  signer eip155:743111 sent nothing: pending nonce 15 -> 15
+all checks passed                                   # 25 checks
+$ docker compose down
+```
+
+Every verdict came back HTTP 200 with `isValid: false`, in the spec's §5.4.2 shape (`verifyFailureViolations` in `tests/lib/spec.ts`). Each carried the payer, except `invalid_network`, where the facilitator reads no payload. The answers were the same on both runs:
+
+| Case | USDC.e mainnet (EIP-3009) | hemiBTC mainnet, USDC.e and hBTC testnet (Permit2) |
+|------|------|------|
+| Fresh key, correctly signed, holds nothing | `insufficient_funds` | `permit2_allowance_required` |
+| Fresh key signs, `from` is the funded buyer | `invalid_exact_evm_payload_signature`, payer the buyer | same |
+| One bit of `r` flipped | `invalid_exact_evm_payload_signature` | same |
+| Signed for 5x the price, presented at the price | `invalid_exact_evm_payload_authorization_value_mismatch` | same |
+| Network `eip155:1`, or testnet on the mainnet-only config | `invalid_network` | |
+
+The funded buyer `0x35C8…3786` held 1000 USDC.e units and 10 hemiBTC sats on mainnet, both with Permit2 allowance 0. On testnet it held 22556078 USDC.e units and 89994 hBTC sats, both approved. In the wrong-key cases the signature was rejected first. On balance and allowance alone, mainnet USDC.e and both testnet assets would have passed, and mainnet hemiBTC would have answered `permit2_allowance_required`. This is the DoD's failed-signature and insufficient-balance item, now on the live chains as well as on forks.
+
+The facilitator log has no settle lines. For each failed verify it logs the whole request body at WARN, signatures included. A logged authorization can only pay the `payTo` it names, but the log should be treated as private.
+
+No payment has run on mainnet. Step 5 needs a separate go.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

@@ -11,7 +11,7 @@ settlement path the facilitator uses.
 | EIP-6492 validator | `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` | `UniversalSigValidator`; x402-rs calls it only for counterfactual-wallet signatures | deploy | deploy |
 | x402 exact Permit2 proxy | `0x402085c248EeA27D92E8b30b2C58ed07f9E20001` | `x402ExactPermit2Proxy`; the only spender the facilitator accepts in a Permit2 payload | deploy | deploy |
 
-The "Mainnet" and "Testnet" columns show the state at the time of writing (the spike, D-004 to D-006).
+The "Mainnet" and "Testnet" columns show the state at the time of writing (the spike, D-004 to D-006). All three now exist on both networks: on testnet since 2026-10-29, and on mainnet since 2026-11-04 (D-029).
 
 ## Where the bytes come from
 
