@@ -1450,6 +1450,32 @@ The 31 Bitcoin tests cover `/supported`; verify and settle with the Bitcoin txid
 
 **Not done, each on its own go:** the mainnet settler deployment (`CONFIRM_MAINNET_DEPLOY=yes contracts/deploy-btc.sh mainnet --broadcast`, about 0.000011 ETH, from `DEPLOYER_PRIVATE_KEY`), the facilitator config with `X402_BTC_SETTLER_MAINNET`, and one real Bitcoin payment of a few dollars from a buyer wallet Dimitry funds, polled until hVM sees it. The Hemi settle hash is not in the success body (B-7); the testnet settler is not deployed (A-7). The brief's phase 2 note asked for a design pass on confirmation depth versus PoP finality; the result is in `DESIGN.md` and the README's limits: acceptance is a Bitcoin question (hBK's count, the seller's `minConfirmations`), PoP finality only gates the durability of the consumption record on Hemi.
 
+## D-037. Eighteenth critic pass, on phase 2: a settle lock anyone could hold
+
+A fresh-context critic ran the Definition of done from the README on the merged tree (d4a8d06) and reviewed phase 2 against the code, the spec and D-036, with the suites run again: typecheck clean, `npm test -w btc` 90, `forge test` 66, `npm test -w tests` 14 files / 147 tests in 544 s, `buyer/demo-fork.sh` all five payments, `check-btc-live.sh mainnet` exit 0 (verify `Ok`, 83050000 sats, offset 0, settle estimate 175780 gas). All eight MVP items passed; the four settlement receipts were read again from the public RPCs. The derivation agrees across `btc/`, the Rust crate and the spec: the critic recomputed digest, indices and `paymentRef` for all 16 vectors and the full BIP32 path for three of them in pure Python. The settler's stated properties held (`verify` never reverts, `settle` only by `SETTLER`, no funds, verdict order), the verdict table matched the code, and `11-btc-l1` tests what the README says.
+
+**The major finding.** `settle_for` in the bip122 scheme took the per-output record (`pending.begin`) *before* deriving the script and asking the settler, as the EVM scheme does on purpose (0020, "records before checks"). The EVM record is keyed by the payer's own nonce, which only the payer can produce. The bip122 record is keyed by `(network, txid, vout)`, which anyone can read on Bitcoin. So any `/settle` naming a payment's output, with a random `paymentId`, held the record for the length of one `eth_call`, and a concurrent real settle got `invalid_transaction_state` ("in progress"). A stock seller forwards every payment header to `/settle`, and the buyer treats that code as final, so a watcher with the seller's public URL could leave a buyer charged and not served for as long as it kept sending. The critic showed it on the mainnet fork with `.scratch/critic2/grief.ts`: six attackers looping on the victim's `(txid, vout)`, all eight of the victim's polls answered `invalid_transaction_state`, and the same payload settled once the attackers stopped.
+
+**The fix** (`facilitator/x402-rs/crates/x402-chain-bip122/src/v2_bip122_exact/facilitator.rs`): `settle_for` now answers a retry from an existing record first, then runs `prepare` (derivation) and `check` (the settler's `verify`), and only a request that passes takes the record; `settle_prepared` no longer verifies a second time. A forged `paymentId` derives another script, fails as `…_recipient_mismatch`, and holds nothing. Two requests that both pass still race at `begin`, and one wins, as before. The option of keying the record by `(txid, vout, paymentRef)` was not taken: it would let two settles of one output run at once and rely on the contract alone to stop the second. New unit test `a_failing_settle_takes_no_record_so_the_real_one_is_not_blocked`; the crate has 43 unit tests, run in the image's builder stage:
+
+```
+$ docker build --target builder -t hemi-x402-builder:test facilitator/
+$ docker run --rm hemi-x402-builder:test cargo test --release --frozen -p x402-chain-bip122 --features x402-chain-bip122/facilitator,x402-chain-bip122/telemetry
+test result: ok. 43 passed; 0 failed
+$ docker compose build && (cd tests && KEEP_STACK=1 npx vitest run e2e/11-btc-l1.test.ts)
+ Tests  31 passed (31)   Duration 125.63s
+$ FACILITATOR=http://127.0.0.1:38080 FORK_RPC=http://127.0.0.1:38546 npx tsx .scratch/critic2/grief.ts    # the critic's script, same stack
+attacker answers: { invalid_exact_bip122_payload_recipient_mismatch: 5, invalid_transaction_state: 15460 }
+victim answers during the attack:  try 1: 200 SUCCESS
+victim after the attack stops: invalid_transaction_state "Payment authorization was already used on chain"
+```
+
+Under the same attack the victim's first settle succeeded; the attackers got `recipient_mismatch` until it did and replay answers after. The rest of the suite does not touch the bip122 settle path and was not rerun after this change; the image it ran against in D-036 differs only in that path.
+
+**Minor.** The README's fork snippet under "The facilitator" had no note for Colima hosts whose Lima port forward fails; one was added, pointing at the manual `ssh -O forward` (D-036). README "Records before checks" now names the bip122 exception; `facilitator/x402-rs/README.md` and `docs/phase2/facilitator.md` (B-4) say the same.
+
+The critic could not run the Rust unit tests itself (no cargo on the machine), any live settle (forbidden), or open the explorers (the ISP filter, D-034).
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

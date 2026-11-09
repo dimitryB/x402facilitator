@@ -1475,8 +1475,12 @@ warning at startup (`Ignoring keys a bip122 chain does not read`): the e2e suite
   copied into the crate and reproduced by a unit test.
 - **Verify.** The checks in the order of the table above, then an `eth_call` of the settler's `verify`.
   Valid answers `{"isValid": true}` with no `payer`: a Bitcoin payment has inputs, not one paying address.
-- **Settle.** The same checks under a record of (network, txid, vout), then `verify` again, then the
-  settler's `settle(…, paymentRef = sha256(paymentId))` through the Hemi provider's `send_transaction`. The
+- **Settle.** The same checks and the settler's `verify` first, then a record of (network, txid, vout),
+  then the settler's `settle(…, paymentRef = sha256(paymentId))` through the Hemi provider's
+  `send_transaction`. The checks come before the record, unlike the EVM scheme's "records before checks"
+  (0020): the record id here is the Bitcoin output, which anyone can read on chain, so a request that
+  fails its checks (a forged `paymentId`, for one) must never hold it, or a watcher could block the
+  payment's settlement (D-037). The
   record is the EVM scheme's `PendingSettlements` (0011, 0016, 0020), keyed by the output, and a retry is
   the same `accepted` and payload: the seller's copy of the requirements is left out of the key, so a stock
   seller's retry with a fresh `paymentId` there is still recognised. Success is

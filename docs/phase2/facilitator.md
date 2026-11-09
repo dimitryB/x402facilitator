@@ -63,6 +63,8 @@ seller's copy of the requirements is left out, because a stock TS seller rebuild
 first retry that sees it mined gets the success and later ones are replays, a success whose caller left is
 kept for that caller.
 
+> **Changed at integration (D-037):** the critic showed that taking the record before the checks let anyone who saw the Bitcoin output hold it with a forged `paymentId` and block the real settlement. `settle_for` now runs `prepare` and `check` first and takes the record only for a request that passes.
+
 ### B-5. `AlreadyConsumed` is always a replay
 
 The contract's `settledBy` would let a facilitator answer success when the output was settled with this

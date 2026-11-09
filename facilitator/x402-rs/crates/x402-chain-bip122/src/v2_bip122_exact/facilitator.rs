@@ -215,8 +215,8 @@ impl<S: Settler> V2Bip122ExactFacilitator<S> {
         in_flight: &InFlight<'_>,
         caller: &SettleCaller,
     ) -> Result<proto::SettleResponse, X402SchemeFacilitatorError> {
-        // Re-checked here: a payment that fails costs no gas.
-        self.check(prepared).await?;
+        // `settle_for` checked the payment through the settler's `verify` just before taking the record,
+        // so a payment that fails costs no gas and holds no record (D-037).
         let payment_ref = B256::from(payment_ref(&prepared.request.requirements.payment_id));
         let outcome = self
             .settler
@@ -360,6 +360,24 @@ impl<S: Settler> X402SchemeFacilitator for V2Bip122ExactFacilitator<S> {
         let (request, min_confirmations) = self.parse(request)?;
         let id = self.record_id(&request);
         let key = Self::request_key(&request);
+        // A retry of a settlement this process ran is answered from its record (0011, 0016); any other
+        // request for an output that is being settled is refused.
+        if let Some(record) = self.pending.get(&id) {
+            if let (true, Some(transaction)) = (record.request == key, record.transaction) {
+                let prepared = self.prepare(request, min_confirmations)?;
+                return self
+                    .pending_outcome(&prepared, id, transaction, &caller)
+                    .await;
+            }
+            return Err(in_flight(record).into());
+        }
+        // The checks run before the record is taken, unlike the EVM scheme (0020). There the record id
+        // is the payer's own nonce; here it is the Bitcoin output, which anyone can read on chain. A
+        // request that fails its checks, such as one with a forged paymentId, must never hold the record,
+        // or a watcher could block a payment's settlement for the length of an eth_call, again and again
+        // (D-037). Two requests that both pass still race at `begin`, and one of them wins.
+        let prepared = self.prepare(request, min_confirmations)?;
+        self.check(&prepared).await?;
         let in_flight_guard = match self.pending.begin(id, key) {
             Ok(guard) => guard,
             Err(Record {
@@ -367,14 +385,12 @@ impl<S: Settler> X402SchemeFacilitator for V2Bip122ExactFacilitator<S> {
                 transaction: Some(transaction),
                 ..
             }) if recorded == key => {
-                let prepared = self.prepare(request, min_confirmations)?;
                 return self
                     .pending_outcome(&prepared, id, transaction, &caller)
                     .await;
             }
             Err(record) => return Err(in_flight(record).into()),
         };
-        let prepared = self.prepare(request, min_confirmations)?;
         self.settle_prepared(&prepared, &in_flight_guard, &caller)
             .await
     }
@@ -739,6 +755,25 @@ mod tests {
         assert!(settler.state().verified.is_empty());
     }
 
+    /// D-037: the record id is the Bitcoin output, which anyone can read on chain. A request that fails
+    /// its checks (here a forged paymentId, which derives another script) must take no record, so the
+    /// real settlement that follows is not refused as "in progress".
+    #[tokio::test]
+    async fn a_failing_settle_takes_no_record_so_the_real_one_is_not_blocked() {
+        let (facilitator, settler) = facilitator();
+        settler.state().verdict = Verdict::ScriptMismatch;
+        let error = facilitator.settle(&request()).await.unwrap_err();
+        assert_eq!(
+            reason(error),
+            ErrorReason::InvalidExactBip122PayloadRecipientMismatch
+        );
+        assert!(settler.state().sent.is_empty(), "nothing was sent for the forged request");
+        settler.state().verdict = Verdict::Ok;
+        let response = facilitator.settle(&request()).await.unwrap();
+        assert_eq!(response.0["success"], json!(true), "the real settlement was not blocked");
+        assert_eq!(settler.state().sent.len(), 1);
+    }
+
     #[tokio::test]
     async fn settle_records_the_payment_and_answers_with_the_bitcoin_txid() {
         let (facilitator, settler) = facilitator();
@@ -753,7 +788,7 @@ mod tests {
         );
         {
             let state = settler.state();
-            assert_eq!(state.verified.len(), 1, "re-verified before sending");
+            assert_eq!(state.verified.len(), 1, "verified once, before the record was taken");
             let (query, reference, _) = &state.sent[0];
             let id: PaymentId = PAYMENT_ID.parse().unwrap();
             assert_eq!(*reference, B256::from(payment_ref(&id)));
