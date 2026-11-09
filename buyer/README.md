@@ -70,7 +70,7 @@ Ports and names can be overridden: `FORK_TESTNET_PORT` (28545), `FORK_MAINNET_PO
 ```sh
 BUYER_BTC_MNEMONIC="…" npm run pay -w buyer -- --asset btc-l1 --network btc-testnet3
 BUYER_BTC_WIF=L… ALLOW_MAINNET=yes npm run pay -w buyer -- --asset btc-l1 --network btc-mainnet --fee-rate 4
-npm run pay -w buyer -- --asset btc-l1 --network btc-mainnet --resume 833a91d406ed023c2377b4b78aa1a534
+npm run pay -w buyer -- --asset btc-l1 --network btc-mainnet --resume 12299bf16423f9d28a81192788817d17
 ```
 
 | Option / variable | Default | Meaning |
@@ -97,15 +97,15 @@ Output against a stub facilitator that answers "unconfirmed" twice (`--stub-pay 
 ```
 [buyer] --stub-pay fake: nothing is sent to Bitcoin; the txid is random
 [buyer] GET http://127.0.0.1:44021/echo?hello=btc-l1
-[buyer] paying 1000 sats on Bitcoin testnet3 to tb1qyv6yx7qc46tq0f9u073h2mg8p07ts8vssysfz8 (paymentId c847a1bdde1026b334f228ef8fc632be, tpubDC8msFGe…/0/757347947)
+[buyer] paying 1000 sats on Bitcoin testnet3 to tb1qd66456etpcrsvpz0pngzugtdumwe3qter8jgjd (paymentId 12299bf16423f9d28a81192788817d17, tpubDC8msFGe…/0/1047695828/689587608/564264336)
 [buyer]   needs 1 confirmation(s); seller waits up to 3600s
-[buyer] bitcoin tx: 66bdd23d3904db701056a58109d2b6db487373f16839c3184c46fd8a111b4485 vout 0
+[buyer] bitcoin tx: 14ac11c1fac4fe1199750f84dbec631d11ae749d704a7ea86a00c4f20275be2a vout 0
 [buyer]   (stub payment: not on Bitcoin)
-[buyer] journal: …/.scratch/buyer-btc/journal.jsonl (resume with --resume c847a1bdde1026b334f228ef8fc632be)
+[buyer] journal: …/.scratch/buyer-btc/journal.jsonl (resume with --resume 12299bf16423f9d28a81192788817d17)
 [buyer] attempt 1: not yet: invalid_exact_bip122_payload_unconfirmed
 [buyer] attempt 2: not yet: invalid_exact_bip122_payload_unconfirmed
-[buyer] response: {"echo":{"hello":"btc-l1"},"timestamp":"2026-11-09T17:39:18.456Z"}
-[buyer] settled on bip122:000000000933ea01ad0ee984209779ba: bitcoin tx 66bdd23d3904db701056a58109d2b6db487373f16839c3184c46fd8a111b4485
+[buyer] response: {"echo":{"hello":"btc-l1"},"timestamp":"2026-11-09T17:54:03.467Z"}
+[buyer] settled on bip122:000000000933ea01ad0ee984209779ba: bitcoin tx 14ac11c1fac4fe1199750f84dbec631d11ae749d704a7ea86a00c4f20275be2a
 [buyer] hemi settle tx: not in the response (the facilitator logs it; see the settler's Settled event)
 ```
 
