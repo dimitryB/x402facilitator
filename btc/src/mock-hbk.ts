@@ -163,3 +163,32 @@ export function mockHbkPayBtc(o: MockHbkPayOptions): PayBtc {
     return { txid, vout: 1 };
   };
 }
+
+/** hBK on Hemi mainnet (DESIGN.md, verified read-only 2026-11-09). */
+export const HBK_MAINNET: Address = "0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12";
+
+export interface HemiBtcContracts {
+  hbk?: Address;
+  x402BtcSettler?: Address;
+  hbkTestnetAdapter?: Address;
+  /** hBK confirmations minus Bitcoin confirmations, as the settler is deployed with. */
+  confirmationOffset: number;
+}
+
+/**
+ * The phase 2 contracts of one Hemi network from shared/hemi.json (written by the contracts stream as
+ * `networks[<id>].contracts` and `btcConfirmationOffset`). Missing fields stay undefined until they land.
+ * Takes the parsed file so this package does not depend on @hemi-x402/shared.
+ */
+export function hemiBtcContracts(hemiJson: unknown, hemiNetwork: string): HemiBtcContracts {
+  type Net = { contracts?: Record<string, string>; btcConfirmationOffset?: number };
+  const net = ((hemiJson as { networks?: Record<string, Net> }).networks ?? {})[hemiNetwork] ?? {};
+  const c = net.contracts ?? {};
+  const offset = net.btcConfirmationOffset ?? (c.btcConfirmationOffset as unknown as number | undefined);
+  return {
+    hbk: (c.hbk as Address | undefined) ?? (hemiNetwork === "eip155:43111" ? HBK_MAINNET : undefined),
+    x402BtcSettler: c.x402BtcSettler as Address | undefined,
+    hbkTestnetAdapter: c.hbkTestnetAdapter as Address | undefined,
+    confirmationOffset: typeof offset === "number" ? offset : 1,
+  };
+}

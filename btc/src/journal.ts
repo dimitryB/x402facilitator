@@ -31,6 +31,8 @@ export interface JournalEntry {
   payment?: PaymentPayload;
   /** The paid resource's URL, for --resume. */
   url?: string;
+  /** Set when the payment was fabricated for a local test (no Bitcoin transaction exists). */
+  stub?: boolean;
   createdAt: string;
   updatedAt: string;
 }

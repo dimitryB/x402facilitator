@@ -2,6 +2,8 @@
 
 A minimal x402 v2 seller for Hemi. One paid route, `GET /echo` ($0.001), which returns the query string and a timestamp, plus an unpaid `GET /health`. It uses the x402 TypeScript server SDK (`@x402/express` and `ExactEvmScheme` from `@x402/evm/exact/server`) and sends every `/verify` and `/settle` to the facilitator at `FACILITATOR_URL`. The seller never signs or sends a transaction.
 
+It can also take native BTC on Bitcoin L1 (`exact` on `bip122:*`, see [the scheme spec](../docs/specs/scheme_exact_bip122.md) and "Bitcoin L1" below). That needs a facilitator whose `/supported` lists the bip122 kinds.
+
 ```sh
 SELLER_PAY_TO=0xYourAddress npm run start -w seller
 curl -i 'http://localhost:4021/echo?hello=hemi'     # 402 with a PAYMENT-REQUIRED header
@@ -14,8 +16,16 @@ curl -i 'http://localhost:4021/echo?hello=hemi'     # 402 with a PAYMENT-REQUIRE
 | `SELLER_PAY_TO` | required | Address that receives the payments |
 | `FACILITATOR_URL` | `http://localhost:8080` | The facilitator; see "Run it" in the root README for the fork recipe and the per-network configs |
 | `SELLER_NETWORKS` | `eip155:743111` | Comma-separated networks to accept; add `eip155:43111` for mainnet (`testnet` and `mainnet` also work) |
-| `SELLER_BTC_AMOUNT` | `1` | Price in the BTC asset, in satoshis. 1 sat is about $0.001 at ~$100k/BTC |
+| `SELLER_BTC_AMOUNT` | `1` | Price in the BTC asset on Hemi (hemiBTC, hBTC), in satoshis. 1 sat is about $0.001 at ~$100k/BTC |
 | `PORT` | `4021` | Listen port |
+| `SELLER_BTC_NETWORKS` | empty (off) | Bitcoin L1 networks to accept native BTC on: `btc-mainnet`, `btc-testnet3`, or the `bip122:…` ids |
+| `SELLER_BTC_XPUB` | required with the above | The account extended public key payments are derived from: `xpub…` for mainnet, `tpub…` for testnet3; comma-separate one of each for both |
+| `SELLER_BTC_AMOUNT_SATS` | `1000` | Price on Bitcoin L1, in satoshis; at least the dust limit (294 for p2wpkh, 330 for p2tr) |
+| `SELLER_BTC_MIN_CONFIRMATIONS` | `1` | Bitcoin confirmations the facilitator must see before it settles |
+| `SELLER_BTC_ADDRESS_TYPE` | `p2wpkh` | `p2wpkh` or `p2tr` (BIP86 key path) |
+| `SELLER_BTC_MAX_TIMEOUT_SECONDS` | `3600` | How long the buyer is told to keep polling; at least 600 |
+
+With `SELLER_NETWORKS` set to empty the seller takes Bitcoin L1 only and `SELLER_PAY_TO` is not needed. The seller validates every Bitcoin setting at startup and exits with the reason, for example `SELLER_BTC_XPUB for btc-testnet3 (bip122:000000000933ea01ad0ee984209779ba): payTo must be a tpub key on Bitcoin testnet3, got "xpub…" (xpub is for the other Bitcoin network)`. A `zpub`/`vpub` is refused with a hint: the scheme takes the same key with `xpub`/`tpub` version bytes.
 
 ## What it advertises
 
@@ -45,3 +55,36 @@ The middleware verifies the `PAYMENT-SIGNATURE` header with the facilitator befo
 ```
 
 The facilitator's `/supported` must list every network in `SELLER_NETWORKS`. The SDK reads it at startup, and if a configured network is missing the seller exits with a `RouteConfigurationError` (`missing_facilitator`). If the facilitator is unreachable at startup, the SDK retries on the first paid request.
+
+## Bitcoin L1
+
+Each network in `SELLER_BTC_NETWORKS` adds one accept after the Hemi ones (from a local run against a stub facilitator):
+
+```json
+{
+  "scheme": "exact",
+  "network": "bip122:000000000019d6689c085ae165831e93",
+  "amount": "1000",
+  "asset": "BTC",
+  "payTo": "xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4RHwCD3XyuvPEbvqAQY3rAPshWcMLoP2fMFMKHPJ4ZeZXYVUhLv1VMrjPC7PW6V",
+  "maxTimeoutSeconds": 3600,
+  "extra": {
+    "assetTransferMethod": "utxo",
+    "paymentFlow": "upfront",
+    "addressType": "p2wpkh",
+    "minConfirmations": 1,
+    "paymentId": "e17f794f38bbacc666a6c31696e34a3d"
+  }
+}
+```
+
+`ExactBtcServerScheme` from `@hemi-x402/btc` (registered once per Bitcoin network) adds a fresh random `paymentId` to every 402. The buyer pays to the address derived from `payTo` and that `paymentId` (`m/0/<index>` below the xpub), so every payment lands on its own address of the seller's wallet. Only someone who saw the 402 knows which address belongs to which payment. The index is random below 2^31, so a wallet's gap-limit scan will not find these addresses: the seller must keep each settled `paymentId` (the settle log line prints it with the index) to derive the key that spends the funds, `<account xprv>/0/<index>`.
+
+The flow is `upfront`: the middleware does not call `/verify`. It calls `/settle` before the handler, and the facilitator checks the Bitcoin output through hBK on Hemi and records it as consumed in a Hemi contract. A payment that is not confirmed yet comes back to the buyer as 402 with `invalid_exact_bip122_payload_unconfirmed` (or `…_transaction_not_found` while hVM has not seen it), and the buyer re-sends the same payment until it settles. A settled payment presented again gets 402 `invalid_transaction_state`. The log line names the Bitcoin transaction, and `payer` is `n/a` because a Bitcoin payment has no single payer address:
+
+```
+[seller] settled 1000 of BTC on bip122:000000000933ea01ad0ee984209779ba from n/a: bitcoin tx 66bdd23d…4485 (https://mempool.space/testnet/tx/66bdd23d…4485); paymentId c847a1bd…32be -> tb1qyv6yx7qc46tq0f9u073h2mg8p07ts8vssysfz8 at tpubDC8msFGe…/0/757347947
+```
+
+The handler runs once per settled payment. A Hemi reorg before PoP finality could in principle drop the consumed mark, so a handler that delivers something valuable should also be idempotent per `paymentId` (the scheme spec's "Security considerations").
+
