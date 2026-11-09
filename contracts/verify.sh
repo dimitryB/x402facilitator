@@ -21,8 +21,8 @@
 #   VERIFY_LOOKUP_WAIT                                     seconds to wait for the bytecode-DB lookup (default 20)
 #
 # Exit status: 0 if all three are verified (fully or partially), 1 otherwise.
-# Untested against live deployments: none of the three existed on Hemi testnet or the missing ones
-# on mainnet when this was written.
+# Run live on Hemi testnet on 2026-10-29, where all three verified through the bytecode database. On
+# mainnet the validator and the proxy verified the same way once looked up in a browser (D-034).
 set -euo pipefail
 cd "$(dirname "$0")"
 

@@ -11,7 +11,7 @@ settlement path the facilitator uses.
 | EIP-6492 validator | `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` | `UniversalSigValidator`; x402-rs calls it only for counterfactual-wallet signatures | deploy | deploy |
 | x402 exact Permit2 proxy | `0x402085c248EeA27D92E8b30b2C58ed07f9E20001` | `x402ExactPermit2Proxy`; the only spender the facilitator accepts in a Permit2 payload | deploy | deploy |
 
-The "Mainnet" and "Testnet" columns show the state at the time of writing (the spike, D-004 to D-006).
+The "Mainnet" and "Testnet" columns show the state at the time of writing (the spike, D-004 to D-006). All three now exist on both networks: on testnet since 2026-10-29, and on mainnet since 2026-11-04 (D-029).
 
 ## Where the bytes come from
 
@@ -158,13 +158,13 @@ Details:
 `deploy.sh` was exercised end to end against local anvil forks of both chains (ports 48545 and 48546):
 testnet broadcast with the fallback key, rerun as a no-op, mainnet refused without a mainnet key, with
 the testnet key, and without the confirmation, the script-level gate on a direct `forge script --broadcast`,
-and a confirmed mainnet-fork broadcast. On 2026-10-29 it deployed all three contracts on Hemi testnet; the record is in `broadcast/DeployHemi.s.sol/743111/`. It has not been run with `--broadcast` on mainnet.
+and a confirmed mainnet-fork broadcast. On 2026-10-29 it deployed all three contracts on Hemi testnet; the record is in `broadcast/DeployHemi.s.sol/743111/`. On 2026-11-04 it deployed the validator and the proxy on Hemi mainnet, where Permit2 already existed; the record is in `broadcast/DeployHemi.s.sol/43111/` (D-029).
 
 ## Explorer verification
 
 ```sh
 contracts/verify.sh testnet
-contracts/verify.sh mainnet     # explorer.hemi.xyz is blocked on this workstation's ISP; run elsewhere,
+contracts/verify.sh mainnet     # the spike machine's ISP filters explorer.hemi.xyz (D-034); run elsewhere,
                                 # or set HEMI_MAINNET_EXPLORER_URL
 ```
 
@@ -183,7 +183,9 @@ What is realistically verifiable, as found on 2026-10-28:
   committed initcode returned 39 matches for Permit2 (`Permit2`, solc 0.8.17), 4 for the validator
   (`UniversalSigValidator`, solc 0.8.30) and 3 for the proxy (`x402ExactPermit2Proxy`, solc 0.8.28).
   Every match is `PARTIAL`. On Hemi testnet all three now show as partial matches through that
-  database, with no submission at all. The mainnet explorer cannot be reached from here.
+  database, with no submission at all. On Hemi mainnet the validator and the proxy verified the same way
+  on 2026-11-04, once looked up in a browser. Permit2, for which Blockscout has no creation transaction,
+  did not (D-034).
 - The proxy cannot get a full match. The deployed initcode was built with CBOR metadata whose IPFS
   hash depends on the original build environment (the reference repo says so in `Deploy.s.sol`). The
   standard-JSON input `verify.sh` submits compiles (checked with solc 0.8.28 directly) to bytecode of

@@ -44,7 +44,7 @@ What must be deployed before stock x402-rs will start a chain. `assert_contracts
 | EIP-6492 validator | deploy | deploy | replay x402-rs's original CREATE2 call (D-006) |
 | x402 exact proxy | deploy | deploy | reference repo's committed initCode via `0x4e59…` (D-005) |
 
-Every deployment lands at the canonical address, so stock x402-rs, stock TS buyers and the stock proxy all work with no fork. Mainnet deployments wait for an explicit go. The estimated cost is in D-005.
+Every deployment lands at the canonical address, so stock x402-rs, stock TS buyers and the stock proxy all work with no fork. The mainnet deployments waited for an explicit go and ran on 2026-11-04 (D-029). The estimated cost is in D-005.
 
 ## D-002. RPC reachability and the local network
 
@@ -727,7 +727,7 @@ The alternative was `eip1559: false`, which needs no image change, since `eth_ga
 
 ### Open questions
 
-- Q-1. Cross-check the mainnet token addresses on `explorer.hemi.xyz` from a network that isn't blocked (D-002). They currently rest on Hemi's token list and on-chain `name`/`symbol`/`decimals` reads. On 2026-10-29 a retry from this workstation still hit the TLS block, and no alternative mainnet explorer host resolved (`hemi.blockscout.com` and `hemi.explorer.caldera.xyz` return 404; `explorer.hemi.network` does not resolve). Needs someone on another network: `curl -sS 'https://explorer.hemi.xyz/api/v2/tokens?q=USDC.e'` and `?q=hemiBTC`.
+- Q-1. Closed by D-027: both mainnet token addresses match the explorer's records. `curl` from this workstation still hits the TLS block, so the explorer was read in a browser. On 2026-10-29 no alternative mainnet explorer host resolved (`hemi.blockscout.com` and `hemi.explorer.caldera.xyz` return 404; `explorer.hemi.network` does not resolve).
 - Q-2. Why the testnet hBK contract's `getLastHeader()` reverts while precompile `0x44` answers (D-012): likely a different hBK release or ABI on testnet. Phase 2.
 
 
@@ -996,6 +996,385 @@ The sixteenth pass, on those doc edits, was clean: all eight items passed and it
 Its seven minor notes were all in the docs, and they are fixed. The x402-rs README kept a clause this entry removed from D-025, and its unit-test count is now 63. The image tag in D-016 had stopped at hemi.13. README **Ambiguous broadcast** now names the stale-read exception. The "73 s" holds only with no queue at the throttle, because the 8 s limit starts after it. The summary above the findings table said no issue could lose funds, which read too broadly beside the slow lookups. dRPC testnet's lag is now about 1.65M blocks, so the two places that said 2.9M say over a million.
 
 Passes 15 and 16 were both clean on hemi.14, with no code change between them, so the brief's condition of two passes in a row is met, on the stricter rule too. No critic has read the last doc fixes, which change no code.
+
+## D-027. Q-1: explorer cross-check of the mainnet tokens
+
+Both mainnet token addresses match the explorer's records, so Q-1 is closed and `shared/hemi.json` does not change. The explorer's search misses USDC.e, so that check needed a direct lookup by address.
+
+`curl` still can't reach `explorer.hemi.xyz` from this workstation (D-002), and a cloud session was refused by its own egress proxy (`curl: (56) CONNECT tunnel failed, response 403`). The two searches and the direct lookup were opened in a browser on this workstation on 2026-11-02 and the responses pasted into the session. They are saved in `docs/spike/q1-explorer/`.
+
+```
+GET https://explorer.hemi.xyz/api/v2/tokens?q=hemiBTC    # 38 items, next_page_params null
+{"address":"0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28","decimals":"8","holders":"6093","name":"Hemi Bitcoin","symbol":"hemiBTC","total_supply":"2711201034","type":"ERC-20"}
+$ cast call 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 "name()(string)" / "symbol()(string)" / "decimals()(uint8)" / "totalSupply()(uint256)" --rpc-url https://rpc.hemi.network/rpc
+"Hemi Bitcoin"  "hemiBTC"  8  2711201034
+
+GET https://explorer.hemi.xyz/api/v2/tokens?q=USDC.e     # 9 items, next_page_params null, 0xad11…5afA not among them
+GET https://explorer.hemi.xyz/api/v2/tokens/0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA
+{"address":"0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA","decimals":"6","holders":"5334","name":"Bridged USDC (Stargate)","symbol":"USDC.e","total_supply":"376380862031","type":"ERC-20"}
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA "name()(string)" / "symbol()(string)" / "decimals()(uint8)" / "totalSupply()(uint256)" --rpc-url https://rpc.hemi.network/rpc
+"Bridged USDC (Stargate)"  "USDC.e"  6  376380862031
+```
+
+The nine USDC.e results are `0x614e…0A2f`, six ICHI vaults and two option-style tokens that expired on 2026-08-15. Why the search misses `0xad11…5afA` is unknown: the explorer's own record has symbol `USDC.e`.
+
+These reads, taken before the direct lookup, tie that address to the tokens in the search results and to Stargate:
+
+```
+$ cast call 0x614eB485DE3c6C49701b40806AC1B985ad6F0A2f "asset()(address)" --rpc-url https://rpc.hemi.network/rpc
+0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA
+$ cast call <each ICHI vault in the search> "token1()(address)" --rpc-url https://rpc.hemi.network/rpc
+0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA    # all six
+$ cast logs --json --from-block 5549782 --to-block 5649782 --address 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA 'Mint(address,address,uint256)' --rpc-url https://rpc.hemi.network/rpc
+52 logs, every one with minter 0x45f1a95a4d3f3836523f5c83673c797f4d4d263b
+$ cast call 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA "isMinter(address)(bool)" 0x45f1A95A4D3f3836523F5c83673c797F4D4d263B --rpc-url https://rpc.hemi.network/rpc
+true
+$ cast call 0x45f1A95A4D3f3836523F5c83673c797F4D4d263B "token()(address)" / "stargateType()(uint8)" --rpc-url https://rpc.hemi.network/rpc
+0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA  1
+```
+
+`hemilabs/token-list` version 4.2.0, dated 2026-10-22, still lists the address, and it has no other USDC or hemiBTC entry on 43111. Stargate's own API and docs could not be read, because `stargate.finance` and `docs.stargate.finance` reset the connection from this workstation.
+
+Some tokens in these searches copy a symbol or name. None is in this repo, and none is in Hemi's token list. Buy by address, never by symbol.
+
+| Address | Symbol | What it is | Holders |
+|------|------|------|------|
+| `0x614eB485DE3c6C49701b40806AC1B985ad6F0A2f` | `USDC.e` | Vault share, `asset()` is `0xad11…5afA` | 6 |
+| `0xD172B64AA13d892bb5EB35f3482058eAE0BC5B2a` | `hemiBTC` | Vault share, `asset()` is `0xAA40…ef28` | 1,230 |
+| `0x7288e5f79Fa29794242Fa6423DF6e8Fc048c4B32` | `HBTC` | Named `HemiBTC`, 18 decimals. Not read on chain | 1 |
+
+Separately, `hemi.drpc.org`, `hemi-testnet.drpc.org` and `drpc.org` all reset the connection from this workstation at 2026-11-03T00:02Z, though `hemi.drpc.org` had answered read-only checks earlier that day. `stargate.finance` and `docs.stargate.finance` do the same. The reset goes by hostname, so dRPC itself isn't shown to be down, and the block is not the same as D-002's, which answers with 256 bytes of 0xFF:
+
+```
+$ openssl s_client -connect 172.66.146.203:443 -servername hemi.drpc.org -brief
+write:errno=54
+$ openssl s_client -connect 172.66.146.203:443 -servername example.com -brief
+CONNECTION ESTABLISHED  Protocol version: TLSv1.3
+```
+
+The Hemi public RPCs answered throughout. While this lasts, a run from this workstation has one working RPC, so it should run from another network, which `contracts/verify.sh mainnet` needs anyway. `hemi-mainnet.infura.io` does answer from here (401 without a key), so an Infura key is the fallback.
+
+## D-028. Mainnet checks with the real signer, before deployment
+
+Nothing was sent on mainnet. The signer is a fresh key made with `scripts/new-key.sh` on 2026-11-03 and stored in `.env` as both `DEPLOYER_PRIVATE_KEY` and `FACILITATOR_MAINNET_PRIVATE_KEY`. Its address is `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875`. The key itself was never printed.
+
+Balances at block 5656743 (2026-11-03T23:13:47Z), from `cast balance`, `balanceOf` and `cast nonce` on `https://rpc.hemi.network/rpc`:
+
+| Wallet | ETH (wei) | USDC.e (base units) | hemiBTC (sat) | Nonce |
+|------|------|------|------|------|
+| Signer `0x1155…0875` | 205000000000000 | 0 | 0 | 0 |
+| Buyer `0x35C8…3786` | 50000000000000 | 1000 | 10 | 0 |
+| payTo `0x647C…866f` | 0 | 0 | 0 | 0 |
+
+The buyer's hemiBTC allowance to Permit2 is 0, so its first hemiBTC payment sends one `approve`. 1000 base units of USDC.e pay for exactly one USDC.e payment.
+
+The simulation went through the public RPC, because dRPC is blocked from here (D-027). The full output is in `docs/spike/mainnet-simulation-2026-11-03.log`:
+
+```
+$ contracts/deploy.sh mainnet
+   signer: DEPLOYER_PRIVATE_KEY
+Permit2                    0x000000000022D473030F116dDEE9F6B43aC78BA3   present
+EIP-6492 validator         0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B   DEPLOY       579233   899374374541 0.000001478753341257
+x402 exact Permit2 proxy   0x402085c248EeA27D92E8b30b2C58ed07f9E20001   DEPLOY       722776  1049186306119 0.000001772144445671
+   L2 gas price now: 1000252 wei. Estimated total: 0.000003250897786928 ETH for 2 contract(s).
+  signer (HEMI_DEPLOY_PRIVATE_KEY): 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+  signer balance (wei): 205000000000000
+  checks passed: code hashes, Permit2 DOMAIN_SEPARATOR, proxy PERMIT2()
+  contracts deployed in this run: 2
+Estimated amount required: 0.00000181099728284 ETH
+exit=0
+```
+
+The signer holds about 63 times the estimate. forge's own "amount required" leaves out the L1 data fee, which is why it is lower than the script's total. forge's dry-run files are git-ignored, and its "sensitive values" file holds only the RPC URL.
+
+```
+$ HEMI_MAINNET_FORK_BLOCK=5656750 forge test      # docs/spike/mainnet-fork-tests-2026-11-03.log
+Ran 3 test suites in 4.05s (8.11s CPU time): 17 tests passed, 0 failed, 0 skipped (17 total tests)
+$ FORK_BLOCK_MAINNET=5656750 npm test -w tests    # read by tests/lib/env.ts; testnet fork at its default block
+ Test Files  13 passed (13)
+      Tests  116 passed (116)
+   Duration  370.48s
+```
+
+Both suites pass with mainnet state from 2026-11-03, 42,450 blocks after the pinned default. The suite stopped its forks and containers when it finished.
+
+## D-029. Mainnet deployment of the validator and the exact proxy
+
+Run on Dimitry's go, 2026-11-04 at 00:06Z, from `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875` (D-028). The script's simulation ran again first, then the broadcast, then its read-only post-check. The full output is in `docs/spike/mainnet-deploy-2026-11-03.log`; the file is named for the local date.
+
+```
+$ CONFIRM_MAINNET_DEPLOY=yes contracts/deploy.sh mainnet --broadcast
+  [skip]   Permit2: code already at 0x000000000022D473030F116dDEE9F6B43aC78BA3
+  [deploy] EIP-6492 validator -> 0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B
+  [deploy] x402 exact Permit2 proxy -> 0x402085c248EeA27D92E8b30b2C58ed07f9E20001
+ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
+  https://explorer.hemi.xyz/tx/0x9d5d7876579c12f86440bd2e74750bb0748b9d4a07a9836c69bbe6332aa0721e status=0x1 gasUsed=0x8aa4b
+  https://explorer.hemi.xyz/tx/0x237bd41c34b314dfa686311685bde4dbfe63e4c5becd66293a91198aa182ec79 status=0x1 gasUsed=0xad23f
+== Post-deployment check (simulation, should deploy nothing)
+  checks passed: code hashes, Permit2 DOMAIN_SEPARATOR, proxy PERMIT2()
+  contracts deployed in this run: 0
+All three contracts are in place on Hemi mainnet.
+exit=0
+```
+
+Read back separately from both RPCs. dRPC answered again by then. Both gave the same answers:
+
+```
+$ cast receipt <hash> --json --rpc-url {https://rpc.hemi.network/rpc, https://hemi.drpc.org}
+0x9d5d7876  block 5657008  status 0x1  from 0x1155…0875  to 0x4e59…956C  gasUsed 567883  effectiveGasPrice 1000252  l1Fee 1286310174263  fee 1854336280779 wei
+0x237bd41c  block 5657009  status 0x1  from 0x1155…0875  to 0x4e59…956C  gasUsed 709183  effectiveGasPrice 1000252  l1Fee 1543552799895  fee 2252914514011 wei
+$ cast tx <hash> input    # compared with contracts/deploy-data/
+0x9d5d7876  input == validator6492.calldata.hex   nonce 0  value 0
+0x237bd41c  input == exact-proxy.calldata.hex     nonce 1  value 0
+$ cast keccak $(cast code <address>)
+0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B  0x9b83857bbb34de3ba755156ba9bee06532be5ff539bf5de301a28606c76d6cab   # = VALIDATOR_CODEHASH
+0x402085c248EeA27D92E8b30b2C58ed07f9E20001  0xce6429c0bb49284660683287c0a8fe548a88379072327d026626909d202048b9   # = EXACT_PROXY_CODEHASH
+$ cast call 0x402085c248EeA27D92E8b30b2C58ed07f9E20001 "PERMIT2()(address)"
+0x000000000022D473030F116dDEE9F6B43aC78BA3
+$ cast balance / cast nonce 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+200892749205210 wei, nonce 2
+```
+
+The two fees add up to 4107250794790 wei, about 0.0000041 ETH. That is exactly what the signer's balance fell by. The L1 data fee had risen since D-028's simulation, so the script's estimate at broadcast time was 0.0000044 ETH. The signer keeps 0.00020 ETH for settlement gas.
+
+`contracts/verify.sh mainnet` has not run. `curl` to `explorer.hemi.xyz` still fails here with `tlsv1 alert protocol version` (D-002). Both contracts are what the code hashes say, and verification only adds source on the explorer.
+
+## D-030. The facilitator live on mainnet: /supported and /verify failures, read-only
+
+Run on 2026-11-04 from 01:20Z to 01:21Z, after D-029, as step 4 of README "Mainnet deployment". Nothing was sent. The checks call `GET /supported` and `POST /verify` only. The new script `tests/live/verify-failures.ts` refuses to call `/settle` at all. Every payload it sends is signed by a throwaway key it makes itself, so it reads no key from `.env`. The full output is in `docs/spike/mainnet-verify-checks-2026-11-03.log`.
+
+First the mainnet-only config, then `config.json` with both chains. Both started cleanly with hemi.14. x402-rs checks at startup that Permit2, the proxy and the validator exist on every configured chain, and before D-029 the mainnet config could not start (README "The facilitator").
+
+```
+$ FACILITATOR_CONFIG=config.mainnet.json docker compose up -d
+$ npx tsx tests/live/verify-failures.ts --networks eip155:43111 \
+    --signer eip155:43111=0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 --funded-payer 0x35C8182E886382D1133a3Daf980470D3646D3786
+PASS  /supported networks: 200 {"extensions":[],"kinds":[{"extra":{},"network":"eip155:43111","scheme":"exact","x402Version":2}],"signers":{"eip155:43111":["0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875"]}}
+...
+PASS  unserved network eip155:743111: 200 {"invalidMessage":"Unsupported chain","invalidReason":"invalid_network",...}
+PASS  signer eip155:43111 sent nothing: pending nonce 2 -> 2
+all checks passed                                   # 14 checks
+
+$ docker compose down && docker compose up -d       # config.json
+$ npx tsx tests/live/verify-failures.ts --networks eip155:43111,eip155:743111 \
+    --signer eip155:43111=0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 \
+    --signer eip155:743111=0xD2B2fc8093f8A734c42B90762FD2B2F8464631af --funded-payer 0x35C8182E886382D1133a3Daf980470D3646D3786
+PASS  /supported networks: 200 {...,"kinds":[{...,"network":"eip155:43111",...},{...,"network":"eip155:743111",...}],"signers":{"eip155:43111":["0x1155…0875"],"eip155:743111":["0xD2B2…31af"]}}
+...
+PASS  signer eip155:43111 sent nothing: pending nonce 2 -> 2
+PASS  signer eip155:743111 sent nothing: pending nonce 15 -> 15
+all checks passed                                   # 24 checks
+$ docker compose down
+```
+
+Every verdict came back HTTP 200 with `isValid: false`, in the spec's §5.4.2 shape (`verifyFailureViolations` in `tests/lib/spec.ts`). Each carried the payer, except `invalid_network`, where the facilitator reads no payload. The answers were the same on both runs:
+
+| Case | USDC.e mainnet (EIP-3009) | hemiBTC mainnet, USDC.e and hBTC testnet (Permit2) |
+|------|------|------|
+| Fresh key, correctly signed, holds nothing | `insufficient_funds` | `permit2_allowance_required` |
+| Fresh key signs, `from` is the funded buyer | `invalid_exact_evm_payload_signature`, payer the buyer | same |
+| One bit of `r` flipped | `invalid_exact_evm_payload_signature` | same |
+| Signed for 5x the price, presented at the price | `invalid_exact_evm_payload_authorization_value_mismatch` | same |
+| Network `eip155:1`, or testnet on the mainnet-only config | `invalid_network` | |
+
+The funded buyer `0x35C8…3786` held 1000 USDC.e units and 10 hemiBTC sats on mainnet, both with Permit2 allowance 0. On testnet it held 22556078 USDC.e units and 89994 hBTC sats, both approved. In the wrong-key cases the signature was rejected first. On balance and allowance alone, mainnet USDC.e and both testnet assets would have passed, and mainnet hemiBTC would have answered `permit2_allowance_required`. So the DoD's failed-signature case now holds live on both chains. Its insufficient-balance case holds live only for mainnet USDC.e. Every Permit2 asset, which includes all of testnet, checks the allowance first, so an unfunded payer gets `permit2_allowance_required` instead. On forks, `04-insufficient-balance.test.ts` covers that case under both transfer methods.
+
+The facilitator log has no settle lines. For each failed verify it logs the whole request body at WARN, signatures included. A logged authorization can only pay the `payTo` it names, but the log should be treated as private.
+
+No payment has run on mainnet. The payments (step 6) need a separate go.
+
+## D-031. First mainnet payment: 0.001 USDC.e by EIP-3009
+
+Run on Dimitry's go ("Go, pay USDC.e") on 2026-11-04 at 17:21Z, as README "Mainnet deployment" steps 4 to 6, with hemi.14 and the mainnet-only config. It was one payment, sent once. The go covered USDC.e only, so hemiBTC has not been paid. The full output is in `docs/spike/mainnet-payment-usdc-2026-11-04.log`.
+
+Before, at block 5662179, read from both RPCs: the buyer `0x35C8…3786` held 1000 units (0.001 USDC.e), payTo `0x647C…866f` held 0, and the signer `0x1155…0875` had 200892749205210 wei at nonce 2. Neither the signer nor the proxy held USDC.e. The seller's 402 offered exactly 1000 units of `0xad11…5afA` on `eip155:43111` to `0x647C…866f`, by `eip3009` with domain `Bridged USDC (Stargate)` version `2`. It also offered 1 sat of hemiBTC.
+
+```
+$ FACILITATOR_CONFIG=config.mainnet.json docker compose up -d
+$ SELLER_NETWORKS=eip155:43111 npm run start -w seller
+$ ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet
+[buyer] paying 1000 base units of USDC.e (0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA) on eip155:43111 to 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f via eip3009
+[buyer] response: {"echo":{"hello":"hemi"},"timestamp":"2026-11-04T17:21:31.573Z"}
+[buyer] tx:       0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d
+[buyer] buyer balance: 0.001 USDC.e -> 0 USDC.e
+[buyer] payTo balance: 0 USDC.e -> 0.001 USDC.e
+[seller] verified 1000 of 0xad11…5afA on eip155:43111 from 0x35C8182E886382D1133a3Daf980470D3646D3786
+[seller] settled 1000 of 0xad11…5afA on eip155:43111 from 0x35C8…3786: tx 0xa9b7c8c5…a53d
+facilitator: POST /verify status=200 elapsed=389ms; POST /settle status=200 elapsed=8678ms
+```
+
+Read back separately from the Hemi public RPC and dRPC. Both returned the same receipt:
+
+```
+$ cast receipt 0xa9b7c8c5…a53d
+status 0x1  block 5662182  from 0x1155…0875 (signer)  to 0xad11…5afA (USDC.e)
+gasUsed 100520  effectiveGasPrice 1000252  l1Fee 1150823163072  fee 1251368494112 wei
+logs, both from USDC.e, no others:
+  AuthorizationUsed(authorizer 0x35C8…3786, nonce 0xd5a0c21f…8014)
+  Transfer(from 0x35C8…3786, to 0x647C…866f, value 1000)
+$ cast tx 0xa9b7c8c5…a53d        nonce 2, value 0, type 2, maxPriorityFeePerGas 1000000 (0.001 gwei)
+$ cast calldata-decode transferWithAuthorization(...)   from 0x35C8…3786, to 0x647C…866f, value 1000, validAfter 0, validBefore 1793813191
+$ cast call 0xad11…5afA "authorizationState(address,bytes32)(bool)" 0x35C8…3786 0xd5a0c21f…8014
+true
+```
+
+After:
+
+| Wallet | USDC.e | ETH | Nonce |
+|------|------|------|------|
+| Buyer `0x35C8…3786` | 1000 → 0 | 50000000000000, unchanged | 0, unchanged |
+| payTo `0x647C…866f` | 0 → 1000 | 0 | 0 |
+| Signer `0x1155…0875` | 0 | 200892749205210 → 199641380711098 | 2 → 3 |
+| Proxy `0x4020…0001` | 0 | | |
+
+What this shows:
+
+- **Funds:** USDC.e went from the buyer to payTo in one exact transfer of the price. The facilitator only paid gas, and its ETH fell by exactly the receipt's fee, about 0.0000013 ETH.
+- **No buyer gas:** the buyer sent nothing and paid no gas. Mainnet USDC.e needs only a signature (D-001).
+- **Tip:** the settlement used the tip floor of 0.001 gwei (D-018).
+- **Replay:** the authorization is spent on chain, so it cannot be replayed.
+- **Order:** the seller verified before settling. The full settle took 8.7 s.
+
+The EIP-3009 path, until now tested only on a fork of mainnet, has now worked live. The signer keeps 0.00020 ETH, about 160 such settlements at this fee. The buyer now holds no USDC.e. A hemiBTC payment needs its own go. The buyer still holds 10 sats of hemiBTC and 0.00005 ETH for the one-time Permit2 approval.
+
+Both services were stopped afterwards. Explorer verification of the contracts (step 3) has still not run.
+
+## D-032. Second mainnet payment: 1 sat of hemiBTC by Permit2
+
+Run on Dimitry's go ("Go, pay hemiBTC") on 2026-11-04 at 17:30Z, set up as D-031. It was one payment, sent once. The full output is in `docs/spike/mainnet-payment-hemibtc-2026-11-04.log`.
+
+Before, at block 5662223, read from both RPCs:
+
+- **Buyer `0x35C8…3786`:** 10 sats of hemiBTC, Permit2 allowance 0, and 50000000000000 wei.
+- **No custody:** payTo, the signer, the proxy and Permit2 held no hemiBTC.
+- **Signer:** nonce 3.
+- **Approval estimate:** 47024 gas.
+
+The seller's 402 offered exactly 1 sat of `0xAA40…ef28` ("Hemi Bitcoin", 8 decimals) to `0x647C…866f`, by `permit2`.
+
+```
+$ ALLOW_MAINNET=yes npm run pay -w buyer -- --asset btc --network mainnet
+[buyer] paying 1 base units of hemiBTC (0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28) on eip155:43111 to 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f via permit2
+[buyer] approve(Permit2, max) sent: 0x2798788aa8454916a17f1b332603a7aa2cf3e297374cd519cbdaed1985cc6a56
+[buyer] response: {"echo":{"hello":"hemi"},"timestamp":"2026-11-04T17:30:38.999Z"}
+[buyer] tx:       0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27
+[buyer] buyer balance: 0.0000001 hemiBTC -> 0.00000009 hemiBTC
+[buyer] payTo balance: 0 hemiBTC -> 0.00000001 hemiBTC
+[seller] verified 1 of 0xAA40…ef28 on eip155:43111 from 0x35C8182E886382D1133a3Daf980470D3646D3786
+[seller] settled 1 of 0xAA40…ef28 on eip155:43111 from 0x35C8…3786: tx 0xaa3d89f4…3b27
+facilitator: POST /verify status=200 elapsed=722ms; POST /settle status=200 elapsed=8937ms; no WARN or ERROR lines
+```
+
+Read back separately from the Hemi public RPC and dRPC. Each receipt was byte-identical on both:
+
+```
+$ cast receipt 0x2798788a…6a56     # the buyer's one-time approval
+status 0x1  block 5662227  from 0x35C8…3786 (buyer)  to 0xAA40…ef28 (hemiBTC)  nonce 0
+input approve(0x000000000022D473030F116dDEE9F6B43aC78BA3, 2^256-1)
+logs: Approval(owner 0x35C8…3786, spender Permit2, 2^256-1)
+gasUsed 46641  effectiveGasPrice 1000252  l1Fee 345153091200  fee 391805844732 wei, paid by the buyer
+
+$ cast receipt 0xaa3d89f4…3b27     # the settlement
+status 0x1  block 5662228  from 0x1155…0875 (signer)  to 0x4020…0001 (x402 exact proxy)  nonce 3
+input settle(((0xAA40…ef28, 1), nonce 7135…6282, deadline 1793813738), owner 0x35C8…3786, (to 0x647C…866f, validAfter 0), signature)
+logs, no others:
+  hemiBTC Transfer(from 0x35C8…3786, to 0x647C…866f, value 1)
+  proxy   Settled()
+gasUsed 102102  effectiveGasPrice 1000252  l1Fee 891238098926  fee 993365828630 wei, paid by the signer
+$ cast call Permit2 "nonceBitmap(address,uint256)(uint256)" 0x35C8…3786 <nonce >> 8>     # bit 74 set: the nonce is spent
+```
+
+After:
+
+| Wallet | hemiBTC | ETH | Nonce |
+|------|------|------|------|
+| Buyer `0x35C8…3786` | 10 → 9 | 50000000000000 → 49608194155268 (the approval fee) | 0 → 1 |
+| payTo `0x647C…866f` | 0 → 1 | 0 | 0 |
+| Signer `0x1155…0875` | 0 | 199641380711098 → 198648014882468 (the settlement fee) | 3 → 4 |
+| Proxy `0x4020…0001` | 0 | | |
+| Permit2 `0x0000…8BA3` | 0 | | |
+
+What this shows:
+
+- **Funds:** the token moved from the buyer straight to payTo in one Transfer of the price. The proxy and Permit2 held nothing before or after, and the facilitator only paid gas.
+- **Permit2 path:** the path every Permit2 asset uses ran live on mainnet through the newly deployed proxy (D-029). The buyer's only transaction was the one-time approval, as README "For buyers" says.
+- **Allowance:** the approval stays at max for later payments. The SignatureTransfer path does not reduce it.
+- **Tips:** both transactions tipped 0.001 gwei.
+- **Order:** the seller verified before settling, and the full settle took 8.9 s.
+
+Both mainnet payments in the brief have now run. The signer keeps 0.000199 ETH. The buyer holds 9 sats of hemiBTC, 0 USDC.e and 0.0000496 ETH. Both services were stopped afterwards. Explorer verification of the contracts (step 3) has still not run.
+
+## D-033. Seventeenth critic pass: the mainnet work
+
+A fresh-context critic ran the Definition of done from the README on 2026-11-04. It covered everything since D-026: commits 1325d54 to 3eb0670 and the uncommitted D-032. It was barred from sending live transactions, calling `/settle` on a live facilitator, reading `.env`, and editing or committing files.
+
+All eight items passed, with no major issue. Its own checks:
+
+- **Live mainnet claims:** all five mainnet receipts were byte-identical on the Hemi public RPC and dRPC. Every block, fee, nonce, input, log, code hash and balance in README and D-028 to D-032 matched the chain. That includes the spent EIP-3009 authorization, the Permit2 nonce bit, and the zero token balances of the signer, the proxy and Permit2.
+- **Live facilitator:** with `config.json`, `/supported` listed both networks and both signers. `tests/live/verify-failures.ts` passed 24 checks on both chains, and README step 4's own command passed 12 on mainnet alone. Neither signer's nonce moved.
+- **Suites on forks:** the e2e suite passed 13 files and 116 tests in 305 s. `forge test` passed 17. `buyer/demo-fork.sh` settled all four payments.
+
+It found seven minor issues. None can send funds anywhere but `payTo`.
+
+| Finding | Trigger | Outcome |
+|------|------|------|
+| `scripts/new-key.sh` missed a key written as `NAME = 0x…` and appended a second one. Node's env-file loader and compose then read the new, unfunded key | A hand-edited `.env` with spaces around `=` | Fixed: spaces are accepted. A line that names the key in any other form, such as `NAME: value`, is refused |
+| `new-key.sh` replaced a symlinked `.env` with a plain file, so the link's target never got the key | `.env` as a symlink | Fixed: refused |
+| `contracts/README.md` still said `deploy.sh` had not broadcast on mainnet | None, docs only | Corrected |
+| D-030 said 25 checks on both chains; the log has 24 | None, docs only | Corrected |
+| README and D-030 claimed a live insufficient-balance answer on both chains. Permit2 assets answer `permit2_allowance_required` first, so only mainnet USDC.e showed one | None, docs only | Reworded |
+| D-030 called paying step 5; it is step 6 | None, docs only | Corrected |
+| README's spike section said the contracts were deployed on testnet only. The two payment logs gave read times as block times | None, docs only | Corrected |
+
+The critic also flagged that the hemiBTC evidence log was untracked while README cited it. It goes in with this entry's commit.
+
+`new-key.sh` was retested on scratch files under macOS bash 3.2, and all 15 cases passed:
+
+- **The two new cases:** a spaced key with a value is refused, and a spaced empty one is filled in place. A symlink and the colon form are both refused.
+- **Earlier cases, still holding:** a comment that mentions the name is ignored. Empty names are filled and missing ones appended. The file ends at mode 600, with no temp file left. The printed address matches the key that sourcing and Node's `--env-file` read, and no key appears in the output. A rerun, a bad name, a duplicate and no arguments are all refused. `export NAME=""` in a CRLF file is filled, and a missing file is created.
+
+The critic otherwise found no path in `new-key.sh` that prints or loses a key, and nothing wrong in `tests/live/verify-failures.ts`.
+
+The facilitator image is unchanged (hemi.14). Passes 16 and 17 both passed every item with no major issue. The changes since pass 16 are the deployment, the live checks, the payments, `new-key.sh` and the new read-only script, none of them in the facilitator. No critic has read this entry's fixes to `new-key.sh`.
+
+## D-034. Mainnet explorer verification, and why curl can't reach the explorer
+
+This was step 3 of README "Mainnet deployment", on 2026-11-04 from about 18:05Z to 18:12Z. Nothing was submitted, and `contracts/verify.sh mainnet` did not run.
+
+**Why the CLI fails.** Dimitry reported the explorer was reachable in a browser, failing only now and then with a "can't provide secure access" error. From this workstation at the same time, every TLS client failed on `explorer.hemi.xyz` alone:
+
+- macOS curl (LibreSSL): `tlsv1 alert protocol version`.
+- Node fetch and Python urllib (OpenSSL): `WRONG_VERSION_NUMBER`.
+- The app's built-in browser: navigation failed, while `testnet.explorer.hemi.xyz/api/v2/stats` loaded.
+
+Raw TLS handshakes to one Cloudflare IP, `104.18.22.222`, from Python, changing only the server name:
+
+```
+SNI explorer.hemi.xyz            first bytes back: ff ff ff ff ff ff …   (not TLS)
+SNI testnet.explorer.hemi.xyz    16 03 03 …  TLS 1.3 handshake
+SNI hemi.xyz                     16 03 03 …  TLS 1.3 handshake
+SNI www.cloudflare.com           16 03 03 …  TLS 1.3 handshake
+$ curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' http://explorer.hemi.xyz/          # 18:10:57Z
+302 https://<the ISP's warning page>?url=http://explorer.hemi.xyz/&token=<redacted>
+$ curl … http://testnet.explorer.hemi.xyz/
+301 https://testnet.explorer.hemi.xyz/
+```
+
+This confirms and sharpens D-002. The workstation's ISP filters the one hostname `explorer.hemi.xyz`. Plain HTTP is redirected to its warning page, and a TCP TLS connection gets non-TLS bytes back. The browser most likely gets through over HTTP/3 (QUIC on UDP), which the filter doesn't touch; that was not measured. The occasional browser error fits a fallback to TCP. Nothing here tells whether other networks fail too. No attempt was made to route around the filter.
+
+**Verification status**, read in Brave by Dimitry and pasted here. The three address responses are saved in `docs/spike/mainnet-explorer/`. The first look at `/api/v2/smart-contracts/<address>` returned bytecode only for all three contracts, which is Blockscout's answer for an unverified contract. A few minutes later, `/api/v2/addresses/<address>` gave:
+
+| Contract | `is_verified` | `name` | Creation tx | Creator |
+|------|------|------|------|------|
+| x402 exact proxy `0x4020…0001` | true | `x402ExactPermit2Proxy` | `0x237bd41c…2ec79` | `0x4e59…956C` |
+| EIP-6492 validator `0xdAcD…2a3B` | true | `UniversalSigValidator` | `0x9d5d7876…0721e` | `0x4e59…956C` |
+| Permit2 `0x0000…8BA3` | false | null | null | null |
+
+As on testnet, the first request made Blockscout search its shared bytecode database (contracts/README.md "Explorer verification"), and that verified the two contracts this project deployed. The address endpoint doesn't say whether a match is full or partial. Every database match found on 2026-10-28 was partial, and the proxy can only be partial.
+
+Blockscout knows no creation transaction or creation bytecode for Permit2, and the lookup did not verify it. This project did not deploy it. Its code was checked against the canonical code hash (D-004), which is what the facilitator relies on. Verifying it would mean submitting Uniswap's Permit2 source (solc 0.8.17, via-IR, 1,000,000 runs) from a connection the filter doesn't touch. It changes nothing on chain, so it stays undone.
+
+Step 3 is done for the contracts this project deployed. README and contracts/README now say so, and describe the filter instead of a block.
 
 ## Pre-spike context: what the reference code requires
 

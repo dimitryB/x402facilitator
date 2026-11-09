@@ -1,0 +1,83 @@
+# Second mainnet payment: 1 sat of hemiBTC by Permit2 through hemi.14, 2026-11-04 (DECISIONS.md D-032)
+# Before, read at 2026-11-04T17:29:52Z from https://rpc.hemi.network/rpc, when its latest block was 5662223 (block time 17:29:47Z); dRPC at the same block
+hemiBTC 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28: "Hemi Bitcoin" / "hemiBTC" / decimals 8
+buyer   0x35C8182E886382D1133a3Daf980470D3646D3786 hemiBTC 10  ETH 50000000000000  nonce 0  allowance(buyer, Permit2) 0
+payTo   0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f hemiBTC 0
+signer  0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 hemiBTC 0   ETH 199641380711098  nonce 3
+proxy   0x402085c248EeA27D92E8b30b2C58ed07f9E20001 hemiBTC 0
+Permit2 0x000000000022D473030F116dDEE9F6B43aC78BA3 hemiBTC 0
+$ cast estimate 0xAA40…ef28 'approve(address,uint256)' Permit2 max --from buyer
+47024
+
+$ FACILITATOR_CONFIG=config.mainnet.json docker compose up -d
+{"extensions":[],"kinds":[{"extra":{},"network":"eip155:43111","scheme":"exact","x402Version":2}],"signers":{"eip155:43111":["0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875"]}}
+$ SELLER_NETWORKS=eip155:43111 npm run start -w seller
+$ curl -i "localhost:4021/echo?hello=hemi"    # PAYMENT-REQUIRED header, base64-decoded
+{"scheme":"exact","network":"eip155:43111","asset":"0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA","amount":"1000","payTo":"0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f","maxTimeoutSeconds":300,"extra":{"assetTransferMethod":"eip3009","name":"Bridged USDC (Stargate)","version":"2"}}
+{"scheme":"exact","network":"eip155:43111","asset":"0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28","amount":"1","payTo":"0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f","maxTimeoutSeconds":300,"extra":{"assetTransferMethod":"permit2"}}
+
+$ ALLOW_MAINNET=yes npm run pay -w buyer -- --asset btc --network mainnet    # started 2026-11-04T17:30:23Z
+[buyer] buyer 0x35C8182E886382D1133a3Daf980470D3646D3786 holds 0.0000001 hemiBTC
+[buyer] GET http://localhost:4021/echo?hello=hemi
+[buyer] paying 1 base units of hemiBTC (0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28) on eip155:43111 to 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f via permit2
+[buyer] approve(Permit2, max) sent: 0x2798788aa8454916a17f1b332603a7aa2cf3e297374cd519cbdaed1985cc6a56
+[buyer]   https://explorer.hemi.xyz/tx/0x2798788aa8454916a17f1b332603a7aa2cf3e297374cd519cbdaed1985cc6a56
+[buyer] asset:    hemiBTC 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 (eip155:43111)
+[buyer] response: {"echo":{"hello":"hemi"},"timestamp":"2026-11-04T17:30:38.999Z"}
+[buyer] tx:       0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27
+[buyer] explorer: https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27
+[buyer] buyer balance: 0.0000001 hemiBTC -> 0.00000009 hemiBTC
+[buyer] payTo balance: 0 hemiBTC -> 0.00000001 hemiBTC
+
+# Seller log
+[seller] listening on http://localhost:4021  facilitator http://localhost:8080  payTo 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f
+[seller]   eip155:43111  1000 of 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA  {"assetTransferMethod":"eip3009","name":"Bridged USDC (Stargate)","version":"2"}
+[seller]   eip155:43111  1 of 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28  {"assetTransferMethod":"permit2"}
+[seller] verified 1 of 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 on eip155:43111 from 0x35C8182E886382D1133a3Daf980470D3646D3786
+[seller] settled 1 of 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 on eip155:43111 from 0x35C8182E886382D1133a3Daf980470D3646D3786: tx 0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27
+
+# Facilitator log (docker compose logs facilitator, colour removed)
+2026-11-04T17:30:10.266042Z  INFO x402_chain_eip155::chain::provider: Using HTTP transport chain=eip155:43111 rpc_url=https://hemi.drpc.org/ rate_limit=Some(20)
+2026-11-04T17:30:10.272189Z  INFO x402_chain_eip155::chain::provider: Using HTTP transport chain=eip155:43111 rpc_url=https://rpc.hemi.network/rpc rate_limit=Some(4)
+2026-11-04T17:30:10.922109Z  INFO x402_chain_eip155::chain::provider: Using EVM provider chain=eip155:43111 signers=[0x1155c33c3ef5d0dee61c98d21f2e22c053a60875]
+2026-11-04T17:30:10.922231Z  INFO x402_types::scheme: Registered scheme handler chain_id=eip155:43111 scheme=exact id="v2-eip155-exact"
+2026-11-04T17:30:10.922387Z  INFO x402_facilitator::run: Starting server at http://0.0.0.0:8080
+2026-11-04T17:30:11.286059Z  INFO http_request{otel.kind="server" otel.name=GET /supported method=GET uri=/supported version=HTTP/1.1}: x402_facilitator_local::util::telemetry: status=200 elapsed=0ms
+2026-11-04T17:30:11.733089Z  INFO http_request{otel.kind="server" otel.name=GET /supported method=GET uri=/supported version=HTTP/1.1}: x402_facilitator_local::util::telemetry: status=200 elapsed=0ms
+2026-11-04T17:30:38.991933Z  INFO http_request{otel.kind="server" otel.name=POST /verify method=POST uri=/verify version=HTTP/1.1}: x402_facilitator_local::util::telemetry: status=200 elapsed=722ms
+2026-11-04T17:30:40.533188Z  INFO http_request{otel.kind="server" otel.name=POST /settle method=POST uri=/settle version=HTTP/1.1}:post_settle:settle{otel.kind="internal" chain_id=eip155:43111 payer=0x35C8182E886382D1133a3Daf980470D3646D3786 pay_to=0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f}:settle_permit2_payment:call_permit2_proxy_settle.EOA: x402_chain_eip155::chain::provider: Transaction broadcast tx=0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27 from=0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 to=0x402085c248EeA27D92E8b30b2C58ed07f9E20001
+2026-11-04T17:30:47.935548Z  INFO http_request{otel.kind="server" otel.name=POST /settle method=POST uri=/settle version=HTTP/1.1}:post_settle:settle{otel.kind="internal" chain_id=eip155:43111 payer=0x35C8182E886382D1133a3Daf980470D3646D3786 pay_to=0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f}:settle_permit2_payment: x402_chain_eip155::v1_eip155_exact::facilitator: transfer succeeded status="ok" tx=0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27
+2026-11-04T17:30:47.935677Z  INFO http_request{otel.kind="server" otel.name=POST /settle method=POST uri=/settle version=HTTP/1.1}: x402_facilitator_local::util::telemetry: status=200 elapsed=8937ms
+
+# Read back from https://rpc.hemi.network/rpc and https://hemi.drpc.org; both returned identical receipts (jq -S, cmp)
+$ cast receipt 0x2798788aa8454916a17f1b332603a7aa2cf3e297374cd519cbdaed1985cc6a56 --json
+{"status":"0x1","blockNumber":"0x566613","from":"0x35c8182e886382d1133a3daf980470d3646d3786","to":"0xaa40c0c7644e0b2b224509571e10ad20d9c4ef28","gasUsed":"0xb631","effectiveGasPrice":"0xf433c","l1Fee":"0x505cba3680","logs":[{"address":"0xaa40c0c7644e0b2b224509571e10ad20d9c4ef28","topics":["0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925","0x00000000000000000000000035c8182e886382d1133a3daf980470d3646d3786","0x000000000000000000000000000000000022d473030f116ddee9f6b43ac78ba3"],"data":"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}]}
+$ cast receipt 0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27 --json
+{"status":"0x1","blockNumber":"0x566614","from":"0x1155c33c3ef5d0dee61c98d21f2e22c053a60875","to":"0x402085c248eea27d92e8b30b2c58ed07f9e20001","gasUsed":"0x18ed6","effectiveGasPrice":"0xf433c","l1Fee":"0xcf81ee27ee","logs":[{"address":"0xaa40c0c7644e0b2b224509571e10ad20d9c4ef28","topics":["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef","0x00000000000000000000000035c8182e886382d1133a3daf980470d3646d3786","0x000000000000000000000000647c8d7129c0e995b36ef8aaa98f610d5e8f866f"],"data":"0x0000000000000000000000000000000000000000000000000000000000000001"},{"address":"0x402085c248eea27d92e8b30b2c58ed07f9e20001","topics":["0x97088ec3606cfe8cc112180570d03fcde05f9b8e1bfef8e27784eaf5dd5691b6"],"data":"0x"}]}
+# topic0 0x8c5be1e5… = Approval(address,address,uint256); 0xddf252ad… = Transfer; 0x97088ec3606cfe8cc112180570d03fcde05f9b8e1bfef8e27784eaf5dd5691b6 = Settled()
+approval fee   = gasUsed 46641  * 1000252 + l1Fee 345153091200 = 391805844732 wei (paid by the buyer)
+settlement fee = gasUsed 102102 * 1000252 + l1Fee 891238098926 = 993365828630 wei (paid by the signer)
+$ cast tx <hash> {nonce,value,to,from,maxPriorityFeePerGas,type}
+approval:   nonce=0 value=0 to=0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28 from=0x35C8182E886382D1133a3Daf980470D3646D3786 maxPriorityFeePerGas=0xf4240 type=0x2
+settlement: nonce=3 value=0 to=0x402085c248EeA27D92E8b30b2C58ed07f9E20001 from=0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 maxPriorityFeePerGas=0xf4240 type=0x2
+$ cast 4byte-decode $(cast tx 0x2798788aa8454916a17f1b332603a7aa2cf3e297374cd519cbdaed1985cc6a56 input)
+1) "approve(address,uint256)"
+0x000000000022D473030F116dDEE9F6B43aC78BA3
+115792089237316195423570985008687907853269984665640564039457584007913129639935 [1.157e77]
+$ cast 4byte-decode $(cast tx 0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27 input)
+1) "settle(((address,uint256),uint256,uint256),address,(address,uint256),bytes)"
+((0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28, 1), 71355895775105271753095784866448116584204435439869341631515047650222971006282 [7.135e76], 1793813738 [1.793e9])
+0x35C8182E886382D1133a3Daf980470D3646D3786
+(0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f, 0)
+0xfab4254a9ef86b71fb7291af6755bf1bf5edfd49ddb67ce1c443e194c93d18155b164fe7917c714c21ea7a585ef8c741eccfa8b11ce9e270cbb3d9d5a4b016d91b
+$ cast call Permit2 'nonceBitmap(address,uint256)(uint256)' buyer (nonce >> 8)    # nonce 71355895775105271753095784866448116584204435439869341631515047650222971006282
+word 278733967871504967785530409634562955407048575936989615748105654883683480493, bit 74: set
+
+# After, block 5662228 and later
+buyer   0x35C8182E886382D1133a3Daf980470D3646D3786 hemiBTC 9  ETH 49608194155268  nonce 1  (drop 391805844732 wei = approval fee)  allowance(buyer, Permit2) max
+payTo   0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f hemiBTC 1
+signer  0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 hemiBTC 0  ETH 198648014882468  nonce 4  (drop 993365828630 wei = settlement fee)
+proxy   0x402085c248EeA27D92E8b30b2C58ed07f9E20001 hemiBTC 0
+Permit2 0x000000000022D473030F116dDEE9F6B43aC78BA3 hemiBTC 0
+
+$ kill <seller pid>; docker compose down
