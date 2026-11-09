@@ -169,7 +169,13 @@ export async function runBtcL1(args: BtcL1Args, defaultUrl: string): Promise<voi
     const res = await fetch(url);
     const body = await res.text();
     if (res.status !== 402) fail(`expected 402 Payment Required, got ${res.status}: ${body.slice(0, 300)}`);
-    const required = http.getPaymentRequiredResponse(name => res.headers.get(name), body ? JSON.parse(body) : undefined);
+    let parsed: unknown;
+    try {
+      parsed = body ? JSON.parse(body) : undefined;
+    } catch {
+      parsed = undefined; // v2 sellers put the requirements in the PAYMENT-REQUIRED header; the body is optional
+    }
+    const required = http.getPaymentRequiredResponse(name => res.headers.get(name), parsed);
     const payment = await client.createPaymentPayload(required);
     const paid = await journal.get(payment.accepted.extra.paymentId as string);
     if (!paid || paid.status !== "paid") fail("internal error: the payment is not in the journal");
@@ -183,7 +189,8 @@ export async function runBtcL1(args: BtcL1Args, defaultUrl: string): Promise<voi
   log(`  ${entry.stub ? "(stub payment: not on Bitcoin)" : btcTxUrl(network, txid)}`);
   log(`journal: ${JOURNAL} (resume with --resume ${entry.paymentId})`);
 
-  const deadline = Date.parse(entry.createdAt) + payment.accepted.maxTimeoutSeconds * 1000;
+  // A fresh payment polls for maxTimeoutSeconds after paying; --resume gets a new window from now.
+  const deadline = (args.resume ? Date.now() : Date.parse(entry.createdAt)) + payment.accepted.maxTimeoutSeconds * 1000;
   const headers = http.encodePaymentSignatureHeader(payment);
   let unreachable = 0;
   for (let attempt = 1; ; attempt++) {
