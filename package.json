@@ -2,7 +2,7 @@
   "name": "hemi-x402-facilitator",
   "private": true,
   "type": "module",
-  "workspaces": ["shared", "seller", "buyer", "tests"],
+  "workspaces": ["shared", "btc", "seller", "buyer", "tests"],
   "engines": { "node": ">=22.9" },
   "devDependencies": {
     "tsx": "4.23.15",
