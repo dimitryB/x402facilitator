@@ -13,6 +13,8 @@ Stream C of `docs/phase2/DESIGN.md`, on branch `claude/optimistic-meninsky-f0b70
 | `tests/lib/` | `spec.ts` (bip122 codes, `txPatternFor`, family-aware `payer`, `settleSuccessViolations`), `payments.ts` (`btcRequirementsFor`, `btcPayment`), `btc.ts` (new) |
 | `tests/e2e/11-btc-l1.test.ts` | 20 tests, skipped with the reason until the facilitator lists a bip122 kind and the forks carry the mock hBK and settler |
 | `.env.example` | Seller and buyer keys for Bitcoin L1 |
+| `shared/` | A `typecheck` script and tsconfig. On main, `npm run typecheck --workspaces` failed on `shared` ("Missing script"); now all five workspaces pass |
+| `tests/lib/env.ts` | Opt-in `E2E_PORT_OFFSET` for running the suite next to another worktree (TS-17) |
 
 ## Decisions
 
@@ -62,10 +64,17 @@ The default timeout is 3600 as the brief says. DESIGN.md's scheme table says 720
 
 **TS-16. `demo-fork.sh` fifth payment.** It runs only when the demo facilitator's `/supported` lists `bip122:000000000019d6689c085ae165831e93`; otherwise the seller would exit at startup (`missing_facilitator`). The seller then takes BTC on Bitcoin mainnet to the vector xpub. The buyer pays with `--stub-pay <mainnet fork>`, recording 1 confirmation, with `--poll 2`, so it settles on the first re-send.
 
+**TS-17. `E2E_PORT_OFFSET` lets two worktrees run the e2e suite at once.** Streams B and C both ran `npm test -w tests` today and collided. The suite's ports (38080, 38545, 38546) and compose project `hemi-x402-tests` are fixed, and its setup runs `docker compose down` on that project, which tears down whatever another worktree has up. With `E2E_PORT_OFFSET=100` the ports are 38180, 38645 and 38646 and the project is `hemi-x402-tests-100`; unset, nothing changes.
+
+Two traps showed up along the way:
+- Colima's ssh mux kept forwarding 127.0.0.1:38080 for minutes after the container was gone, which trips the setup's port guard.
+- When the global setup throws, vitest 5 prints only "No test files found" and a `code.charCodeAt is not a function` TypeError from vite's source-map code; the real message is lost. Running the setup alone with tsx shows it.
+
 ## Commands and outputs
 
 ```
-$ npm run typecheck --workspaces          # shared has no typecheck script; btc, seller, buyer, tests are clean
+$ npm run typecheck --workspaces; echo $?   # shared, btc, seller, buyer, tests
+0
 $ npx -w btc vitest run
  Test Files  4 passed (4)
       Tests  90 passed (90)
