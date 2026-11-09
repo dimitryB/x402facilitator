@@ -27,8 +27,10 @@
 #   BTC_FIXTURE_SCRIPT   expected scriptPubKey    0x0020ff64…12c4 (P2WSH)
 #   BTC_FIXTURE_HEIGHT   its Bitcoin block        975189
 #   BTC_MIN_CONFIRMATIONS                         1
-#   BTC_TIP_URL          JSON with a "height" field for the Bitcoin tip; empty to skip.
-#                        Mainnet default: https://api.blockcypher.com/v1/btc/main
+#   BTC_TIP_URL          the Bitcoin tip height, as a plain number (Esplora's /blocks/tip/height) or
+#                        JSON with a "height" field; empty to skip. Mainnet default:
+#                        https://btcscan.org/api/blocks/tip/height, then BlockCypher if that fails
+#                        (BlockCypher answered a stale tip once and rate-limits: docs/phase2/contracts.md)
 #   HEMI_MAINNET_RPC_URL / HEMI_TESTNET_RPC_URL   default: Hemi public RPC
 #
 # Exit status: 0 if verify returns Ok with exactly BTC_FIXTURE_SATS; 1 otherwise; 2 on usage or RPC errors.
@@ -45,7 +47,7 @@ case $NET in
     VOUT=${BTC_FIXTURE_VOUT:-1}; SATS=${BTC_FIXTURE_SATS:-83050000}
     SCRIPT=${BTC_FIXTURE_SCRIPT:-0x0020ff64a4670b85c23ef392a5be0f0ff40d4024de223d4f7242d707714b44e012c4}
     HEIGHT=${BTC_FIXTURE_HEIGHT:-975189}
-    TIP_URL=${BTC_TIP_URL-https://api.blockcypher.com/v1/btc/main}
+    TIP_URL=${BTC_TIP_URL-https://btcscan.org/api/blocks/tip/height https://api.blockcypher.com/v1/btc/main}
     ;;
   testnet)
     CHAIN_ID=743111; RPC=${HEMI_TESTNET_RPC_URL:-https://testnet.rpc.hemi.network/rpc}
@@ -126,12 +128,18 @@ if [ -n "$hbk_conf" ]; then
   hvm_view=$((last - HEIGHT + 1))
   echo "   vs hVM's header: hBK $hbk_conf - (lastHeader $last - $HEIGHT + 1 = $hvm_view) = $((hbk_conf - hvm_view))"
   if [ -n "$TIP_URL" ]; then
-    tip=$(curl -fsS --max-time 20 "$TIP_URL" 2>/dev/null | jq -r '.height // empty' 2>/dev/null || true)
-    if [[ $tip =~ ^[0-9]+$ ]]; then
+    tip="" tip_src=""
+    for u in $TIP_URL; do # space-separated: the first that answers with a height wins
+      body=$(curl -fsS --max-time 20 "$u" 2>/dev/null || true)
+      if [[ $body =~ ^[0-9]+$ ]]; then tip=$body; else tip=$(jq -r '.height // empty' <<<"$body" 2>/dev/null || true); fi
+      if [[ $tip =~ ^[0-9]+$ ]]; then tip_src=$(printf '%s' "$u" | sed -E 's#^([a-z]+://[^/]+).*#\1#'); break; fi
+      tip=""
+    done
+    if [ -n "$tip" ]; then
       btc_conf=$((tip - HEIGHT + 1))
-      echo "   vs Bitcoin:      hBK $hbk_conf - (tip $tip - $HEIGHT + 1 = $btc_conf) = $((hbk_conf - btc_conf))   (tip from $(printf '%s' "$TIP_URL" | sed -E 's#^([a-z]+://[^/]+).*#\1#'))"
+      echo "   vs Bitcoin:      hBK $hbk_conf - (tip $tip - $HEIGHT + 1 = $btc_conf) = $((hbk_conf - btc_conf))   (tip from $tip_src)"
     else
-      echo "   vs Bitcoin:      skipped, $TIP_URL did not answer with a height"
+      echo "   vs Bitcoin:      skipped, no tip source answered with a height ($TIP_URL)"
     fi
   else
     echo "   vs Bitcoin:      skipped (BTC_TIP_URL empty)"

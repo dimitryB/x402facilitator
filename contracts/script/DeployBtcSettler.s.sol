@@ -17,9 +17,10 @@ library BtcSettlerCanonical {
     address internal constant SETTLER_MAINNET = 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875;
     address internal constant SETTLER_TESTNET = 0xD2B2fc8093f8A734c42B90762FD2B2F8464631af;
 
-    /// hBK's confirmation count minus Bitcoin's. Measured 0 on mainnet on 2026-11-09 against
-    /// BlockCypher's tip (check-btc-live.sh). Testnet runs the same hVM; its offset could not be
-    /// measured against a testnet3 explorer from here and is taken to be the same.
+    /// hBK's confirmation count minus Bitcoin's. Measured 0 on mainnet on 2026-11-09 in every sample,
+    /// against the tips of btcscan.org, a mempool instance and BlockCypher (docs/phase2/contracts.md,
+    /// A-2). Testnet runs the same hVM; no testnet3 explorer was reachable to measure it, so it is
+    /// taken to be the same.
     uint32 internal constant CONFIRMATION_OFFSET_MAINNET = 0;
     uint32 internal constant CONFIRMATION_OFFSET_TESTNET = 0;
 
