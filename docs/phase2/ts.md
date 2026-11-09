@@ -1,5 +1,18 @@
 # Phase 2, stream C: TypeScript scheme, seller, buyer, spec, e2e
 
+> **Derivation vectors (three-level rule): `btc/test-vectors.json`, committed in `6607a91e08126264435a616ce11994b0d7d9c7b0`** on branch `claude/optimistic-meninsky-f0b705`, unchanged since. For the DESIGN.md xpub and paymentId `00112233445566778899aabbccddeeff`:
+>
+> | Field | Value |
+> |------|------|
+> | `d` | `e80b56898eea12e8d2dd25c6383febd6420c1778109fdab78b7cf292ba56fb6b` |
+> | `i1`, `i2`, `i3` | `1745573513`, `250221288`, `1390224838` |
+> | child pubkey | `03cbeecf22bec0774f9ae6b06429bcb4c5eea85ba699380ad18ae8ab2cebc9de4b` |
+> | p2wpkh | `0014c482e024e462c29003546a2f35eaa3d61daa46d2`, `bc1qcjpwqf8yvtpfqq65dghnt64r6cw653kjs6yrca` |
+> | p2tr | `51208eb728a9b5fe85439644bf97a42ca3f1fcdff8709096b3bee0147becb32743d3`, `bc1p36mj32d4l6z589jyh7t6gt9r787dl7rsjztt80hqz3a7eve8g0fsyhls8v` |
+> | `paymentRef` | `0xa8faed6abbf35c12a4b26e40f6feb19d736d90045c83b9f9a31f638d323e6811` |
+>
+> The testnet3 case uses `tpubDC8msFGeGuwnKG9Upg7DM2b4DaRqg3CUZa5g8v2SRQ6K4NSkxUgd7HsL2XVWbVm39yBA4LAxysQAm397zwQSQoQgewGiYZqrA9DsP4zbQ1M` (`m/84'/1'/0'` of the same mnemonic). Its p2wpkh address is `tb1qakyl8vdjmkzr7a99ylf7jx9axh4f43u4znf3lq`, with script `0014ed89f3b1b2dd843f74a527d3e918bd35ea9ac795`; the p2tr address is `tb1pnzwq4w85mtxz5rvyu6rqelglju3xj0papu85x70d040gqe2hrjgs2gk439`. The file holds 16 vectors in all plus rejection cases.
+
 Stream C of `docs/phase2/DESIGN.md`, on branch `claude/optimistic-meninsky-f0b705`. Decisions are numbered TS-1 onward for the integration session to fold into `DECISIONS.md`. Nothing here sent a transaction to any live network; the only network reads were GitHub (the x402 spec, hBK's struct, the sibling branches) and the npm registry.
 
 ## What landed
