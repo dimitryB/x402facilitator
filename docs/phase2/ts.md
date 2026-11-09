@@ -79,10 +79,14 @@ The default timeout is 3600 as the brief says. DESIGN.md's scheme table says 720
 
 **TS-17. `E2E_PORT_OFFSET` lets two worktrees run the e2e suite at once.** Streams B and C both ran `npm test -w tests` today and collided. The suite's ports (38080, 38545, 38546) and compose project `hemi-x402-tests` are fixed, and its setup runs `docker compose down` on that project, which tears down whatever another worktree has up. With `E2E_PORT_OFFSET=100` the ports are 38180, 38645 and 38646 and the project is `hemi-x402-tests-100`; unset, nothing changes.
 
-**It does not work on the spike machine as it is now.** Colima's Lima host agent fails every `ssh -O forward` and `ssh -O cancel` it runs (exit 255 in `~/.colima/_lima/colima/ha.stderr.log`). A container port that was not forwarded before never reaches the host, so a run with offset 100 timed out waiting for `/supported` on 38180. Only 38080, forwarded through the long-lived ssh mux, works. On a Colima whose forwarder works, or Docker Desktop, the offset is fine.
+**It does not work reliably on the spike machine as it is now.** Colima's Lima host agent often fails the `ssh -O forward` / `-O cancel` calls it runs against its ssh mux (exit 255 in `~/.colima/_lima/colima/ha.stderr.log`). The same `-O forward` run by hand succeeds. A run with offset 100 timed out waiting for `/supported` on 38180, which was never forwarded. On a Colima whose forwarder works, or Docker Desktop, the offset is fine.
 
 Two traps showed up along the way:
-- The 38080 forward stays after the container is gone, because the cancel fails too, which trips the setup's port guard. It can be freed by hand when nothing in the VM listens (`colima ssh -- ss -ltn | grep :38080` is empty): `ssh -S ~/.colima/_lima/colima/ssh.sock -O cancel -L 127.0.0.1:38080:127.0.0.1:38080 lima-colima`.
+- The same flakiness affects 38080:
+  - A failed cancel leaves the forward on the host after the container is gone, which trips the setup's port guard.
+  - A failed add after a cancel leaves the facilitator unreachable.
+  - Stream C cancelled the stale forward twice to start runs. Both times Lima added it back for the next container, but the third time it did not, and stream C re-added it by hand: `ssh -S ~/.colima/_lima/colima/ssh.sock -O forward -L 127.0.0.1:38080:127.0.0.1:38080 lima-colima`.
+  - The forward is present now, as it was when this session started. Restarting Colima would reset the forwarder, but it stops every container on the machine.
 - When the global setup throws, vitest 5 prints only "No test files found" and a `code.charCodeAt is not a function` TypeError from vite's source-map code; the real message is lost. Running the setup alone with tsx shows it.
 
 ## Commands and outputs
@@ -212,11 +216,12 @@ Neither sibling branch changes `scripts/fork.sh` yet.
 
 ### Open points
 
-- **Stream B releasing a claim after a pre-broadcast rejection.** The e2e settles the same `(txid, vout)` after an `…_unconfirmed` settle, which the buyer's polling also relies on. If B kept a pending record after a rejection that broadcast nothing, the second settle would get `invalid_transaction_state`. Its note suggests it does not; the e2e will tell.
+- **Stream B releasing a claim after a pre-broadcast rejection:** confirmed by the pre-flight. A settle answered `…_unconfirmed` and then settled the same `(txid, vout)` once the confirmations were there, directly and through the stock seller engine.
 - **The Hemi settle hash in the success body.** Stream B omits `extra.settlementTransaction`, which needs a proto change. The seller and buyer read it if present (`extra` or `extensions`) and otherwise say it is in the facilitator log and the `Settled` event.
 - **Stream A's mainnet `Output` has 8 members.** `mock-hbk.ts` encodes `setTx` with the 8-member struct and uses `setConfirmations` for new blocks. If the mock's ABI changes, only that file changes.
 - **Earliest acceptance is about 3 Bitcoin confirmations on mainnet**, because hVM's last header lags the tip by two blocks. That holds whatever `minConfirmations` says. The spec, both READMEs and the buyer's retry set reflect it. A live run should use `--poll 60` or more and `maxTimeoutSeconds` of at least 3600.
-- **`invalid_payload` status for a malformed bip122 payload.** The e2e expects 400, as stream B states.
+- **`invalid_payload` status for a malformed bip122 payload:** 400, confirmed by the pre-flight.
+- **The mainnet fork's mock `setTx` sometimes is not mined while the facilitator runs:** see "Pre-flight" at the end of this file.
 - **A live mainnet payment needs the owner's go.** The buyer's wallet path (`BUYER_BTC_WIF` or `_MNEMONIC`, `ALLOW_MAINNET=yes`) has run only against faked Esplora answers in unit tests; nothing was broadcast. A few dollars covers the 1000-sat default price plus a 1-input, 2-output fee.
 
 ## Proposed README text
@@ -276,4 +281,41 @@ The 116 are the existing tests, the same count as the README's last result. The 
 Two attempts before this one never got past the global setup, and both were collisions:
 - The first used the default ports while stream B's run held them.
 - The second used `E2E_PORT_OFFSET=100`, whose port 38180 Colima could not forward (TS-17).
+
+### Pre-flight of `11-btc-l1` against streams A and B (not merged)
+
+The test file ran unchanged against the siblings' real work, on this machine's forks, with nothing merged and nothing committed for the run:
+- stream B's `hemi-x402-facilitator:e75adda-hemi.15` image, with B's staged `docker-compose.yml` and `facilitator/config.json`;
+- stream A's `MockBitcoinKit`, `HbkTestnetAdapter` and `X402BtcSettler` from `41a73b4`.
+
+A throwaway script (`.scratch/preflight/run.sh`, git-ignored) did the wiring that `scripts/fork.sh` will do:
+1. Bring up both forks.
+2. `anvil_setCode` the mock at both hBK addresses.
+3. Deploy the settler on each fork with SETTLER = the fork signer and offset 0; on testnet, deploy the adapter first.
+4. Start the facilitator with `X402_BTC_SETTLER_*` set to those settlers.
+5. Swap stream A's `shared/hemi.json` in for the run; the trap restored ours.
+
+It used vitest with no global setup and the verbose reporter. `/supported` listed both bip122 kinds with `extra` `{asset, assetTransferMethod, paymentFlow, addressTypes, minConfirmations{default,floor,ceiling}, settler, hemiNetwork}`.
+
+```
+ Test Files  1 failed (1)
+      Tests  1 failed | 30 passed (31)
+   Duration  258.78s
+ × exact on bip122:000000000019d6689c085ae165831e93 (eip155:43111 fork) > an output index past the end -> …_vout 180005ms
+```
+
+All the rest passed on both forks. That covers:
+- verify and settle with the Bitcoin txid, `settledBy == paymentRef` and the `Settled` event fields;
+- replay;
+- the confirmations boundary, then success on the same payload, so stream B releases its claim after a rejection that broadcast nothing;
+- unknown txid, the wrong paymentId's address and the decoy output, one sat short, overpaying, p2tr;
+- the other network's key, `minConfirmations` 1000, and malformed payloads (HTTP 400);
+- the stock seller engine: 402 `…_unconfirmed`, served once after the confirmation, then 402 `invalid_transaction_state`.
+
+**Integration item: the mainnet "vout past the end" case timed out in both runs.** The testnet twin passed in 4 s. What is known:
+- No `/verify` reached the facilitator in that window.
+- A probe with the stack up then timed out on the very first mock `setTx` on a fresh mainnet fork. anvil returned the hash and never mined it.
+- On a mainnet fork without the facilitator, five `setTx` calls mined in about 2 s each, even after moving the fork clock to now. `settler.verify` for vout 5 answered `OutputNotFound` in 1 ms.
+
+So the contracts and the TS seeding behave on their own. Something in the full stack sometimes stops anvil from mining the impersonated `setTx` on the mainnet fork. The likeliest cause is anvil waiting on the rate-limited public Hemi RPC for uncached storage at the real hBK address while the facilitator also reads through the fork. The fix belongs in the fork wiring, for example a dedicated upstream for the mainnet fork. If that does not settle it, the mock could keep its state where no upstream lookup is needed. The vout check itself passed on testnet and in the stream A interface check above.
 
