@@ -44,7 +44,7 @@ What must be deployed before stock x402-rs will start a chain. `assert_contracts
 | EIP-6492 validator | deploy | deploy | replay x402-rs's original CREATE2 call (D-006) |
 | x402 exact proxy | deploy | deploy | reference repo's committed initCode via `0x4e59…` (D-005) |
 
-Every deployment lands at the canonical address, so stock x402-rs, stock TS buyers and the stock proxy all work with no fork. Mainnet deployments wait for an explicit go. The estimated cost is in D-005.
+Every deployment lands at the canonical address, so stock x402-rs, stock TS buyers and the stock proxy all work with no fork. The mainnet deployments waited for an explicit go and ran on 2026-11-04 (D-029). The estimated cost is in D-005.
 
 ## D-002. RPC reachability and the local network
 
