@@ -55,13 +55,15 @@ import {
 const SATS = 1_000n;
 
 // ---- What this run can test: decided once, before any test is collected. ----
+let supportedError = "";
 const kinds = await supported().then(
   r => r.body.kinds.filter(k => k.scheme === "exact" && k.network.startsWith("bip122:")),
-  () => [],
+  e => ((supportedError = String(e)), []),
 );
 const forks = new Map<BtcNetwork, BtcFork>();
 const skipReasons: string[] = [];
-if (kinds.length === 0) skipReasons.push("the facilitator's /supported lists no exact kind on bip122:* (stream B not in this image)");
+if (supportedError) skipReasons.push(`GET ${FACILITATOR_URL}/supported failed: ${supportedError}`);
+else if (kinds.length === 0) skipReasons.push("the facilitator's /supported lists no exact kind on bip122:* (stream B not in this image)");
 for (const network of BTC_NETWORKS_UNDER_TEST) {
   const kind = kinds.find(k => k.network === network);
   if (!kind) continue;
@@ -69,7 +71,8 @@ for (const network of BTC_NETWORKS_UNDER_TEST) {
   if (typeof fork === "string") skipReasons.push(`${network}: ${fork}`);
   else forks.set(network, fork);
 }
-if (skipReasons.length > 0) console.warn(`[11-btc-l1] skipping: ${skipReasons.join("; ")}`);
+// Straight to stderr: vitest drops console output from a file whose tests are all skipped.
+if (skipReasons.length > 0) process.stderr.write(`[11-btc-l1] skipping: ${skipReasons.join("; ")}\n`);
 
 /** The payment address of `requirements` (from accepted.extra.paymentId, as the facilitator derives it). */
 function addressOf(requirements: PaymentRequirements) {

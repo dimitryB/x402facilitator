@@ -79,8 +79,10 @@ The default timeout is 3600 as the brief says. DESIGN.md's scheme table says 720
 
 **TS-17. `E2E_PORT_OFFSET` lets two worktrees run the e2e suite at once.** Streams B and C both ran `npm test -w tests` today and collided. The suite's ports (38080, 38545, 38546) and compose project `hemi-x402-tests` are fixed, and its setup runs `docker compose down` on that project, which tears down whatever another worktree has up. With `E2E_PORT_OFFSET=100` the ports are 38180, 38645 and 38646 and the project is `hemi-x402-tests-100`; unset, nothing changes.
 
+**It does not work on the spike machine as it is now.** Colima's Lima host agent fails every `ssh -O forward` and `ssh -O cancel` it runs (exit 255 in `~/.colima/_lima/colima/ha.stderr.log`). A container port that was not forwarded before never reaches the host, so a run with offset 100 timed out waiting for `/supported` on 38180. Only 38080, forwarded through the long-lived ssh mux, works. On a Colima whose forwarder works, or Docker Desktop, the offset is fine.
+
 Two traps showed up along the way:
-- Colima's ssh mux kept forwarding 127.0.0.1:38080 for minutes after the container was gone, which trips the setup's port guard.
+- The 38080 forward stays after the container is gone, because the cancel fails too, which trips the setup's port guard. It can be freed by hand when nothing in the VM listens (`colima ssh -- ss -ltn | grep :38080` is empty): `ssh -S ~/.colima/_lima/colima/ssh.sock -O cancel -L 127.0.0.1:38080:127.0.0.1:38080 lima-colima`.
 - When the global setup throws, vitest 5 prints only "No test files found" and a `code.charCodeAt is not a function` TypeError from vite's source-map code; the real message is lost. Running the setup alone with tsx shows it.
 
 ## Commands and outputs
