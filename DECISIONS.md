@@ -1476,6 +1476,37 @@ Under the same attack the victim's first settle succeeded; the attackers got `re
 
 The critic could not run the Rust unit tests itself (no cargo on the machine), any live settle (forbidden), or open the explorers (the ISP filter, D-034).
 
+## D-038. Security audit of X402BtcSettler before the mainnet deployment
+
+Dimitry stopped the mainnet deployment simulation on 2026-11-09 and asked for a security audit of the contract first. Nothing had been sent: the settler address had no code and the deployer's nonce was unchanged. A fresh-context auditor read `X402BtcSettler.sol`, `IHbkReader.sol`, `HbkTestnetAdapter.sol`, `DeployBtcSettler.s.sol`, `deploy-btc.sh`, the tests and the Rust caller, with Hemi's hBK source beside them, wrote 19 scratch tests, and read raw answers from the live mainnet hBK for three real Bitcoin transactions. It could not broadcast or read `.env`.
+
+**Nothing above low in the contracts.** What it checked and found sound, with its evidence:
+
+- **External calls:** the runtime bytecode has two `STATICCALL`s and one `SSTORE`; the write precedes the event; no payable function, `receive` or `fallback` (an ETH send reverts).
+- **The hand-rolled decoding** of hBK's `getSpecificTxOutput` answer: every bound traced (`base + 256 ≤ len`, `base + scriptOffset + 32 ≤ len`, `scriptPos + 32 + scriptLength ≤ len`), no underflow; 256 fuzzed raw answers and offsets into the head never revert; an empty successful answer is `HbkError`; both the live eight-word head and the source's ten-word layout decode; script equality is length plus keccak over the returned bytes plus `containsFullScript` and `fullScriptLength`, so a prefix of a cut script cannot match.
+- **Live hBK behaviour, replayed from captured raw answers:** for `8bae12b5…5684`, vout 0 is `OP_RETURN "charley loves heidi"` and verifies as `OpReturn`, vout 1 a P2PKH of 200000 sats verifies `Ok` and `BelowAmount` at 200001, so OP_RETURN outputs are indexed and vout numbering matches Bitcoin's; for `54e48e5f…e713` (948 outputs), vout 0's 201-byte script comes back cut to 64 with `containsFullScript` false (`ScriptMismatch`) and vout 32 panics `0x32` live, so the 32-output cap behaves as modelled.
+- **Integers:** `outValue > uint64.max` is `HbkError` (both sides of the boundary tested); `hbkConf > OFFSET ? … : 0` cannot underflow; the confirmation word is width-checked; `uint32.max` handled.
+- **The record:** written only on `Ok`, which requires `settledBy == 0`, so it can be neither overwritten nor undone, even by `SETTLER`; a zero `paymentRef` is refused; keyed by `(txid, vout)`.
+- **Access control:** `settle` gated on the immutable `SETTLER`; nothing else mutates state; no owner, no upgrade path.
+- **hBK availability:** `0x7007…8F12` is 8415 bytes of code with no `DELEGATECALL` and zero EIP-1967 slots, so not a proxy. A pause, revert, empty answer or changed revert string degrades to `HbkError`, where `settle` reverts and nothing is consumed.
+- **txid byte order:** display order end to end (Rust `settler.rs`, `types.rs`; hBK), the reversed order being `TxNotFound`.
+- **The Rust decoding** reads the verdict as `uint8`, and values ≥ 9 become `Unknown` → `unexpected_*_error`, never success; selectors match; startup asserts `SETTLER()` is a configured signer.
+- **CREATE2 and the deployment:** the address is `keccak(0xff ‖ deployer ‖ salt ‖ keccak(initcode))` through Arachnid's deployer, which binds nothing to the sender, so a front-runner can only put the identical code at the identical address, which the script then skips and post-checks; no metadata, pinned solc and optimizer make the initcode reproducible; the constructor rejects zero and code-less addresses; chain id, deployer codehash and `CONFIRM_MAINNET_DEPLOY=yes` are checked in the script and the shell. Hemi mainnet executes Cancun (a state-override `eth_call` with `PUSH0` and `MCOPY` succeeded), which the settler's runtime uses.
+
+**Findings, all low or informational, and what was done:**
+
+| # | Finding | Outcome |
+|------|------|------|
+| L-1 | A settle forwards all gas to hBK, whose cost grows with the Bitcoin transaction's size: 133604 gas for the 2-output fixture, 909400 for a 948-output transaction, roughly 15M extrapolated for a 400 kB one, under Hemi's 30M block limit. The buyer chooses the transaction, so it chooses the facilitator's gas within that bound, under a cent at Hemi prices | Accepted; noted in README limits |
+| L-2 | The Rust scheme never reads `settledBy`: `AlreadyConsumed` is always `invalid_transaction_state`. After a facilitator restart, a buyer whose settle succeeded on chain but whose answer was lost gets a final error (charged, not served) although the contract shows `settledBy == sha256(paymentId)`. Answering success there is the replay-versus-restart trade-off B-5 chose | Left as B-5 decided; recorded as a limit, candidate for a later patch |
+| L-3 | A settle that reverts in the block with `NotPayable(TooFewConfirmations)` (the builder's hBK count behind the `eth_call` node's) is `invalid_transaction_state`, final for the buyer, though nothing was consumed and a retry would pass | Recorded as a limit, candidate for a later patch mapping that revert to `…_unconfirmed` |
+| I-1 | Any `Panic(0x32)` from hBK is `OutputNotFound`, including a truncated precompile answer inside hBK's own parser; never a wrong `Ok` | No change |
+| I-2 | `deploy-btc.sh` splits `.env` lines on the first `=` and keeps quotes; a URL with `=` in its query would be cut, loudly | No change |
+| I-3 | Test gaps, all covered by the auditor's scratch tests: short and wide confirmation answers, hBK becoming an EOA, the exact 64-byte script accepted and a 65-byte one rejected, inconsistent `containsFullScript`/`fullScriptLength`, `SETTLER` cannot overwrite a record, a revert payload with trailing bytes is `HbkError` | **Ported** into `contracts/test/X402BtcSettlerAudit.t.sol` and `X402BtcSettlerLiveReplay.t.sol` (the captured hBK answers as constants); `forge test` now 85 passed |
+| I-4 | Accepted limits to keep documented: a compromised `SETTLER` key can mark outputs consumed with a bogus ref (griefing, no funds, redeploy to fix); a Bitcoin reorg after settle leaves the record; with hVM's lag the floor is about 3 confirmations today, but the lag moves; payments at vout ≥ 32 or with scripts over 64 bytes are unverifiable | In README limits |
+
+The contract is deployed unchanged by this audit. The deployment itself waits for a new go.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

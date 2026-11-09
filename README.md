@@ -348,7 +348,7 @@ Latest results, from 2026-11-09 on hemi.15 with the phase 2 streams merged (D-03
 | Suite | Result |
 |------|------|
 | `npm test -w tests` | 14 files, 147 tests passed, 0 failed (565 s): the 116 existing tests plus the 31 of `11-btc-l1` |
-| `forge test` | 66 passed, 0 failed (17 existing, 49 for `X402BtcSettler`, its adapter, mock and deployment) |
+| `forge test` | 85 passed, 0 failed (17 existing, 49 for `X402BtcSettler`, its adapter, mock and deployment, 19 ported from the security audit, D-038) |
 | `npm test -w btc` | 90 passed, 0 failed |
 | `buyer/demo-fork.sh` | all five payments settled, the fifth being 1000 sats of fabricated BTC on the mainnet fork through the mock hBK and `X402BtcSettler`; payTo received exactly the price each time. Before patch 0022, hemi.9 settled all four in 20 of 20 runs |
 
@@ -395,3 +395,4 @@ Latest results, from 2026-11-09 on hemi.15 with the phase 2 streams merged (D-03
 - **Bitcoin L1 reorganisations:** a payment accepted at 1 confirmation can be reorganised out of Bitcoin. The consumption record can be reorganised out of Hemi before PoP finality. `minConfirmations` and idempotent handlers per paymentId are the levers.
 - **Bitcoin L1 settle hash:** the success response carries the Bitcoin txid. The Hemi settle transaction is in the facilitator log and the settler's `Settled` event, not yet in the response.
 - **Bitcoin L1 on mainnet:** the settler is not deployed and no live Bitcoin payment has run; both wait for an explicit go (D-036).
+- **Bitcoin L1 settler, audited (D-038):** nothing above low. Known and accepted: a settle's gas grows with the Bitcoin transaction's size (about 134k gas for 2 outputs, 909k for 948, under a cent on Hemi), chosen by the buyer; a compromised `SETTLER` key could mark outputs consumed with a bogus reference, a griefing that puts no funds at risk and needs a redeploy; payments at output index 32 or later, or with a script over 64 bytes, cannot be verified through hBK. Two facilitator-side limits remain for a later patch: after a facilitator restart a settle that succeeded on chain but whose answer was lost is reported as a replay although the contract's `settledBy` would identify it, and a settle that reverts in the block because the builder's hBK count lagged the `eth_call` node's is final for the buyer although a retry would pass.
