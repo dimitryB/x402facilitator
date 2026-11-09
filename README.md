@@ -4,7 +4,7 @@ An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hem
 
 It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and thirty small patches. Eighteen make its error responses match the x402 v2 spec, one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018), and nine keep a settlement's outcome correct under load and when RPCs stall, lag or fail (D-019 to D-025), and two add phase 2: native Bitcoin L1 payments verified through Hemi's hBK (D-036). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
-**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). On 2026-11-04 live mainnet payments settled in USDC.e, in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031), and in hemiBTC, in [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27) (D-032). Phase 2, native BTC paid on Bitcoin L1 and verified through hBK in a Hemi contract, is built and tested on forks (D-036); its contract is not yet deployed on mainnet and no live Bitcoin payment has run. See [Definition of done](#definition-of-done).
+**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). On 2026-11-04 live mainnet payments settled in USDC.e, in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031), and in hemiBTC, in [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27) (D-032). Phase 2, native BTC paid on Bitcoin L1 and verified through hBK in a Hemi contract, is built and tested on forks (D-036), audited (D-038), and its settler contract is deployed on Hemi mainnet (D-039); no live Bitcoin payment has run yet. See [Definition of done](#definition-of-done).
 
 | Path | What it is |
 |------|------|
@@ -47,7 +47,7 @@ The same addresses on both networks. Each contract is replayed from its original
 | EIP-6492 validator | `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` | deployed 2026-11-04, [tx](https://explorer.hemi.xyz/tx/0x9d5d7876579c12f86440bd2e74750bb0748b9d4a07a9836c69bbe6332aa0721e) | deployed 2026-10-29, [tx](https://testnet.explorer.hemi.xyz/tx/0xec5e69e3ee1a477a54df8b549d5191b8ecb0761bf43b2d7df0db8055929c740e) |
 | Multicall3 | `0xcA11bde05977b3631167028862bE2a173976CA11` | present | present |
 | hBK (Hemi Bitcoin Kit), read by the settler | `0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12` (mainnet), `0xeC9fa5daC1118963933e1A675a4EEA0009b7f215` (testnet) | present (Hemi's) | present (Hemi's, different ABI) |
-| X402BtcSettler (phase 2) | `0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f` (mainnet), `0x56AdDfcC77b087D9101ddEE8D3A38e95E0A365B0` (testnet) | predicted, not deployed: needs the go | predicted, not deployed |
+| X402BtcSettler (phase 2) | `0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f` (mainnet), `0x56AdDfcC77b087D9101ddEE8D3A38e95E0A365B0` (testnet) | deployed 2026-11-09, [tx](https://explorer.hemi.xyz/tx/0xeaef24d99180b27b9cc541d52f51f44a3760e60f20c00011dd360bbe2e101ae1) (D-039) | predicted, not deployed: testnet's hBK could not be shown to work |
 
 Assets (source: Hemi's token list, which feeds the tunnel UI, plus on-chain reads; D-007, D-008):
 
@@ -294,12 +294,12 @@ The mainnet facilitator needs two contracts that Hemi mainnet lacked: the x402 e
    ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet
    ```
 
-**Mainnet transactions run so far:** the deployment and two payments. The deployment ran on 2026-11-04 from `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875`, and both of its transactions succeeded (D-029):
+**Mainnet transactions run so far:** the deployment, two payments, and the phase 2 settler. The deployment ran on 2026-11-04 from `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875`, and both of its transactions succeeded (D-029):
 
 - EIP-6492 validator: [`0x9d5d7876…0721e`](https://explorer.hemi.xyz/tx/0x9d5d7876579c12f86440bd2e74750bb0748b9d4a07a9836c69bbe6332aa0721e)
 - x402 exact Permit2 proxy: [`0x237bd41c…2ec79`](https://explorer.hemi.xyz/tx/0x237bd41c34b314dfa686311685bde4dbfe63e4c5becd66293a91198aa182ec79)
 
-Step 4's read-only checks passed on both chains and sent nothing (D-030).
+Step 4's read-only checks passed on both chains and sent nothing (D-030). Phase 2's `X402BtcSettler` was deployed on 2026-11-09 in [`0xeaef24d9…1ae1`](https://explorer.hemi.xyz/tx/0xeaef24d99180b27b9cc541d52f51f44a3760e60f20c00011dd360bbe2e101ae1), for 0.0000051 ETH (D-039).
 
 **Mainnet payments**, both on 2026-11-04 from buyer `0x35C8…3786` to payTo `0x647C…866f`. Each was a single `Transfer` of the price, and the facilitator paid only the gas and held no tokens:
 
@@ -394,5 +394,5 @@ Latest results, from 2026-11-09 on hemi.15 with the phase 2 streams merged (D-03
 - **Bitcoin L1 payment addresses** are random descendants of the seller's xpub, so wallets do not find them by scanning. The seller must keep each paymentId to spend the funds.
 - **Bitcoin L1 reorganisations:** a payment accepted at 1 confirmation can be reorganised out of Bitcoin. The consumption record can be reorganised out of Hemi before PoP finality. `minConfirmations` and idempotent handlers per paymentId are the levers.
 - **Bitcoin L1 settle hash:** the success response carries the Bitcoin txid. The Hemi settle transaction is in the facilitator log and the settler's `Settled` event, not yet in the response.
-- **Bitcoin L1 on mainnet:** the settler is not deployed and no live Bitcoin payment has run; both wait for an explicit go (D-036).
+- **Bitcoin L1 on mainnet:** the settler is deployed at `0x9Df0…ab9f` and the facilitator lists the scheme live (D-039), but no live Bitcoin payment has run; that waits for an explicit go.
 - **Bitcoin L1 settler, audited (D-038):** nothing above low. Known and accepted: a settle's gas grows with the Bitcoin transaction's size (about 134k gas for 2 outputs, 909k for 948, under a cent on Hemi), chosen by the buyer; a compromised `SETTLER` key could mark outputs consumed with a bogus reference, a griefing that puts no funds at risk and needs a redeploy; payments at output index 32 or later, or with a script over 64 bytes, cannot be verified through hBK. Two facilitator-side limits remain for a later patch: after a facilitator restart a settle that succeeded on chain but whose answer was lost is reported as a replay although the contract's `settledBy` would identify it, and a settle that reverts in the block because the builder's hBK count lagged the `eth_call` node's is final for the buyer although a retry would pass.

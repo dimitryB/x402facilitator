@@ -1507,6 +1507,33 @@ Dimitry stopped the mainnet deployment simulation on 2026-11-09 and asked for a 
 
 The contract is deployed unchanged by this audit. The deployment itself waits for a new go.
 
+## D-039. X402BtcSettler deployed on Hemi mainnet
+
+On Dimitry's go, after the audit (D-038), on 2026-11-09 at about 20:13Z, from the deployer and facilitator signer `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875`. The simulation ran first (estimate 0.0000051 ETH), then the broadcast, then the script's read-only post-check. Full output in `docs/spike/mainnet-btc-settler-deploy-2026-11-09.log`; forge's run files in `contracts/broadcast/DeployBtcSettler.s.sol/43111/`.
+
+```
+$ CONFIRM_MAINNET_DEPLOY=yes contracts/deploy-btc.sh mainnet --broadcast
+  X402BtcSettler HBK: 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12   SETTLER: 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875   CONFIRMATION_OFFSET: 0
+  [deploy] X402BtcSettler -> 0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f
+ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
+  https://explorer.hemi.xyz/tx/0xeaef24d99180b27b9cc541d52f51f44a3760e60f20c00011dd360bbe2e101ae1 status=0x1 gasUsed=0xbe062
+== Post-deployment check (simulation): [skip] X402BtcSettler: code already at 0x9Df0…ab9f; checks passed
+$ cast receipt 0xeaef24d9…1ae1 --rpc-url https://rpc.hemi.network/rpc
+status 0x1  block 5699044  from 0x1155…0875  to 0x4e59…956C (CREATE2 deployer)  gasUsed 778338  effectiveGasPrice 1000252  l1Fee 4280163982436  fee 5058698123612 wei
+$ cast call 0x9Df0…ab9f HBK() / SETTLER() / CONFIRMATION_OFFSET()
+0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12 / 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 / 0
+$ cast balance / cast nonce 0x1155…0875
+193589316758856 wei (fell by exactly the fee), nonce 5
+```
+
+The address is the one predicted since stream A (`shared/hemi.json`). The on-chain runtime has the same length as the compiled runtime and differs only in the 26 short runs where the three immutables sit. dRPC reset every connection from this workstation during the read-back (the hostname block of D-027 again), so the receipt was read from the public RPC only.
+
+`contracts/check-btc-live.sh mainnet` against the deployed contract: `verify` of the fixture tx `95bca029…367e` vout 1 answers `Ok`, 83050000 sats, hbkConfirmations 24, `settledBy` 0; `settle` estimates 175780 gas from the signer; offset against Bitcoin's tip 0 (against hVM's own header 2: the header lags the node's count by two blocks, as A-2 says).
+
+The facilitator then started live with `config.mainnet.json` and `X402_BTC_SETTLER_MAINNET=0x9Df0…ab9f`. `/supported` lists `exact` on `bip122:000000000019d6689c085ae165831e93` with `extra.settler` the deployed address, `hemiNetwork eip155:43111` and the confirmation policy {1, 1, 6}, with the Hemi signer for both networks; the log has no warning. It was stopped again. No `/settle` was called. `X402_BTC_SETTLER_MAINNET` is now in `.env` (a public address, appended without reading the file's other lines), so `docker compose up` serves the Bitcoin scheme on mainnet by default.
+
+Explorer verification of the settler has not run (the ISP filter, D-034); the default build has no metadata, so a full match is possible when it does. No Bitcoin payment has run; that needs a buyer wallet with real BTC, a seller xpub, and a separate go.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).
