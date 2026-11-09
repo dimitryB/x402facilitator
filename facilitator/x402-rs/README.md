@@ -77,6 +77,32 @@ cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and 
 resolve clones `aptos-core`, which is very large. `build/check-lock-subset.sh` checks that the pruned
 `Cargo.lock` only removed packages: every remaining crate keeps the version and checksum upstream locked.
 
+## Related upstream pull requests
+
+Read on 2026-11-09 (DECISIONS.md D-035). Upstream `main` is still `e75adda`, with nothing merged since
+2026-07-08. Three open PRs by `zachsplat`, stacked on one another, cover the same ground as the settlement
+patches here. They were opened on 2026-10-11, 12 and 23, before this repo's patches were written, and
+nothing here was taken from them. None of ours were submitted.
+
+| Upstream | What it does | Here | Differences that matter |
+|------|------|------|------|
+| [#138](https://github.com/x402-rs/x402-rs/pull/138), closes [#136](https://github.com/x402-rs/x402-rs/issues/136) | Keeps the hash of a broadcast transaction when the receipt wait fails, looks the receipt up three more times (1, 2 and 4 s), and answers `settlement_pending` with the hash. Same type names as ours: `MetaTransactionSendError::ReceiptUnavailable`, `X402SchemeFacilitatorError::SettlementPending` | 0006, 0028 | It answers HTTP 202; we answer 200 (0018), which is what the TS reference sends and the only status `x402-axum` reads a body from. It still resets the signer's nonce after the wait (`provider.rs`), so the next settlement may reuse the nonce of a transaction that can still mine; 0006 keeps it. Its extra lookups go through the fallback layer, where `null` from a lagging RPC counts as the answer; 0028 asks each RPC on its own |
+| [#140](https://github.com/x402-rs/x402-rs/pull/140) | An in-memory `PendingSettlementStore`, as the TS reference has: keyed by the signature's hash plus a hash of the request, 5 min TTL. An entry is recorded when a settle ends with the receipt unavailable. A retry of the same request takes the entry and is answered from the receipt, polled every second | 0011, 0016, 0020 | Its record starts when the receipt wait ends; ours starts when the settle starts. So with #140 `/verify` still passes a payment whose settlement is pending, and a second request carrying the same authorization is settled from scratch. A stock seller then runs its handler again for the same payment, which is the case 0011 was redone for. It has no equivalent of 0015, so a client that disconnects after the broadcast still cancels the settlement before anything is recorded, and no equivalent of 0016 or 0020 |
+| [#142](https://github.com/x402-rs/x402-rs/pull/142) | When a retry finds no store entry, after a restart or on another instance, reads `authorizationState` on the token and searches `eth_getLogs` for `AuthorizationUsed(from, nonce)` over the last five minutes, in calls of at most `log_query_max_blocks` (default 100). EIP-3009 only, off by default (`reconcile_used_authorizations`) | none | We have nothing like it: **Facilitator memory** in the top-level README's limits says a restart forgets pending records. Its author's own table shows why it is off by default: with it on, copies of a settled payment are answered with success for five minutes |
+
+Nothing upstream covers 0015 (a disconnect cancels the settlement), 0019 and 0025 (the tip floor), 0021 to
+0024 and 0026 to 0027 (one RPC at a time, bounded requests, the search by hash after a failed send, the
+nonce-map deadlock), or the error-shape patches 0001 to 0014, 0017 and 0018. Issue
+[#119](https://github.com/x402-rs/x402-rs/issues/119) reports the empty `network` that 0002 fills. PR
+[#116](https://github.com/x402-rs/x402-rs/pull/116) resends once on `fee cap less than base fee`, which is a
+different fee problem from 0019's.
+
+If #138 to #142 were merged, 0006, 0011, 0028 and the `handlers.rs` parts of the error-shape patches would
+conflict textually, since they touch the same lines, and 0006 and 0011 would need redoing as changes to
+theirs: keep the nonce, start the record at the settle's start, and refuse `/verify` while it is pending.
+If ours are submitted first, they should be filed against #136 and as review comments on #138 and #140,
+not as a competing series.
+
 ## Check order after the patches
 
 The spec gives an order for the exact scheme on EVM. EIP-3009 lists: signature, balance,
