@@ -18,8 +18,9 @@ via_ir = false
 cbor_metadata = false
 bytecode_hash = "none"
 ffi = false
-# DeployHemi.s.sol reads the committed deployment calldata with vm.readFile.
-fs_permissions = [{ access = "read", path = "./deploy-data" }]
+# DeployHemi.s.sol reads the committed deployment calldata with vm.readFile. The BTC settler tests read
+# shared/hemi.json to check that its predicted addresses match DeployBtcSettler.s.sol.
+fs_permissions = [{ access = "read", path = "./deploy-data" }, { access = "read", path = "../shared/hemi.json" }]
 
 # Explorer verification only (verify.sh). The deployed proxy bytecode was built
 # with CBOR metadata (an IPFS hash), so the verification build must append CBOR
