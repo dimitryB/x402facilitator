@@ -9,6 +9,7 @@ import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { ExactEvmScheme } from "@x402/evm/exact/client";
 import { authorizationTypes, permit2WitnessTypes, PERMIT2_ADDRESS, type ClientEvmSigner } from "@x402/evm";
 import type { HemiAsset, HemiNetwork } from "@hemi-x402/shared";
+import { btcPayload, newPaymentId, type AddressType, type BtcNetwork, type BtcOutputRef } from "@hemi-x402/btc";
 
 /** Same `extra` as seller/server.ts: Permit2 assets name the method; EIP-3009 assets carry the EIP-712 domain. */
 export function requirementsFor(
@@ -29,6 +30,43 @@ export function requirementsFor(
     payTo,
     maxTimeoutSeconds: 300,
     extra,
+  };
+}
+
+/**
+ * Requirements for native BTC on Bitcoin L1 as seller/server.ts advertises them (ExactBtcServerScheme):
+ * `payTo` the account xpub/tpub, amount in sats, and a fresh `extra.paymentId` unless one is given.
+ */
+export function btcRequirementsFor(
+  network: BtcNetwork,
+  xpub: string,
+  sats: bigint,
+  options: { paymentId?: string; addressType?: AddressType; minConfirmations?: number; maxTimeoutSeconds?: number } = {},
+): PaymentRequirements {
+  return {
+    scheme: "exact",
+    network,
+    asset: "BTC",
+    amount: sats.toString(),
+    payTo: xpub,
+    maxTimeoutSeconds: options.maxTimeoutSeconds ?? 3600,
+    extra: {
+      assetTransferMethod: "utxo",
+      paymentFlow: "upfront",
+      addressType: options.addressType ?? "p2wpkh",
+      minConfirmations: options.minConfirmations ?? 1,
+      paymentId: options.paymentId ?? newPaymentId(),
+    },
+  };
+}
+
+/** The payload a buyer sends after paying `requirements` with output `ref`: `accepted` is the requirements. */
+export function btcPayment(requirements: PaymentRequirements, ref: BtcOutputRef): PaymentPayload {
+  return {
+    x402Version: 2,
+    resource: { url: "http://seller.e2e.local/echo", description: "e2e test resource", mimeType: "application/json" },
+    accepted: structuredClone(requirements),
+    payload: btcPayload(ref),
   };
 }
 

@@ -7,6 +7,11 @@
 # and the seller; then pays GET /echo four times (testnet and mainnet fork, USDC.e and the BTC
 # asset), prints payTo's balances, and tears everything down on exit.
 #
+# If the facilitator serves `exact` on Bitcoin mainnet (bip122, phase 2), a fifth payment is native BTC on
+# Bitcoin L1: the buyer's --stub-pay writes a fabricated Bitcoin transaction into the mock hBK that
+# scripts/fork.sh places on the mainnet fork, and the facilitator verifies and settles it there through
+# X402BtcSettler. Nothing goes to Bitcoin. Otherwise that payment is skipped with a note.
+#
 # Environment (all optional):
 #   FORK_TESTNET_PORT (28545)  FORK_MAINNET_PORT (28546)  FORK_STATE_DIR (.scratch/fork-demo)
 #   FORK_BLOCK_TESTNET (7094000)  FORK_BLOCK_MAINNET (5614300)   pinned fork blocks, as in tests/lib/env.ts;
@@ -14,6 +19,7 @@
 #   FORK_TESTNET_UPSTREAM / FORK_MAINNET_UPSTREAM   passed to scripts/fork.sh
 #   FACILITATOR_PORT (28080)  SELLER_PORT (24021)  DEMO_PROJECT (hemi-x402-demo, the compose project)
 #   DEMO_PAY_TO (anvil account #4)
+#   DEMO_BTC_XPUB (the BIP84 test mnemonic's account xpub from btc/test-vectors.json; public test data)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -27,6 +33,8 @@ FACILITATOR_PORT=${FACILITATOR_PORT:-28080}
 SELLER_PORT=${SELLER_PORT:-24021}
 PROJECT=${DEMO_PROJECT:-hemi-x402-demo}
 PAY_TO=${DEMO_PAY_TO:-0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65}
+BTC_XPUB=${DEMO_BTC_XPUB:-$(jq -r '.vectors[0].payTo' "$ROOT/btc/test-vectors.json")}
+BTC_MAINNET=bip122:000000000019d6689c085ae165831e93
 
 # Well-known anvil dev keys (#1, #2, #3). They only ever sign on the local forks.
 # #3 is the address scripts/fork.sh funds with ETH and tokens.
@@ -79,10 +87,18 @@ log "starting facilitator ($PROJECT) on :$FACILITATOR_PORT"
 compose up -d
 wait_for "http://localhost:$FACILITATOR_PORT/supported" 60 || { compose logs --tail 50; exit 1; }
 curl -sS "http://localhost:$FACILITATOR_PORT/supported" | jq -c '[.kinds[] | {network, scheme}]'
+# The seller exits at startup if it is configured for a network the facilitator does not serve.
+if curl -sS "http://localhost:$FACILITATOR_PORT/supported" | jq -e --arg n "$BTC_MAINNET" 'any(.kinds[]; .network == $n)' >/dev/null; then
+  SELLER_BTC_NETWORKS=btc-mainnet
+else
+  SELLER_BTC_NETWORKS=
+  log "the facilitator serves no exact kind on $BTC_MAINNET: the Bitcoin L1 payment will be skipped"
+fi
 
 log "starting seller on :$SELLER_PORT (logs: $FORK_STATE_DIR/seller.log)"
 PORT=$SELLER_PORT FACILITATOR_URL=http://localhost:$FACILITATOR_PORT \
   SELLER_NETWORKS=eip155:743111,eip155:43111 SELLER_PAY_TO=$PAY_TO \
+  SELLER_BTC_NETWORKS=$SELLER_BTC_NETWORKS SELLER_BTC_XPUB=$BTC_XPUB \
   "$ROOT/node_modules/.bin/tsx" "$ROOT/seller/server.ts" > "$FORK_STATE_DIR/seller.log" 2>&1 &
 SELLER_PID=$!
 wait_for "http://localhost:$SELLER_PORT/health" 30 || { cat "$FORK_STATE_DIR/seller.log"; exit 1; }
@@ -98,6 +114,14 @@ pay testnet usdc "$TESTNET_RPC"
 pay testnet btc "$TESTNET_RPC"
 pay mainnet usdc "$MAINNET_RPC"
 pay mainnet btc "$MAINNET_RPC"
+if [ -n "$SELLER_BTC_NETWORKS" ]; then
+  log "paying: --asset btc-l1 --network btc-mainnet (fabricated in the mock hBK on the mainnet fork; nothing goes to Bitcoin)"
+  # ALLOW_MAINNET only because --stub-pay writes to the local mainnet fork; mock-hbk.ts refuses any non-local URL.
+  ALLOW_MAINNET=yes SELLER_URL="http://localhost:$SELLER_PORT/echo?demo=fork&network=btc-mainnet&asset=btc-l1" \
+    npm run -s pay -w buyer -- --asset btc-l1 --network btc-mainnet --stub-pay "$MAINNET_RPC" --poll 2
+else
+  log "skipping the Bitcoin L1 payment: the facilitator does not serve $BTC_MAINNET"
+fi
 
 log "seller settlement log"
 grep -E '^\[seller\] (verified|settled|settle failed|verify rejected)' "$FORK_STATE_DIR/seller.log" || true

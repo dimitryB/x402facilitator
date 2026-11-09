@@ -6,6 +6,7 @@ A script that pays the demo seller's `GET /echo` with `@x402/fetch` (`wrapFetchW
 npm run pay -w buyer -- --asset usdc --network testnet
 npm run pay -w buyer -- --asset btc  --network testnet
 ALLOW_MAINNET=yes npm run pay -w buyer -- --asset usdc --network mainnet
+npm run pay -w buyer -- --asset btc-l1 --network btc-testnet3        # native BTC on Bitcoin L1, see below
 ```
 
 `npm run pay` also loads the repo-root `.env` if it exists. Variables already set in the shell win.
@@ -61,3 +62,59 @@ The forks are pinned to the same blocks as the e2e tests (`FORK_BLOCK_TESTNET`, 
 Transactions in this demo exist only on the local forks. The buyer prints their explorer links marked "(local fork: not on the explorer)".
 
 Ports and names can be overridden: `FORK_TESTNET_PORT` (28545), `FORK_MAINNET_PORT` (28546), `FACILITATOR_PORT` (28080), `SELLER_PORT` (24021), `DEMO_PROJECT` (compose project, `hemi-x402-demo`), `FORK_STATE_DIR` (`.scratch/fork-demo`), `DEMO_PAY_TO`.
+
+## Paying in BTC on Bitcoin L1
+
+`--asset btc-l1` pays the seller's `bip122` accept (see [the scheme spec](../docs/specs/scheme_exact_bip122.md)) with a real Bitcoin transaction to an address derived from the seller's xpub and the 402's `paymentId`, then polls until the facilitator has verified it through hBK on Hemi and the seller serves the resource.
+
+```sh
+BUYER_BTC_MNEMONIC="…" npm run pay -w buyer -- --asset btc-l1 --network btc-testnet3
+BUYER_BTC_WIF=L… ALLOW_MAINNET=yes npm run pay -w buyer -- --asset btc-l1 --network btc-mainnet --fee-rate 4
+npm run pay -w buyer -- --asset btc-l1 --network btc-mainnet --resume 12299bf16423f9d28a81192788817d17
+```
+
+| Option / variable | Default | Meaning |
+|------|------|------|
+| `--network` | `btc-testnet3` | `btc-testnet3` or `btc-mainnet` |
+| `--max` | `5000` | Largest payment the buyer will make, in satoshis |
+| `--poll` | `60` | Seconds between re-sends of the payment |
+| `--resume` | unset | A paymentId from the journal: poll with that payment again, pay nothing |
+| `--fee-rate` | mempool.space 3-block estimate | Miner fee in sat/vB; the wallet refuses estimates above 200 |
+| `BUYER_BTC_WIF` / `BUYER_BTC_MNEMONIC` | one required | The paying wallet: a WIF of the network, or a BIP39 mnemonic (first receive address, `m/84'/coin'/0'/0/0`, or `m/86'/…` for p2tr) |
+| `BUYER_BTC_ADDRESS_TYPE` | `p2wpkh` | The wallet's own address type: `p2wpkh` or `p2tr` |
+| `ALLOW_MAINNET` | unset | Must be `yes` for `--network btc-mainnet` |
+
+The wallet spends confirmed UTXOs of its one address, largest first, and sends change back to the same address. It reads UTXOs and fee estimates from mempool.space and broadcasts there; that broadcast is the only thing it ever sends.
+
+The flow is driven by hand rather than with `wrapFetchWithPayment`. That wrapper builds a new payment for every 402, and a Bitcoin payment is accepted only after it confirms and hVM has seen its block: 10 to 30 minutes on mainnet, possibly hours on testnet3, where hVM lags. So the script:
+
+1. sends one `GET`, decodes the 402, keeps the `bip122` accept for `--network` (`registerPolicy`) and allow-lists `BTC` with the `--max` cap (`setSpendControls`);
+2. calls `createPaymentPayload` once. `ExactBtcClientScheme` derives the address, writes the payment to `.scratch/buyer-btc/journal.jsonl` as `paying`, broadcasts, and records it as `paid` with the txid. A payment journaled as `paying` but never `paid` is never retried automatically: check the wallet first;
+3. re-sends the same `PAYMENT-SIGNATURE` every `--poll` seconds while the seller answers 402 with `invalid_exact_bip122_payload_unconfirmed`, `invalid_exact_bip122_payload_transaction_not_found` or `settlement_pending`. Any other reason stops it, and so does the accept's `maxTimeoutSeconds`. The payment stays in the journal, so `--resume <paymentId>` picks it up later.
+
+Output against a stub facilitator that answers "unconfirmed" twice (`--stub-pay fake`, below):
+
+```
+[buyer] --stub-pay fake: nothing is sent to Bitcoin; the txid is random
+[buyer] GET http://127.0.0.1:44021/echo?hello=btc-l1
+[buyer] paying 1000 sats on Bitcoin testnet3 to tb1qd66456etpcrsvpz0pngzugtdumwe3qter8jgjd (paymentId 12299bf16423f9d28a81192788817d17, tpubDC8msFGe…/0/1047695828/689587608/564264336)
+[buyer]   needs 1 confirmation(s); seller waits up to 3600s
+[buyer] bitcoin tx: 14ac11c1fac4fe1199750f84dbec631d11ae749d704a7ea86a00c4f20275be2a vout 0
+[buyer]   (stub payment: not on Bitcoin)
+[buyer] journal: …/.scratch/buyer-btc/journal.jsonl (resume with --resume 12299bf16423f9d28a81192788817d17)
+[buyer] attempt 1: not yet: invalid_exact_bip122_payload_unconfirmed
+[buyer] attempt 2: not yet: invalid_exact_bip122_payload_unconfirmed
+[buyer] response: {"echo":{"hello":"btc-l1"},"timestamp":"2026-11-09T17:54:03.467Z"}
+[buyer] settled on bip122:000000000933ea01ad0ee984209779ba: bitcoin tx 14ac11c1fac4fe1199750f84dbec631d11ae749d704a7ea86a00c4f20275be2a
+[buyer] hemi settle tx: not in the response (the facilitator logs it; see the settler's Settled event)
+```
+
+Resuming that payment after it was served gets `seller answered 402 (invalid_transaction_state)`: a payment buys one response.
+
+### Development stubs
+
+`--stub-pay` replaces the wallet; nothing goes to Bitcoin.
+
+- `--stub-pay fake` returns a random txid. Only a stub facilitator accepts it (`btc/dev/stub-facilitator.ts`, which answers from a script and reads no chain).
+- `--stub-pay http://127.0.0.1:<port>` writes a fabricated transaction paying the derived address into the mock hBK on that local Hemi fork (`@hemi-x402/btc/mock-hbk`; it refuses any non-local URL). The real facilitator then verifies and settles it on the fork. `BUYER_BTC_STUB_HBK` overrides the hBK address from `shared/hemi.json`, and `BUYER_BTC_STUB_CONFIRMATIONS` (default 1) sets the recorded Bitcoin confirmations. `buyer/demo-fork.sh` uses this for its fifth payment.
+
