@@ -5,6 +5,10 @@ Stock x402-rs refuses to start an EVM chain unless three contracts have code at 
 (43111) and Hemi testnet (743111) at those canonical addresses, checks them, and tests the
 settlement path the facilitator uses.
 
+Phase 2 adds `X402BtcSettler`, which verifies Bitcoin L1 payments through Hemi's Bitcoin Kit and records
+each consumed output on Hemi. It is described in the section "Phase 2: X402BtcSettler" below and in
+`docs/phase2/contracts.md`.
+
 | Contract | Address | What it is | Mainnet | Testnet |
 |------|------|------|------|------|
 | Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | Uniswap's signature-transfer contract; buyers approve it once per token | present (D-004) | deploy |
@@ -56,7 +60,16 @@ src/x402/               vendored x402ExactPermit2Proxy source (unchanged), for r
 lib/forge-std/          forge-std v1.17.0 (f3dae6e6), vendored with `forge install --no-git`
 lib/openzeppelin-contracts/  the three OpenZeppelin v5.5.0 files the proxy imports, unchanged
 deploy.sh               plan, simulate, and (with --broadcast) deploy
-verify.sh               best-effort Blockscout verification
+verify.sh               best-effort Blockscout verification (also the phase 2 contracts once deployed)
+
+Phase 2 (Bitcoin L1 payments):
+src/btc/                X402BtcSettler, IHbkReader (the two hBK functions it reads), HbkTestnetAdapter
+script/DeployBtcSettler.s.sol  idempotent CREATE2 deployment of the settler (and the testnet adapter)
+test/X402BtcSettler.t.sol      offline: settler, adapter, deployment constants vs shared/hemi.json
+test/X402BtcSettler.fork.t.sol forks of both chains with MockBitcoinKit etched at the real hBK address
+test/mocks/MockBitcoinKit.sol  hBK stand-in with both hBK ABIs and hBK's exact reverts
+deploy-btc.sh           deploy.sh's flow for the settler
+check-btc-live.sh       read-only check of a real Bitcoin payment through the live hBK
 ```
 
 `foundry.toml`'s default profile uses the reference's compile settings (solc 0.8.28, cancun, optimizer
@@ -72,7 +85,8 @@ cd contracts
 forge test
 ```
 
-17 tests in three suites. `DeployDataTest` needs no network. `HemiTestnetForkTest` and
+66 tests in seven suites: the 17 below, and 49 for phase 2 (see "Phase 2: X402BtcSettler").
+`DeployDataTest` needs no network. `HemiTestnetForkTest` and
 `HemiMainnetForkTest` fork the live chains at pinned blocks (testnet 7094100, mainnet 5614400), run the
 deployment script's logic, and assert:
 
@@ -200,3 +214,49 @@ What is realistically verifiable, as found on 2026-10-28:
 On Hemi testnet, `verify.sh` reports all three contracts as partial matches through the bytecode database. On 2026-10-28, before anything was deployed, it correctly reported "not deployed" for all three. Its status parsing
 was checked against a verified contract (Multicall3), an unverified one (the deployer) and an empty
 address.
+
+## Phase 2: X402BtcSettler
+
+An x402 buyer can pay in BTC on Bitcoin L1 to an address derived for that payment (scheme `exact` on
+`bip122:*`, `docs/phase2/DESIGN.md`). The facilitator checks the payment through Hemi's Bitcoin Kit
+(hBK) inside `X402BtcSettler` and marks the output consumed on Hemi. Decisions, commands and outputs
+are in `docs/phase2/contracts.md`.
+
+| Network | Contract | Address | Status |
+|------|------|------|------|
+| Hemi mainnet | X402BtcSettler | `0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f` | predicted, not deployed |
+| Hemi testnet | HbkTestnetAdapter | `0x1D561c41067aB82Ab90be4dd385E4a704CC3D8F5` | predicted, not deployed |
+| Hemi testnet | X402BtcSettler | `0x56AdDfcC77b087D9101ddEE8D3A38e95E0A365B0` | predicted, not deployed |
+
+- `verify(txid, vout, scriptPubKey, minSats, minConfirmations)` never reverts. It reads the output and
+  its confirmation count from hBK (`0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12` on mainnet) and returns a
+  verdict: `Ok`, `AlreadyConsumed`, `TxNotFound`, `OutputNotFound`, `ScriptMismatch`, `OpReturn`,
+  `BelowAmount`, `TooFewConfirmations` or `HbkError`.
+- `settle(…, paymentRef)` re-checks and records `settledBy[txid][vout] = paymentRef`. Only the
+  immutable `SETTLER`, the facilitator's Hemi signer, may call it; anyone else could block a real
+  settlement by consuming the output first.
+- No owner, no upgrade, no funds. Changing hBK, the signer or the confirmation offset means a new
+  contract at a new address.
+- `CONFIRMATION_OFFSET` is 0: on 2026-11-09 hBK's count equalled Bitcoin's. A payment becomes visible
+  to hBK only once its block reaches hVM's Bitcoin header, which lagged the tip by 2 blocks.
+- Testnet's hBK has an older `btc*` ABI; `HbkTestnetAdapter` sits in front of it, so the settler's
+  code is the same on both networks. Testnet's `btcTxByTxid` returned no transaction in the checks
+  made, so nothing is deployed there yet.
+
+The addresses are CREATE2 addresses of the code built with the default profile (no metadata) and the
+constructor arguments in `DeployBtcSettler.s.sol`. The script and `DeployBtcSettlerOfflineTest` refuse a
+mismatch between the compiled code, the constants and `shared/hemi.json`.
+
+```sh
+contracts/check-btc-live.sh mainnet          # read-only; verify() on a real payment, prints the offset
+contracts/deploy-btc.sh mainnet              # plan, cost and simulation; sends nothing
+CONFIRM_MAINNET_DEPLOY=yes contracts/deploy-btc.sh mainnet --broadcast   # only on the owner's go
+contracts/deploy-btc.sh testnet --broadcast
+```
+
+`deploy-btc.sh` takes the same keys and environment as `deploy.sh`. It was exercised against local anvil
+forks of both chains, including all three mainnet refusals and the script's own gate. Forge cannot run
+hVM's precompiles, so the fork tests replace hBK with `test/mocks/MockBitcoinKit.sol` and the live check
+uses `cast` against the real node. Before deployment the live check runs the compiled settler as an
+`eth_call` state override.
+

@@ -12,11 +12,12 @@
 # Secrets come from .env (copy .env.example). RPC defaults: dRPC primary, Hemi public RPC fallback.
 services:
   facilitator:
-    # x402-rs e75adda + facilitator/x402-rs/patches (hemi.14), see facilitator/x402-rs/README.md.
+    # x402-rs e75adda + facilitator/x402-rs/patches and crates/x402-chain-bip122 (hemi.15), see
+    # facilitator/x402-rs/README.md.
     # Unpatched base, for comparison: the stock image this replaced,
     #   ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d824bf6a5f342add8ae22eb44a2c56894ad22e7d3f5b83ba38023226b9
     #   (x402-rs 2.0.2, revision 0b14f39; EVM code identical to e75adda, DECISIONS.md D-013).
-    image: hemi-x402-facilitator:e75adda-hemi.14
+    image: hemi-x402-facilitator:e75adda-hemi.15
     build:
       context: ./facilitator
     # Bounded, so a missing-contract or missing-key startup error stops instead of crash-looping
@@ -40,3 +41,7 @@ services:
       HEMI_TESTNET_RPC_FALLBACK: ${HEMI_TESTNET_RPC_FALLBACK:-https://testnet.rpc.hemi.network/rpc}
       HEMI_MAINNET_RPC_PRIMARY: ${HEMI_MAINNET_RPC_PRIMARY:-https://hemi.drpc.org}
       HEMI_MAINNET_RPC_FALLBACK: ${HEMI_MAINNET_RPC_FALLBACK:-https://rpc.hemi.network/rpc}
+      # X402BtcSettler per Hemi chain (shared/hemi.json once deployed). Empty: the facilitator skips that
+      # Bitcoin network with a warning and serves the EVM chains as before (docs/phase2/facilitator.md).
+      X402_BTC_SETTLER_MAINNET: ${X402_BTC_SETTLER_MAINNET:-}
+      X402_BTC_SETTLER_TESTNET: ${X402_BTC_SETTLER_TESTNET:-}

@@ -1,0 +1,30 @@
+{
+  "name": "@hemi-x402/btc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./mock-hbk": "./src/mock-hbk.ts",
+    "./test-vectors.json": "./test-vectors.json"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p .",
+    "vectors": "tsx dev/make-vectors.ts"
+  },
+  "dependencies": {
+    "@noble/curves": "1.9.1",
+    "@noble/hashes": "1.8.0",
+    "@scure/bip32": "1.7.0",
+    "@scure/bip39": "1.6.0",
+    "@scure/btc-signer": "1.8.1",
+    "@x402/core": "2.29.0",
+    "viem": "2.57.5"
+  },
+  "devDependencies": {
+    "@x402/evm": "2.29.0",
+    "vitest": "5.0.4"
+  }
+}

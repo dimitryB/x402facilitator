@@ -18,12 +18,25 @@
           "rate_limit": 4
         }
       ]
+    },
+    "bip122:000000000933ea01ad0ee984209779ba": {
+      "hemi": "eip155:743111",
+      "settler": "$X402_BTC_SETTLER_TESTNET",
+      "min_confirmations": {
+        "default": 1,
+        "floor": 1,
+        "ceiling": 6
+      }
     }
   },
   "schemes": [
     {
       "id": "v2-eip155-exact",
       "chains": "eip155:743111"
+    },
+    {
+      "id": "v2-bip122-exact",
+      "chains": "bip122:000000000933ea01ad0ee984209779ba"
     }
   ]
 }

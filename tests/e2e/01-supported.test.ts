@@ -29,8 +29,13 @@ describe("GET /supported", () => {
     }
     // §7.3.1: extensions is required. EIP-2612 gas sponsoring is off (DECISIONS.md D-013).
     expect(res.body.extensions).toEqual([]);
-    // Nothing but the two Hemi chains is configured.
-    expect(new Set(res.body.kinds.map(k => k.network))).toEqual(new Set([MAINNET, TESTNET]));
+    // Nothing but the two Hemi chains and, when scripts/fork.sh deployed the Bitcoin settlers, the two
+    // Bitcoin networks they serve (phase 2, `exact` on bip122) is configured.
+    const BTC_NETWORKS = ["bip122:000000000019d6689c085ae165831e93", "bip122:000000000933ea01ad0ee984209779ba"];
+    const networks = new Set(res.body.kinds.map(k => k.network));
+    const btc = [...networks].filter(n => n.startsWith("bip122:")).sort();
+    expect(btc, "bip122 kinds are both or none").toEqual(btc.length === 0 ? [] : BTC_NETWORKS);
+    expect(networks).toEqual(new Set([MAINNET, TESTNET, ...btc]));
   });
 });
 

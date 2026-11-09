@@ -1,5 +1,5 @@
 {
-  "_source": "DECISIONS.md D-001..D-011. Token addresses from hemilabs/token-list@7a326ac4 and on-chain reads; contract addresses are canonical CREATE2 addresses.",
+  "_source": "DECISIONS.md D-001..D-011. Token addresses from hemilabs/token-list@7a326ac4 and on-chain reads; contract addresses are canonical CREATE2 addresses. Per-network contracts.hbk, contracts.x402BtcSettler, contracts.hbkTestnetAdapter and btcConfirmationOffset: docs/phase2/contracts.md (the settler and adapter addresses are predicted CREATE2 addresses until deployed).",
   "contracts": {
     "create2Deployer": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
     "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
@@ -16,6 +16,12 @@
         "fallback": "https://testnet.rpc.hemi.network/rpc"
       },
       "explorer": "https://testnet.explorer.hemi.xyz",
+      "contracts": {
+        "hbk": "0xeC9fa5daC1118963933e1A675a4EEA0009b7f215",
+        "hbkTestnetAdapter": "0x1D561c41067aB82Ab90be4dd385E4a704CC3D8F5",
+        "x402BtcSettler": "0x56AdDfcC77b087D9101ddEE8D3A38e95E0A365B0"
+      },
+      "btcConfirmationOffset": 0,
       "assets": {
         "USDC.e": {
           "address": "0xD47971C7F5B1067d25cd45d30b2c9eb60de96443",
@@ -42,6 +48,11 @@
         "fallback": "https://rpc.hemi.network/rpc"
       },
       "explorer": "https://explorer.hemi.xyz",
+      "contracts": {
+        "hbk": "0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12",
+        "x402BtcSettler": "0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f"
+      },
+      "btcConfirmationOffset": 0,
       "assets": {
         "USDC.e": {
           "address": "0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA",

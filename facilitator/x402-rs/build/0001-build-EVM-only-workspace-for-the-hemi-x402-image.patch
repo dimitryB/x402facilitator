@@ -1,4 +1,4 @@
-From 9123f495834da6967313781eda5c594f38201942 Mon Sep 17 00:00:00 2001
+From 1d5b167da2412ddd1b9cd7c7651bfb402ffa8ecf Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 22:47:25 -0400
 Subject: [PATCH] build: EVM-only workspace for the hemi-x402 image
@@ -7,16 +7,24 @@ Not for upstream. Drops the Solana, Aptos and TRON crates, the examples and the
 aptos-core [patch] sections so that building the EVM facilitator does not fetch
 aptos-core. Cargo.lock is pruned at build time and checked to be a subset of the
 upstream lock.
+
+Adds the Bitcoin chain crate the image carries outside x402-rs's tree,
+crates/chains/x402-chain-bip122, as a workspace member, the `bitcoin` crate it
+uses to the workspace dependencies, and the facilitator feature chain-bip122
+that enables it. The feature is off by default: the crate needs patches 0029
+and 0030, and the dependency layer compiles unpatched x402-rs. The packages
+`bitcoin` adds to the lock are pinned in build/lock-additions.txt, which the
+lock check accepts besides upstream's packages.
 ---
- Cargo.toml             | 16 +---------------
- facilitator/Cargo.toml | 16 +++++++---------
- 2 files changed, 8 insertions(+), 24 deletions(-)
+ Cargo.toml             | 20 +++++---------------
+ facilitator/Cargo.toml | 20 +++++++++++---------
+ 2 files changed, 16 insertions(+), 24 deletions(-)
 
 diff --git a/Cargo.toml b/Cargo.toml
-index 9bf2c31..8df7fb6 100644
+index 9bf2c31..a8c7ef2 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -1,18 +1,11 @@
+@@ -1,18 +1,12 @@
  [workspace]
  resolver = "3"
 +# hemi-x402 build: only the crates the EVM facilitator needs (see facilitator/x402-rs/README.md).
@@ -29,6 +37,7 @@ index 9bf2c31..8df7fb6 100644
 -  "crates/chains/x402-chain-solana",
 -  "crates/chains/x402-chain-aptos",
 -  "crates/chains/x402-chain-tron",
++  "crates/chains/x402-chain-bip122",
    "facilitator",
 -  "examples/x402-axum-example",
 -  "examples/x402-reqwest-exact",
@@ -36,7 +45,15 @@ index 9bf2c31..8df7fb6 100644
  ]
  
  [workspace.package]
-@@ -56,10 +49,3 @@ tracing-core = { version = "0.1.34" }
+@@ -28,6 +22,7 @@ categories = ["cryptography::cryptocurrencies", "finance", "network-programming"
+ 
+ [workspace.dependencies]
+ x402-axum = { version = "2.0", path = "crates/x402-axum" }
++x402-chain-bip122 = { version = "0.1", path = "crates/chains/x402-chain-bip122" }
+ x402-chain-aptos = { version = "2.0", path = "crates/chains/x402-chain-aptos" }
+ x402-chain-eip155 = { version = "2.0", path = "crates/chains/x402-chain-eip155" }
+ x402-chain-solana = { version = "2.0", path = "crates/chains/x402-chain-solana" }
+@@ -56,10 +51,5 @@ tracing-core = { version = "0.1.34" }
  tracing-subscriber = { version = "0.3", features = ["env-filter"] }
  url = { version = "2.5", features = ["serde"] }
  clap = { version = "4.5", features = ["derive", "env"] }
@@ -47,11 +64,13 @@ index 9bf2c31..8df7fb6 100644
 -
 -[patch."https://github.com/aptos-labs/aptos-core"]
 -aptos-runtimes = { path = "patches/aptos-runtimes" }
++# hemi-x402 build: BIP32 derivation and Bitcoin scripts for x402-chain-bip122 (build/lock-additions.txt).
++bitcoin = { version = "0.32", default-features = false, features = ["std"] }
 diff --git a/facilitator/Cargo.toml b/facilitator/Cargo.toml
-index 704d63b..7f04be0 100644
+index 704d63b..b0a33ef 100644
 --- a/facilitator/Cargo.toml
 +++ b/facilitator/Cargo.toml
-@@ -21,21 +21,15 @@ name = "x402-facilitator"
+@@ -21,21 +21,19 @@ name = "x402-facilitator"
  path = "src/main.rs"
  
  [features]
@@ -60,11 +79,14 @@ index 704d63b..7f04be0 100644
 -chain-aptos = ["dep:x402-chain-aptos"]
 +# hemi-x402 build: EVM only. Solana, Aptos and TRON are dropped so the build never fetches aptos-core.
 +default = ["telemetry", "chain-eip155"]
-+telemetry = ["dep:tracing", "x402-types/telemetry", "x402-facilitator-local/telemetry", "x402-chain-eip155?/telemetry"]
++telemetry = ["dep:tracing", "x402-types/telemetry", "x402-facilitator-local/telemetry", "x402-chain-eip155?/telemetry", "x402-chain-bip122?/telemetry"]
  chain-eip155 = ["dep:x402-chain-eip155"]
 -chain-solana = ["dep:x402-chain-solana"]
 -chain-tron = ["dep:x402-chain-tron"]
 -full = ["telemetry", "chain-aptos", "chain-eip155", "chain-solana", "chain-tron"]
++# hemi-x402 build: BTC paid on Bitcoin L1, verified and recorded on Hemi (patches 0029, 0030). Off by
++# default, so the dependency layer compiles against unpatched x402-rs; the image is built with it on.
++chain-bip122 = ["chain-eip155", "dep:x402-chain-bip122"]
  
  [dependencies]
  x402-types = { workspace = true, features = ["cli"]}
@@ -73,10 +95,11 @@ index 704d63b..7f04be0 100644
 -x402-chain-solana = { workspace = true, features = ["facilitator"], optional = true }
 -x402-chain-aptos = { workspace = true, features = ["facilitator"], optional = true }
 -x402-chain-tron = { workspace = true, features = ["facilitator"], optional = true }
++x402-chain-bip122 = { workspace = true, features = ["facilitator"], optional = true }
  
  dotenvy = { workspace = true }
  serde_json = { workspace = true }
-@@ -46,3 +40,7 @@ async-trait = { workspace = true }
+@@ -46,3 +44,7 @@ async-trait = { workspace = true }
  axum = { workspace = true }
  tower-http = { workspace = true }
  rustls = { version = "0.23", features = ["ring"] }

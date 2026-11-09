@@ -1,0 +1,98 @@
+# Packages the hemi-x402 build adds to x402-rs's Cargo.lock, as Cargo.lock entries: the `bitcoin`
+# crate and its dependencies that upstream's lock does not have, for x402-chain-bip122.
+#
+# The Dockerfile appends this file to the lock before `cargo fetch`, so these exact versions are used
+# (cargo keeps a locked version that satisfies the manifest), and check-lock-subset.sh accepts them,
+# and only them, besides the packages of upstream's lock. Every package upstream locked keeps its
+# version: bitcoin 0.32 reuses upstream's bitcoin_hashes 0.14.100, bitcoin-io 0.1.100,
+# hex-conservative 0.2.2 and secp256k1-sys 0.10.1.
+#
+# To change it: edit the [workspace.dependencies] `bitcoin` line in build/0001-…patch, run
+# `cargo update -p bitcoin` on the patched tree, and copy the new or changed entries here.
+
+[[package]]
+name = "base58ck"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f1cba749a07c1efb1f4d87518f39cea4aec25d0991fb97e80459c057238f0d2"
+dependencies = [
+ "bitcoin_hashes",
+]
+
+[[package]]
+name = "bech32"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
+
+[[package]]
+name = "bitcoin"
+version = "0.32.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ca0f87890d2398219d15182cb6af9681722bd891758dab4ca01896e2038a510"
+dependencies = [
+ "base58ck",
+ "bech32",
+ "bitcoin-io",
+ "bitcoin-units",
+ "bitcoin_hashes",
+ "hex-conservative 0.2.2",
+ "hex_lit",
+ "secp256k1 0.29.1",
+]
+
+[[package]]
+name = "bitcoin-consensus-encoding"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9daa31138eb443d5751b207f3f64154e2bb09cd59960562ccc7a7112be38147f"
+dependencies = [
+ "bitcoin-internals",
+ "hex-conservative 1.3.0",
+ "serde",
+]
+
+[[package]]
+name = "bitcoin-internals"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8bea3a9f0cfece4564e37cb49a38cc245ca5184719e50d7d0dda3268722c4e2"
+
+[[package]]
+name = "bitcoin-units"
+version = "0.1.101"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cb95693f371d089a4b5b6fc41c6f3ea6e01ee8c15388335dfac8ea685173b51"
+dependencies = [
+ "bitcoin-consensus-encoding",
+]
+
+[[package]]
+name = "hex-conservative"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "271e0d19bcb473b6675739a2b536076b24a082316cb5199ad918edce10c599e8"
+dependencies = [
+ "arrayvec",
+]
+
+[[package]]
+name = "hex_lit"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3011d1213f159867b13cfd6ac92d2cd5f1345762c63be3554e84092d85a50bbd"
+
+[[package]]
+name = "secp256k1"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
+dependencies = [
+ "bitcoin_hashes",
+ "secp256k1-sys 0.10.1",
+]
+
+# The workspace member that depends on them (a path package: no source, no checksum).
+[[package]]
+name = "x402-chain-bip122"
+version = "0.1.0"

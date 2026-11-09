@@ -20,6 +20,16 @@ export interface HemiAsset {
   balanceSlot?: number;
 }
 
+/** Phase 2 contracts per Hemi network (docs/phase2/contracts.md). */
+export interface HemiNetworkContracts {
+  /** Hemi's Bitcoin Kit. */
+  hbk: Address;
+  /** X402BtcSettler; a predicted CREATE2 address until deployed. */
+  x402BtcSettler: Address;
+  /** Testnet only: the adapter between the settler and testnet's `btc*` hBK. */
+  hbkTestnetAdapter?: Address;
+}
+
 export interface HemiNetworkInfo {
   network: HemiNetwork;
   name: string;
@@ -27,6 +37,9 @@ export interface HemiNetworkInfo {
   chain: Chain;
   rpc: { primary: string; fallback: string };
   explorer: string;
+  contracts: HemiNetworkContracts;
+  /** X402BtcSettler's CONFIRMATION_OFFSET: hBK's confirmation count minus Bitcoin's. */
+  btcConfirmationOffset: number;
   assets: Record<string, HemiAsset>;
 }
 
@@ -48,6 +61,8 @@ export const NETWORKS: Record<HemiNetwork, HemiNetworkInfo> = Object.fromEntries
         chain: CHAINS[network],
         rpc: n.rpc,
         explorer: n.explorer,
+        contracts: n.contracts as HemiNetworkContracts,
+        btcConfirmationOffset: n.btcConfirmationOffset,
         assets: Object.fromEntries(
           Object.entries(n.assets).map(([symbol, a]) => {
             const { _note, ...rest } = a as typeof a & { _note?: string };

@@ -17,11 +17,20 @@ export const STATE_DIR = join(REPO_ROOT, ".scratch", "fork-tests");
 export const OBSERVED_FILE = join(STATE_DIR, "observed-responses.jsonl");
 export const COMPOSE_ENV_FILE = join(STATE_DIR, "compose.env");
 
-export const COMPOSE_PROJECT = "hemi-x402-tests";
-export const FACILITATOR_PORT = 38080;
+/**
+ * Two checkouts (worktrees) can run the suite at the same time if one sets E2E_PORT_OFFSET: it moves the
+ * facilitator and both forks to 38080/38545/38546 + offset and names the compose project
+ * hemi-x402-tests-<offset>, so neither run tears down the other's stack. Unset, everything is as before.
+ */
+const PORT_OFFSET = Number(process.env.E2E_PORT_OFFSET ?? 0);
+if (!Number.isInteger(PORT_OFFSET) || PORT_OFFSET < 0 || PORT_OFFSET > 1000) {
+  throw new Error(`E2E_PORT_OFFSET must be an integer from 0 to 1000, got ${process.env.E2E_PORT_OFFSET}`);
+}
+export const COMPOSE_PROJECT = PORT_OFFSET ? `hemi-x402-tests-${PORT_OFFSET}` : "hemi-x402-tests";
+export const FACILITATOR_PORT = 38080 + PORT_OFFSET;
 export const FACILITATOR_URL = `http://127.0.0.1:${FACILITATOR_PORT}`;
 
-export const FORK_PORT: Record<HemiNetwork, number> = { "eip155:743111": 38545, "eip155:43111": 38546 };
+export const FORK_PORT: Record<HemiNetwork, number> = { "eip155:743111": 38545 + PORT_OFFSET, "eip155:43111": 38546 + PORT_OFFSET };
 export const FORK_RPC: Record<HemiNetwork, string> = {
   "eip155:743111": `http://127.0.0.1:${FORK_PORT[TESTNET]}`,
   "eip155:43111": `http://127.0.0.1:${FORK_PORT[MAINNET]}`,
@@ -71,6 +80,9 @@ export function forkEnv(): NodeJS.ProcessEnv {
     FORK_BLOCK_TESTNET: String(FORK_BLOCK[TESTNET]),
     FORK_BLOCK_MAINNET: String(FORK_BLOCK[MAINNET]),
     FORK_BUYER: privateKeyToAccount(BUYER_KEY).address,
+    // X402BtcSettler on each fork lets only this address settle (phase 2).
+    FORK_FACILITATOR_TESTNET: FACILITATOR_SIGNER[TESTNET],
+    FORK_FACILITATOR_MAINNET: FACILITATOR_SIGNER[MAINNET],
   };
 }
 

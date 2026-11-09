@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Best-effort source verification of the three canonical contracts on Hemi's Blockscout explorer.
+# Best-effort source verification of the three canonical contracts on Hemi's Blockscout explorer,
+# and of the phase 2 contracts (X402BtcSettler; HbkTestnetAdapter on testnet) once they are deployed.
 #
 #   contracts/verify.sh testnet
 #   contracts/verify.sh mainnet
@@ -14,13 +15,18 @@
 #      The deployed bytecode came from a build whose metadata hash cannot be reproduced, so the best
 #      possible result is a partial match.
 #   4. Permit2 and the validator are not compiled here, so nothing is submitted for them.
+#   5. X402BtcSettler and HbkTestnetAdapter (addresses from shared/hemi.json) are compiled here with the
+#      default profile (no metadata), so a full match is possible. If unverified, their source is
+#      submitted with the constructor arguments read back from the contracts' own getters. While they
+#      are not deployed they are listed as such and do not affect the exit status.
 #
 # Environment:
 #   HEMI_TESTNET_RPC_URL / HEMI_MAINNET_RPC_URL            default: Hemi public RPC
 #   HEMI_TESTNET_EXPLORER_URL / HEMI_MAINNET_EXPLORER_URL  default: testnet.explorer.hemi.xyz / explorer.hemi.xyz
 #   VERIFY_LOOKUP_WAIT                                     seconds to wait for the bytecode-DB lookup (default 20)
 #
-# Exit status: 0 if all three are verified (fully or partially), 1 otherwise.
+# Exit status: 0 if the three canonical contracts, and every deployed phase 2 contract, are verified
+# (fully or partially); 1 otherwise.
 # Run live on Hemi testnet on 2026-10-29, where all three verified through the bytecode database. On
 # mainnet the validator and the proxy verified the same way once looked up in a browser (D-034).
 set -euo pipefail
@@ -29,6 +35,7 @@ cd "$(dirname "$0")"
 PERMIT2=0x000000000022D473030F116dDEE9F6B43aC78BA3
 NAMES=("Permit2" "EIP-6492 validator" "x402 exact Permit2 proxy")
 ADDRS=($PERMIT2 0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B 0x402085c248EeA27D92E8b30b2C58ed07f9E20001)
+KINDS=(canonical canonical proxy)
 WAIT=${VERIFY_LOOKUP_WAIT:-20}
 
 die() { printf 'verify.sh: %s\n' "$*" >&2; exit 2; }
@@ -39,6 +46,13 @@ case ${1:-} in
 esac
 EXPLORER=${EXPLORER%/}
 for tool in forge cast jq curl; do command -v $tool >/dev/null || die "$tool not found on PATH"; done
+
+# Phase 2 contracts, from shared/hemi.json (predicted CREATE2 addresses until deployed).
+btc_addr() { jq -r --arg n "eip155:$CHAIN_ID" --arg k "$1" '.networks[$n].contracts[$k] // empty' ../shared/hemi.json; }
+a=$(btc_addr hbkTestnetAdapter)
+if [ -n "$a" ]; then NAMES+=("HbkTestnetAdapter"); ADDRS+=("$a"); KINDS+=(adapter); fi
+a=$(btc_addr x402BtcSettler)
+if [ -n "$a" ]; then NAMES+=("X402BtcSettler"); ADDRS+=("$a"); KINDS+=(settler); fi
 
 got=$(cast chain-id --rpc-url "$RPC" 2>/dev/null) || die "RPC did not answer eth_chainId"
 [ "$got" = "$CHAIN_ID" ] || die "RPC reports chain id $got, expected $CHAIN_ID"
@@ -59,13 +73,30 @@ status() {
 }
 verified() { [[ $1 == full* || $1 == partial* ]]; }
 
-declare -a RESULT
-for i in 0 1 2; do
-  name=${NAMES[$i]} addr=${ADDRS[$i]}
+# Submits a src/btc contract compiled with the default profile (no metadata: a full match is possible).
+submit_btc() { # address contract-id constructor-args
+  FOUNDRY_PROFILE=default forge build src/btc >/dev/null
+  FOUNDRY_PROFILE=default forge verify-contract "$1" "$2" \
+    --chain "$CHAIN_ID" \
+    --verifier blockscout --verifier-url "$EXPLORER/api/" \
+    --compiler-version 0.8.28 --evm-version cancun --num-of-optimizations 200 \
+    --constructor-args "$3" \
+    --watch || echo "   forge verify-contract failed (see output above)"
+}
+
+declare -a RESULT OPTIONAL
+for i in "${!NAMES[@]}"; do
+  name=${NAMES[$i]} addr=${ADDRS[$i]} kind=${KINDS[$i]}
   echo "== $name $addr"
   if [ "$(cast code "$addr" --rpc-url "$RPC")" = "0x" ]; then
-    echo "   no code on chain $CHAIN_ID; deploy it first (deploy.sh)"
-    RESULT[$i]="not deployed"
+    if [ "$kind" = settler ] || [ "$kind" = adapter ]; then
+      echo "   no code on chain $CHAIN_ID; phase 2, deployed by deploy-btc.sh"
+      RESULT[$i]="not deployed (phase 2)"
+      OPTIONAL[$i]=1
+    else
+      echo "   no code on chain $CHAIN_ID; deploy it first (deploy.sh)"
+      RESULT[$i]="not deployed"
+    fi
     continue
   fi
   s=$(status "$addr")
@@ -77,7 +108,22 @@ for i in 0 1 2; do
     s=$(status "$addr")
     echo "   explorer: $s"
   fi
-  if ! verified "$s" && [ "$i" = 2 ]; then
+  if ! verified "$s" && [ "$kind" = settler ]; then
+    args=$(cast abi-encode 'constructor(address,address,uint32)' \
+      "$(cast call "$addr" 'HBK()(address)' --rpc-url "$RPC")" \
+      "$(cast call "$addr" 'SETTLER()(address)' --rpc-url "$RPC")" \
+      "$(cast call "$addr" 'CONFIRMATION_OFFSET()(uint32)' --rpc-url "$RPC")")
+    echo "   submitting src/btc/X402BtcSettler.sol with forge verify-contract"
+    submit_btc "$addr" src/btc/X402BtcSettler.sol:X402BtcSettler "$args"
+    s=$(status "$addr")
+    echo "   explorer: $s"
+  elif ! verified "$s" && [ "$kind" = adapter ]; then
+    args=$(cast abi-encode 'constructor(address)' "$(cast call "$addr" 'HBK()(address)' --rpc-url "$RPC")")
+    echo "   submitting src/btc/HbkTestnetAdapter.sol with forge verify-contract"
+    submit_btc "$addr" src/btc/HbkTestnetAdapter.sol:HbkTestnetAdapter "$args"
+    s=$(status "$addr")
+    echo "   explorer: $s"
+  elif ! verified "$s" && [ "$kind" = proxy ]; then
     echo "   submitting vendored source (src/x402/x402ExactPermit2Proxy.sol) with forge verify-contract"
     FOUNDRY_PROFILE=verify forge build src/x402/x402ExactPermit2Proxy.sol >/dev/null
     FOUNDRY_PROFILE=verify forge verify-contract "$addr" \
@@ -98,8 +144,8 @@ done
 echo
 echo "Summary ($EXPLORER):"
 rc=0
-for i in 0 1 2; do
+for i in "${!NAMES[@]}"; do
   printf '  %-26s %s  %s\n' "${NAMES[$i]}" "${ADDRS[$i]}" "${RESULT[$i]}"
-  verified "${RESULT[$i]}" || rc=1
+  verified "${RESULT[$i]}" || [ "${OPTIONAL[$i]:-}" = 1 ] || rc=1
 done
 exit $rc
