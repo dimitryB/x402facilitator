@@ -1376,6 +1376,36 @@ Blockscout knows no creation transaction or creation bytecode for Permit2, and t
 
 Step 3 is done for the contracts this project deployed. README and contracts/README now say so, and describe the filter instead of a block.
 
+## D-035. Upstream x402-rs PRs #138, #140 and #142 against the settlement patches
+
+Asked on 2026-11-09 whether the patches are still needed. Read-only: `gh api`, `gh pr view` and `gh pr diff`, with the diffs saved outside the repo.
+
+**Upstream state.** `x402-rs/x402-rs` `main` is still `e75adda` (2026-07-13), the commit the image pins, on every branch; the last merged PR is #100 from 2026-07-08; 58 issues and PRs are open. `x402-foundation/x402` has moved 64 commits past the SDK patch's base `e4a0868`, to `6e9400d`, and at that commit `constants.ts`, `defaultAssets.ts` and the network-support docs have no Hemi entry. The SDK patch applies cleanly to `6e9400d` (`git apply --check` on the five files it touches). So both patch sets are still needed: nothing upstream fixes what they fix, and `@x402/evm` 2.30.0 does not know Hemi.
+
+**The overlapping PRs**, all by `zachsplat`, stacked: #140 carries #138's commit `c6a8680`, and #142 carries both plus `a15d29a` and `ef0e0ff`. They predate this repo (2026-10-11 to 23). The README of `facilitator/x402-rs` now has the comparison. The points below were checked in the diffs, not taken from the descriptions:
+
+```
+#138 handlers.rs   X402SchemeFacilitatorError::SettlementPending { .. } => StatusCode::ACCEPTED      (ours: 200, patch 0018)
+#138 provider.rs   RECEIPT_RETRY_ATTEMPTS = 3; RECEIPT_RETRY_INITIAL_DELAY = 1 s;
+                   on ReceiptUnavailable: self.nonce_manager.reset_nonce(from_address).await          (ours: nonce kept, patch 0006)
+#140 pending_settlement.rs   PENDING_SETTLEMENT_TTL = 5 * 60 s; key = keccak256(signature); take(key, request_hash)
+                   entry recorded in settle_with_pending_store only on Eip155ExactError::ReceiptUnavailable
+                   no change to any verify path (the one "verify" in the diff is an import)             (ours: record from settle start, /verify refused, 0011)
+#140 provider.rs   RECONCILE_POLL_INTERVAL = 1 s, up to receipt_timeout_secs
+#142 config.rs     reconcile_used_authorizations: bool, #[serde(default)] -> false; log_query_max_blocks default 100
+#142 authorization_use.rs   AUTHORIZATION_USE_LOOKBACK = PENDING_SETTLEMENT_TTL; LOG_QUERY_MAX_CALLS = 50; EIP-3009 paths only
+#142 handlers.rs   no spawn or JoinHandle: a disconnect still cancels the settlement                   (ours: detached, 0015)
+```
+
+The type names in #138 are the same as in 0006, `MetaTransactionSendError::ReceiptUnavailable { tx_hash, source }` and `X402SchemeFacilitatorError::SettlementPending`. Both follow x402-rs's own naming, and 0006 was written without reading #138.
+
+**What this means for the drafts.**
+
+- The upstream maintainer has merged nothing for four months, so submitting is unlikely to change the image soon. The patches stay in the image either way.
+- If submitted, 0006 and 0011 should go as comments on #138 and #140 and against issue #136, pointing at the three differences that cost funds or service: the nonce reset, the record that starts too late for `/verify`, and the inline settlement that a disconnect cancels. 0028's per-RPC receipt lookup is a third comment on #138.
+- The rest of the series has no upstream counterpart and would be new PRs. Issue #119 already asks for 0002's `network` field.
+- Nothing changes in this repo's code. The README of `facilitator/x402-rs` gains the comparison table, and the top-level README's **Facilitator memory** limit is what #142 would address.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).
