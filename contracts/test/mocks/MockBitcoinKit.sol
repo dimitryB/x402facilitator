@@ -25,6 +25,18 @@ contract MockBitcoinKit {
         uint32 confirmations;
     }
 
+    /// hBK's BitcoinHeader (BitcoinKitStructs.sol); only `height` is ever set here.
+    struct BitcoinHeader {
+        uint32 height;
+        bytes32 blockHash;
+        uint32 version;
+        bytes32 previousBlockHash;
+        bytes32 merkleRoot;
+        uint32 timestamp;
+        uint32 bits;
+        uint32 nonce;
+    }
+
     uint256 internal constant MAX_PARSED_OUTPUTS = 32; // hBK's maxOutputsExponent 5
     uint256 internal constant MAX_SCRIPT_BYTES = 64; // hBK's maxOutputScriptSizeExponent 2
 
@@ -37,6 +49,8 @@ contract MockBitcoinKit {
     bytes public rawOutputAnswer;
     /// When true, the confirmation reads revert with a custom error after the output read succeeded.
     bool public failConfirmations;
+    /// Height returned by getLastHeader / btcLastHeader (for check-btc-live.sh against a fork).
+    uint32 public lastHeaderHeight;
 
     error MockHbkFailure();
 
@@ -118,6 +132,12 @@ contract MockBitcoinKit {
         rawOutputAnswer = data;
     }
 
+    function setLastHeader(
+        uint32 height
+    ) external {
+        lastHeaderHeight = height;
+    }
+
     function setFailConfirmations(
         bool fail
     ) external {
@@ -173,7 +193,17 @@ contract MockBitcoinKit {
         return outputs[txId][outputIndex]; // Panic(0x32) past the end
     }
 
+    function getLastHeader() external view returns (BitcoinHeader memory h) {
+        _maybeFail();
+        h.height = lastHeaderHeight;
+    }
+
     // ---------------------------------------------------------------- testnet ABI (btc*)
+
+    function btcLastHeader() external view returns (BitcoinHeader memory h) {
+        _maybeFail();
+        h.height = lastHeaderHeight;
+    }
 
     function btcTxConfirmations(
         bytes32 txId
