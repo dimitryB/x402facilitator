@@ -254,3 +254,26 @@ For the integration session to place in the top-level `README.md`. Stream C did 
 > - **Bitcoin L1 settle hash:** the success response carries the Bitcoin txid. The Hemi settle transaction is in the facilitator log and the settler's `Settled` event, not yet in the response.
 
 ## e2e run
+
+### The existing suite is unaffected
+
+This ran at the default ports, on this branch with its changed `tests/lib/`, the `hemi.14` image, and no bip122 in the facilitator:
+
+```
+$ npm test -w tests
+ Test Files  13 passed | 1 skipped (14)
+      Tests  116 passed | 31 skipped (147)
+   Start at  13:06:48
+   Duration  381.02s (tests 99%, import 1%)
+```
+
+The 116 are the existing tests, the same count as the README's last result. The 31 skipped are all of `11-btc-l1`. Its reason goes to stderr, because vitest drops console output from a file whose tests all skip:
+
+```
+[11-btc-l1] skipping: the facilitator's /supported lists no exact kind on bip122:* (stream B not in this image)
+```
+
+Two attempts before this one never got past the global setup, and both were collisions:
+- The first used the default ports while stream B's run held them.
+- The second used `E2E_PORT_OFFSET=100`, whose port 38180 Colima could not forward (TS-17).
+
