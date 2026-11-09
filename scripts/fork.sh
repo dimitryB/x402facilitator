@@ -2,7 +2,8 @@
 # Local Hemi forks for tests and demos. Nothing here touches a live network:
 # anvil forks read state from the public RPCs and keep every write local.
 #
-#   scripts/fork.sh up      start forks, deploy the three canonical contracts, fund the buyer
+#   scripts/fork.sh up      start forks, deploy the three canonical contracts, fund the buyer, and place
+#                           the mock hBK plus X402BtcSettler for Bitcoin L1 payments (phase 2)
 #   scripts/fork.sh down    stop the forks this script started
 #   scripts/fork.sh status  show what is running
 #
@@ -11,6 +12,9 @@
 #   FORK_TESTNET_UPSTREAM / FORK_MAINNET_UPSTREAM   RPCs to fork from (default: Hemi public RPCs)
 #   FORK_BLOCK_TESTNET / FORK_BLOCK_MAINNET          pin a fork block for reproducibility
 #   FORK_BUYER (anvil account #3)                    address funded with ETH and tokens
+#   FORK_FACILITATOR_TESTNET / FORK_FACILITATOR_MAINNET   the facilitator's signers (anvil #1, #2): the only
+#                           addresses X402BtcSettler lets settle. The settler addresses are written to
+#                           $FORK_STATE_DIR/btc-settlers.env as X402_BTC_SETTLER_{TESTNET,MAINNET}=0x… for compose.
 #   FORK_STATE_DIR (.scratch/fork)
 #
 # If the upstream refuses at startup (the public RPC rate-limits at ~300 req/min), the script
@@ -31,6 +35,12 @@ BUYER=${FORK_BUYER:-0x90F79bf6EB2c4f870365E785982E1f101E93b906}
 DEPLOYER_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 DEPLOYER=0x4e59b44847b379578588920cA78FbF26c0B4956C
 HEMI_JSON=$ROOT/shared/hemi.json
+# The facilitator's fork signers (anvil #1 and #2, as docker-compose.fork.yml and tests/lib/env.ts use
+# them): X402BtcSettler lets only its SETTLER settle, so each fork's settler is deployed with that address.
+FAC_TESTNET=${FORK_FACILITATOR_TESTNET:-0x70997970C51812dc3A010C7d01b50e0d17dc79C8}
+FAC_MAINNET=${FORK_FACILITATOR_MAINNET:-0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC}
+# Where the Bitcoin settler addresses go, as X402_BTC_SETTLER_{TESTNET,MAINNET}=0x… lines for compose.
+SETTLERS_ENV=$STATE/btc-settlers.env
 
 log() { printf '[fork] %s\n' "$*" >&2; }
 
@@ -98,6 +108,38 @@ deploy_canonical() { # rpc
   done
 }
 
+forge_create() { # rpc contract constructor-args... -> address
+  local rpc=$1 c=$2; shift 2
+  (cd "$ROOT/contracts" && forge create "$c" --rpc-url "$rpc" --private-key "$DEPLOYER_KEY" --broadcast --json \
+    --constructor-args "$@") | jq -r '.deployedTo'
+}
+
+# Bitcoin L1 payments (phase 2): there is no Bitcoin here, so the mock hBK (contracts/test/mocks/
+# MockBitcoinKit.sol) takes the real hBK address on each fork, and X402BtcSettler is deployed against it
+# with the facilitator's fork signer as SETTLER and offset 0. On the testnet fork the settler reads hBK
+# through HbkTestnetAdapter, as the live testnet deployment would. The addresses go to $SETTLERS_ENV.
+deploy_btc() { # rpc network signer var-name
+  local rpc=$1 net=$2 signer=$3 var=$4
+  local hbk; hbk=$(jq -r --arg n "$net" '.networks[$n].contracts.hbk // empty' "$HEMI_JSON")
+  [ -n "$hbk" ] || { log "  no hBK address for $net in shared/hemi.json; no Bitcoin settler on this fork"; return; }
+  local have=""; [ -f "$SETTLERS_ENV" ] && have=$(sed -n "s/^$var=//p" "$SETTLERS_ENV")
+  if [ -n "$have" ] && [ "$(cast code "$have" --rpc-url "$rpc")" != "0x" ]; then log "  X402BtcSettler already at $have"; return; fi
+  local code; code=$(cd "$ROOT/contracts" && forge inspect test/mocks/MockBitcoinKit.sol:MockBitcoinKit deployedBytecode 2>/dev/null) ||
+    { log "  forge inspect MockBitcoinKit failed; no Bitcoin settler on this fork"; return; }
+  cast rpc anvil_setCode "$hbk" "$code" --rpc-url "$rpc" >/dev/null
+  log "  mock hBK placed at $hbk"
+  local reader=$hbk
+  if [ "$net" = eip155:743111 ]; then
+    reader=$(forge_create "$rpc" src/btc/HbkTestnetAdapter.sol:HbkTestnetAdapter "$hbk")
+    log "  HbkTestnetAdapter at $reader"
+  fi
+  local settler; settler=$(forge_create "$rpc" src/btc/X402BtcSettler.sol:X402BtcSettler "$reader" "$signer" 0)
+  [ "$(cast code "$settler" --rpc-url "$rpc")" != "0x" ] || { log "  X402BtcSettler deployment failed"; exit 1; }
+  log "  X402BtcSettler at $settler (SETTLER $signer, offset 0)"
+  if [ -f "$SETTLERS_ENV" ]; then sed -i.bak "/^$var=/d" "$SETTLERS_ENV"; rm -f "$SETTLERS_ENV.bak"; fi
+  printf '%s=%s\n' "$var" "$settler" >> "$SETTLERS_ENV"
+}
+
 fund() { # rpc network
   local rpc=$1 net=$2
   cast rpc anvil_setBalance "$BUYER" 0x8ac7230489e80000 --rpc-url "$rpc" >/dev/null   # 10 ETH
@@ -118,6 +160,9 @@ case ${1:-} in
     log "testnet fork: deploying canonical contracts"; deploy_canonical "http://127.0.0.1:$TP"
     log "mainnet fork: deploying canonical contracts"; deploy_canonical "http://127.0.0.1:$MP"
     log "funding buyer"; fund "http://127.0.0.1:$TP" eip155:743111; fund "http://127.0.0.1:$MP" eip155:43111
+    log "testnet fork: Bitcoin settler"; deploy_btc "http://127.0.0.1:$TP" eip155:743111 "$FAC_TESTNET" X402_BTC_SETTLER_TESTNET
+    log "mainnet fork: Bitcoin settler"; deploy_btc "http://127.0.0.1:$MP" eip155:43111 "$FAC_MAINNET" X402_BTC_SETTLER_MAINNET
+    [ -f "$SETTLERS_ENV" ] && log "settler addresses for compose: $SETTLERS_ENV"
     log "ready: testnet fork http://127.0.0.1:$TP  mainnet fork http://127.0.0.1:$MP"
     ;;
   down)
@@ -126,6 +171,7 @@ case ${1:-} in
       elif [ -f "$STATE/$n.pid" ]; then log "$n pid $(cat "$STATE/$n.pid") is not anvil any more; not killing it"; fi
       rm -f "$STATE/$n.pid"
     done
+    rm -f "$SETTLERS_ENV"
     ;;
   status)
     for n in testnet mainnet; do

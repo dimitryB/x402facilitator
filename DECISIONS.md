@@ -1406,6 +1406,50 @@ The type names in #138 are the same as in 0006, `MetaTransactionSendError::Recei
 - The rest of the series has no upstream counterpart and would be new PRs. Issue #119 already asks for 0002's `network` field.
 - Nothing changes in this repo's code. The README of `facilitator/x402-rs` gains the comparison table, and the top-level README's **Facilitator memory** limit is what #142 would address.
 
+## D-036. Phase 2: Bitcoin L1 payments verified through hBK, built and integrated on forks
+
+On 2026-11-09 Dimitry asked for phase 2 to be designed, planned, split and started in child sessions. The design was researched read-only against mainnet hBK and the upstream x402 and x402-rs code, approved with three choices (a derived address per payment, the consumption record in a Hemi contract, the live proof on mainnet with one small real payment), and saved as [`docs/phase2/DESIGN.md`](docs/phase2/DESIGN.md). Three sessions then built it in parallel on their own branches; their notes, with every command and output, are [`docs/phase2/contracts.md`](docs/phase2/contracts.md) (A), [`docs/phase2/facilitator.md`](docs/phase2/facilitator.md) (B) and [`docs/phase2/ts.md`](docs/phase2/ts.md) (C). This entry records what the design fixed, what the streams changed, and the integration.
+
+**The scheme.** `exact` on CAIP-2 `bip122:000000000019d6689c085ae165831e93` (Bitcoin mainnet) and `bip122:000000000933ea01ad0ee984209779ba` (testnet3); asset `BTC`, amount in satoshis; `payTo` is the seller's account xpub; `extra.assetTransferMethod "utxo"`, `extra.paymentFlow "upfront"` (a stock seller calls only `/settle`, before its handler), a random `extra.paymentId` per 402 (dynamic field), `extra.addressType` (p2wpkh default, p2tr), `extra.minConfirmations` (default 1); payload `{txid, vout}`. The payment address is child `m/0/i1/i2/i3` of the xpub with the three indices taken from `sha256("x402-btc" ‖ bytes16(paymentId))`. The facilitator verifies through `X402BtcSettler.verify` on Hemi (an `eth_call` that reads `getSpecificTxOutput` and `getTxConfirmations` from hBK) and settles by sending `settle`, which marks `(txid, vout)` consumed and emits `Settled(txid, vout, scriptPubKeyHash, sats, paymentRef, settler)`, `paymentRef = sha256(bytes16(paymentId))`. Success returns `transaction` = the Bitcoin txid, no `payer`. The spec draft is [`docs/specs/scheme_exact_bip122.md`](docs/specs/scheme_exact_bip122.md).
+
+**Two design changes during the build.**
+
+- *Three derivation levels, not one.* The approved rule used one 31-bit index. Stream C showed that anyone holding the public xpub can precompute its 2^31 children, recognise a payment's address in the mempool, brute-force a `paymentId` whose digest gives the same index in seconds, and submit it: the facilitator derives the same script and settles for the attacker. Three levels give 93 bits. Vectors: `btc/test-vectors.json` (16, each with digest, indices, pubkey, script, address and `paymentRef`); the Rust crate reproduces them (B-12).
+- *`settle` only by the facilitator's signer.* A permissionless `settle` would let anyone who sees the Bitcoin tx settle first with a bogus `paymentRef` and block the real one. `SETTLER` is an immutable constructor argument; rotating the signer means a new settler.
+
+**Measured, and corrected.** D-012's and the design's reading that hBK's confirmation count is Bitcoin's + 1 came from comparing with mempool.space's tip. Stream A compared with hBK's own tip and with coinbase transactions of the newest blocks: hBK counts Bitcoin confirmations, and a transaction is retrievable only once hVM's last header, two blocks behind the tip, has passed its block. So `CONFIRMATION_OFFSET` is 0, and the earliest acceptance is about 3 Bitcoin confirmations (about 30 minutes) whatever `minConfirmations` says (A-2). The deployed mainnet hBK also returns an `Output` tuple with eight head words, not the ten of `BitcoinKitStructs.sol`, which is why the settler decodes hBK's answers by hand with bounds checks (A-1). `getUTXOsForBitcoinAddress` reverted for every address tried, so nothing uses it.
+
+**What landed** (merged into `feat/facilitator-mvp` in 07df2e3, f4c8b16 and 9321b76, with no conflicts):
+
+- Contracts: `contracts/src/btc/{X402BtcSettler,IHbkReader,HbkTestnetAdapter}.sol`, `MockBitcoinKit` (both hBK ABIs, etched at the real hBK address in tests and on forks), `DeployBtcSettler.s.sol` (CREATE2 through `0x4e59…956C`, `CONFIRM_MAINNET_DEPLOY` gate), `deploy-btc.sh`, `check-btc-live.sh`. 66 forge tests. Predicted addresses: mainnet `0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f`, testnet `0x56AdDfcC77b087D9101ddEE8D3A38e95E0A365B0`, in `shared/hemi.json`. **Nothing deployed.** `check-btc-live.sh mainnet` ran read-only with the compiled code as a state override: `verify` of the fixture tx `95bca029…367e` vout 1 answered `Ok`, 83050000 sats (A-6). Testnet's hBK has an older `btc*` ABI and could not be shown to work (A-7).
+- Facilitator: crate `facilitator/x402-rs/crates/x402-chain-bip122`, patches 0029 (error codes) and 0030 (chain and scheme registration), image `hemi-x402-facilitator:e75adda-hemi.15`. The bip122 provider wraps the registered Hemi provider, so the settle transaction goes through the same nonce manager and the same send path as every other settlement (patches 0006 to 0028 apply). An unset `X402_BTC_SETTLER_*` skips that Bitcoin chain (B-2). The `bitcoin` crate is pinned by a lock fragment the build checks (B-8). 42 crate unit tests.
+- TypeScript: workspace `btc/` (`ExactBtcServerScheme`, `ExactBtcClientScheme` with a payment journal, derivation, a minimal wallet on `@scure/btc-signer`, `mock-hbk` helpers), seller and buyer support, the spec draft, `tests/e2e/11-btc-l1.test.ts` (31 tests), `tests/lib/spec.ts` generalised for a Bitcoin `transaction` and an absent `payer`. The buyer drives a pay-then-poll loop and keeps polling on `settlement_pending`, `…_unconfirmed` and `…_transaction_not_found` (TS-7), which supersedes the design's "continue only on `settlement_pending`"; the facilitator keeps the verdict table on both endpoints (B-1). 90 unit tests.
+
+**Integration** (this session, 2026-11-09):
+
+- `scripts/fork.sh up` now places the mock hBK at the real hBK address on each fork, deploys `HbkTestnetAdapter` (testnet) and `X402BtcSettler` with the facilitator's fork signer as `SETTLER` and offset 0, and writes the addresses to `$FORK_STATE_DIR/btc-settlers.env`; `tests/setup/global.ts` and `buyer/demo-fork.sh` pass them to the facilitator as `X402_BTC_SETTLER_{TESTNET,MAINNET}`. A rerun of `up` is a no-op; `down` removes the file. Two `set -e` traps in the first version (reading and `sed -i` on a file that did not exist yet) made the script exit silently after the first settler; both fixed.
+- `tests/e2e/01-supported.test.ts` now expects the two bip122 kinds beside the Hemi ones when the settlers are deployed.
+- Colima's Lima agent failed its own `ssh -O forward` and `-O cancel` for port 38080 (exit 255) in three runs, leaving the facilitator unreachable or a stale forward that tripped the suite's port guard, as stream C had seen (TS-17). `tests/setup/global.ts` now cancels a stale forward held by Colima's ssh mux before the guard, adds the forward by hand when `/supported` is unreachable 25 s after `compose up`, and cancels it at teardown; only when `~/.colima/_lima/colima/ssh.sock` exists, logged, and off with `E2E_NO_COLIMA_FIX=1`.
+
+```
+$ npm test -w tests          # hemi.15, forks with the settlers, dead primary RPCs
+ Test Files  1 failed | 13 passed (14)      # the one failure: 01-supported's "nothing but the two Hemi chains", now updated
+      Tests  1 failed | 146 passed (147)
+   Duration  564.90s
+$ (cd tests && npx vitest run e2e/01-supported.test.ts)    # after the update, same stack
+      Tests  2 passed (2)
+$ (cd contracts && forge test)     66 passed, 0 failed
+$ npm test -w btc                  90 passed, 0 failed
+$ npm run typecheck --workspaces   clean (shared, btc, seller, buyer, tests)
+$ docker compose build             hemi-x402-facilitator:e75adda-hemi.15
+```
+
+`buyer/demo-fork.sh` settled all five payments, the fifth being `--asset btc-l1 --network btc-mainnet --stub-pay <fork RPC>`: 1000 sats to the derived address `bc1q9y72z7…ygcy` (`xpub6CatWdiZ…/0/1842827367/182881499/83036790`) written into the mock hBK, verified and settled through `X402BtcSettler` on the mainnet fork, the seller serving once and logging the paymentId and path it needs to spend the funds. It needed the same Colima forward workaround (`DEMO_NO_COLIMA_FIX=1` turns it off).
+
+The 31 Bitcoin tests cover `/supported`; verify and settle with the Bitcoin txid, `settledBy`, the `Settled` event and replay; a confirmations boundary then success with the same payload; unknown txid, missing output, another paymentId's address, a decoy output, one sat short, overpayment, p2tr; the other network's key, `minConfirmations` out of policy, malformed payloads (400); and the stock seller engine with `ExactBtcServerScheme` paid by `ExactBtcClientScheme`: 402 while unconfirmed, served once after, 402 on reuse. The "vout past the end" case that hung in stream C's pre-flight passed here.
+
+**Not done, each on its own go:** the mainnet settler deployment (`CONFIRM_MAINNET_DEPLOY=yes contracts/deploy-btc.sh mainnet --broadcast`, about 0.000011 ETH, from `DEPLOYER_PRIVATE_KEY`), the facilitator config with `X402_BTC_SETTLER_MAINNET`, and one real Bitcoin payment of a few dollars from a buyer wallet Dimitry funds, polled until hVM sees it. The Hemi settle hash is not in the success body (B-7); the testnet settler is not deployed (A-7). The brief's phase 2 note asked for a design pass on confirmation depth versus PoP finality; the result is in `DESIGN.md` and the README's limits: acceptance is a Bitcoin question (hBK's count, the seller's `minConfirmations`), PoP finality only gates the durability of the consumption record on Hemi.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

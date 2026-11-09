@@ -1,5 +1,7 @@
 <!-- Copied from the approved plan of 2026-11-09. Child sessions implement the streams below; the integration session merges them. -->
 
+> **Where the implementation departs from this plan** (details in DECISIONS.md D-036 and `docs/phase2/{contracts,facilitator,ts}.md`): the address derivation has three levels (see the revised rule below); `CONFIRMATION_OFFSET` is 0, because hBK counts Bitcoin confirmations (A-2); the buyer keeps polling on `settlement_pending`, `invalid_exact_bip122_payload_unconfirmed` and `invalid_exact_bip122_payload_transaction_not_found`, and the facilitator keeps the verdict table on both endpoints (B-1, TS-7), so the stream C line "continue only on `settlement_pending`" is void; the success body carries no `extra.settlementTransaction` (B-7: that needs a proto change; the Hemi hash is in the log and the `Settled` event); `paymentRef = sha256(bytes16(paymentId))` over the raw bytes (TS-4); `SELLER_BTC_XPUB` takes one key per network (TS-11); the testnet settler is written but not deployed, because testnet's hBK could not be shown to work (A-7).
+
 # Phase 2: Bitcoin L1 payments verified through hBK
 
 ## Context

@@ -2,9 +2,9 @@
 
 An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hemi mainnet (`eip155:43111`) and Hemi testnet (`eip155:743111`) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint.
 
-It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and twenty-eight small patches. Eighteen make its error responses match the x402 v2 spec, one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018), and nine keep a settlement's outcome correct under load and when RPCs stall, lag or fail (D-019 to D-025). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
+It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and thirty small patches. Eighteen make its error responses match the x402 v2 spec, one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018), and nine keep a settlement's outcome correct under load and when RPCs stall, lag or fail (D-019 to D-025), and two add phase 2: native Bitcoin L1 payments verified through Hemi's hBK (D-036). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
 
-**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). On 2026-11-04 live mainnet payments settled in USDC.e, in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031), and in hemiBTC, in [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27) (D-032). See [Definition of done](#definition-of-done).
+**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). On 2026-11-04 live mainnet payments settled in USDC.e, in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031), and in hemiBTC, in [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27) (D-032). Phase 2, native BTC paid on Bitcoin L1 and verified through hBK in a Hemi contract, is built and tested on forks (D-036); its contract is not yet deployed on mainnet and no live Bitcoin payment has run. See [Definition of done](#definition-of-done).
 
 | Path | What it is |
 |------|------|
@@ -14,6 +14,8 @@ It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned 
 | [`buyer/`](buyer/) | Demo buyer using `@x402/fetch`; pays the seller and prints the settlement tx |
 | [`tests/`](tests/) | End-to-end tests of `/verify` and `/settle` on local forks of both Hemi chains, plus read-only live checks |
 | [`sdk-patch/`](sdk-patch/) | Draft upstream patch adding Hemi to the x402 TypeScript SDK's default assets |
+| [`btc/`](btc/) | Phase 2: the `exact` scheme on Bitcoin L1 for the x402 TypeScript SDK (seller and buyer sides), derivation, a minimal wallet |
+| [`docs/specs/scheme_exact_bip122.md`](docs/specs/scheme_exact_bip122.md), [`docs/phase2/`](docs/phase2/) | Phase 2: the scheme spec draft, the design and each stream's notes |
 | [`shared/hemi.json`](shared/hemi.json) | Every Hemi address used here, in one file |
 | [`DECISIONS.md`](DECISIONS.md) | The spike and every decision, with commands and outputs |
 
@@ -44,6 +46,8 @@ The same addresses on both networks. Each contract is replayed from its original
 | x402 exact Permit2 proxy | `0x402085c248EeA27D92E8b30b2C58ed07f9E20001` | deployed 2026-11-04, [tx](https://explorer.hemi.xyz/tx/0x237bd41c34b314dfa686311685bde4dbfe63e4c5becd66293a91198aa182ec79) | deployed 2026-10-29, [tx](https://testnet.explorer.hemi.xyz/tx/0x0b2c46fa31d97c43588f9a78fb3eec469f664033495d342979408253481ec863) |
 | EIP-6492 validator | `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` | deployed 2026-11-04, [tx](https://explorer.hemi.xyz/tx/0x9d5d7876579c12f86440bd2e74750bb0748b9d4a07a9836c69bbe6332aa0721e) | deployed 2026-10-29, [tx](https://testnet.explorer.hemi.xyz/tx/0xec5e69e3ee1a477a54df8b549d5191b8ecb0761bf43b2d7df0db8055929c740e) |
 | Multicall3 | `0xcA11bde05977b3631167028862bE2a173976CA11` | present | present |
+| hBK (Hemi Bitcoin Kit), read by the settler | `0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12` (mainnet), `0xeC9fa5daC1118963933e1A675a4EEA0009b7f215` (testnet) | present (Hemi's) | present (Hemi's, different ABI) |
+| X402BtcSettler (phase 2) | `0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f` (mainnet), `0x56AdDfcC77b087D9101ddEE8D3A38e95E0A365B0` (testnet) | predicted, not deployed: needs the go | predicted, not deployed |
 
 Assets (source: Hemi's token list, which feeds the tunnel UI, plus on-chain reads; D-007, D-008):
 
@@ -98,7 +102,7 @@ docker compose up                                          # both chains (config
 
 If a contract or key is missing, the container exits with the reason. A missing contract shows as `Contract at address … does not exist`. An empty `FACILITATOR_*_PRIVATE_KEY` shows as `Invalid evm private key: invalid string length`. If every RPC stalls at startup, it exits after about 10 seconds with `error sending request for url (…)`. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently, so after an RPC outage at startup, start it again by hand.
 
-The image, `hemi-x402-facilitator:e75adda-hemi.14`, is x402-rs at commit `e75adda` plus twenty-eight small patches, built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it. The build fetches x402-rs from GitHub, the crates from crates.io and the pinned `rust:1.93-trixie` image (about 2.2 GB), then compiles for 2 to 4 minutes on a 4-CPU machine. Add `--build` after changing a patch. Forks also need the Hemi public RPCs to be reachable.
+The image, `hemi-x402-facilitator:e75adda-hemi.15`, is x402-rs at commit `e75adda` plus thirty small patches and one new crate (`x402-chain-bip122`), built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it. The build fetches x402-rs from GitHub, the crates from crates.io and the pinned `rust:1.93-trixie` image (about 2.2 GB), then compiles for 2 to 4 minutes on a 4-CPU machine. Add `--build` after changing a patch. Forks also need the Hemi public RPCs to be reachable.
 
 Stock x402-rs does not return the x402 v2 spec's error shapes, and on a quiet Hemi it can send a settlement that is never mined. The patches fix both:
 
@@ -166,6 +170,8 @@ Until Hemi is in the SDK's default assets ([`sdk-patch/`](sdk-patch/)), price wi
 
 The seller SDK checks the facilitator's `/supported` at startup and refuses to serve a network the facilitator does not list. A rejected `/verify` comes back as HTTP 200 with `isValid: false`, as from the TS reference facilitator. The seller SDK's `onAfterVerify` hook sees it, and the buyer's 402 carries the bare §9 code. A missing Permit2 allowance becomes a 412 to the buyer. `tests/e2e/04c-stock-seller.test.ts` checks this with the stock seller engine. Keep the SDK's default facilitator timeout (90 s) or raise it. `/settle` can take 65 seconds or more plus its checks when RPCs stall, and a lower timeout can cut off a `settlement_pending` answer.
 
+**Bitcoin L1 (phase 2).** The same seller can take native BTC on Bitcoin mainnet or testnet3, paid on chain and verified by the facilitator through Hemi's hBK. Set `SELLER_BTC_NETWORKS=btc-mainnet` and `SELLER_BTC_XPUB` to an account xpub (`tpub` for testnet3); the price is `SELLER_BTC_AMOUNT_SATS` (default 1000). With the SDK, register `new ExactBtcServerScheme({ network, payTo: xpub })` from `@hemi-x402/btc` once per Bitcoin network and price the accept as `{ asset: "BTC", amount: "<sats>" }` with `payTo` = the xpub. Every 402 gets a fresh `extra.paymentId`. Each payment goes to its own address, `xpub/0/i1/i2/i3`, derived from that paymentId. The flow is `upfront`: the SDK skips `/verify` and settles before the handler. Keep the paymentIds of settled payments (the demo seller logs them): no wallet scan finds these addresses, and you need the path to spend the funds. [`docs/specs/scheme_exact_bip122.md`](docs/specs/scheme_exact_bip122.md) is the scheme; [`seller/README.md`](seller/README.md) has the settings.
+
 ## For buyers: approving Permit2 (or not)
 
 - **Mainnet USDC.e:** no approval and no ETH. The payment is one EIP-3009 signature, and the facilitator pays the gas.
@@ -182,6 +188,8 @@ npm run pay -w buyer -- --asset btc  --network testnet
 These pay a live seller through a live facilitator, so they work only after the testnet deployment, with both running. `scripts/testnet-run.sh --go` does all of that. For a local run, use `buyer/demo-fork.sh`.
 
 The buyer prints the settlement tx hash and its explorer link. [`buyer/README.md`](buyer/README.md) lists every option.
+
+**Bitcoin L1 (phase 2).** `npm run pay -w buyer -- --asset btc-l1 --network btc-testnet3` pays a real Bitcoin transaction from `BUYER_BTC_WIF` or `BUYER_BTC_MNEMONIC` to the address derived from the seller's xpub and the 402's paymentId. It then re-sends the same payment every `--poll` seconds until the seller serves it. Expect 30 minutes or more on mainnet: hVM must see about 3 confirmations. Don't use `wrapFetchWithPayment` for this scheme, because it would pay again on the next 402. `ExactBtcClientScheme` journals every payment by paymentId and never pays one twice. The journal is in `.scratch/buyer-btc/journal.jsonl`, and `--resume <paymentId>` continues after a restart. `ALLOW_MAINNET=yes` is required for `btc-mainnet`. See [`buyer/README.md`](buyer/README.md).
 
 ## Testnet run
 
@@ -303,7 +311,10 @@ Explorer verification (step 3) needed no submission: Blockscout's bytecode datab
 ```bash
 npm test -w tests              # end-to-end on local forks, with dead primary RPCs
 (cd contracts && forge test)   # deployment, codehash and settle-path tests on forks
+npm test -w btc                # @hemi-x402/btc unit tests: derivation vectors, SDK engine, journal, wallet (no network)
 ```
+
+On Colima, the Lima agent that publishes a container's port sometimes fails its own `ssh -O forward` or `-O cancel` (exit 255), so the facilitator is unreachable although it runs, or a stale forward trips the suite's port guard. The e2e setup and `buyer/demo-fork.sh` then add or cancel the forward by hand through Colima's ssh mux, and say so in their log; `E2E_NO_COLIMA_FIX=1` / `DEMO_NO_COLIMA_FIX=1` turn that off (D-036).
 
 `tests/live/verify-failures.ts` is separate from the suite. It runs read-only `/supported` and `/verify` failure checks against a facilitator on the live chains and never calls `/settle` (D-030).
 
@@ -328,14 +339,16 @@ The end-to-end suite starts both forks and the facilitator image from this repo.
 - that a gateway's 502 after it forwarded the transaction is not reported as a failed settlement, whether or not the other RPC then rejects the copy
 - that a rejected send, and a send no RPC can find, free the nonce for the next settlement, and that a failed tip read sends nothing
 - that a fast RPC with no receipt, or frozen at an old block, hides a mined payment neither from the first settle nor from a retry
+- native BTC on Bitcoin L1 (`11-btc-l1`, phase 2): payments are fabricated in the mock hBK that `scripts/fork.sh` places at the real hBK address, and settled through `X402BtcSettler` on the fork. The file covers `/supported`; verify and settle with the Bitcoin txid, `settledBy`, the `Settled` event and replay; a confirmations boundary, then success with the same payload; unknown txid, missing output, wrong address (another paymentId, a decoy output), one sat short, overpayment, p2tr; the other network's key, an out-of-policy `minConfirmations`, malformed payloads; and the stock seller engine with `ExactBtcServerScheme` paid by `ExactBtcClientScheme`: 402 while unconfirmed, served once after, 402 on reuse
 
-Latest results, from 2026-11-02 against a no-cache build of hemi.14:
+Latest results, from 2026-11-09 on hemi.15 with the phase 2 streams merged (D-036); the 2026-11-02 run of hemi.14 had 13 files, 116 tests and 17 forge tests:
 
 | Suite | Result |
 |------|------|
-| `npm test -w tests` | 13 files, 116 tests passed, 0 failed (361 s) |
-| `forge test` | 17 passed, 0 failed |
-| `buyer/demo-fork.sh` | all four payments settled; payTo received exactly the price each time. Before patch 0022, hemi.9 settled all four in 20 of 20 runs |
+| `npm test -w tests` | 14 files, 147 tests passed, 0 failed (565 s): the 116 existing tests plus the 31 of `11-btc-l1` |
+| `forge test` | 66 passed, 0 failed (17 existing, 49 for `X402BtcSettler`, its adapter, mock and deployment) |
+| `npm test -w btc` | 90 passed, 0 failed |
+| `buyer/demo-fork.sh` | all five payments settled, the fifth being 1000 sats of fabricated BTC on the mainnet fork through the mock hBK and `X402BtcSettler`; payTo received exactly the price each time. Before patch 0022, hemi.9 settled all four in 20 of 20 runs |
 
 ## Definition of done
 
@@ -374,4 +387,9 @@ Latest results, from 2026-11-02 against a no-cache build of hemi.14:
 - **Facilitator memory:** pending-settlement records live in memory. A facilitator restart forgets them, after which a pending authorization is judged by the chain alone.
 - **Verify-then-settle race:** two requests carrying the same payment header that both pass `/verify` before either settles can both reach the seller's handler; only one settle succeeds. This is inherent to the x402 verify, handler, settle flow, not specific to this facilitator.
 - **EIP-6492 deployment path:** a counterfactual wallet that is deployed during settle is untested end to end. The forks have no wallet factory, so only rejection and the plain-wallet shortcut are tested.
-- **Phase 2:** paying in Bitcoin L1 and verifying through hBK is not started (D-012).
+- **Bitcoin L1 payments take time.** hBK returns a transaction only once hVM's last Bitcoin header passes its block, two blocks behind the tip on mainnet. So a payment is accepted after about 3 confirmations, about 30 minutes, whatever `minConfirmations` says. On testnet3 hVM is thousands of blocks behind, so a testnet payment can take hours.
+- **Bitcoin L1 refunds:** none. Overpayment is accepted and buys nothing more. A buyer that stops polling still paid; `--resume` picks the payment up again.
+- **Bitcoin L1 payment addresses** are random descendants of the seller's xpub, so wallets do not find them by scanning. The seller must keep each paymentId to spend the funds.
+- **Bitcoin L1 reorganisations:** a payment accepted at 1 confirmation can be reorganised out of Bitcoin. The consumption record can be reorganised out of Hemi before PoP finality. `minConfirmations` and idempotent handlers per paymentId are the levers.
+- **Bitcoin L1 settle hash:** the success response carries the Bitcoin txid. The Hemi settle transaction is in the facilitator log and the settler's `Settled` event, not yet in the response.
+- **Bitcoin L1 on mainnet:** the settler is not deployed and no live Bitcoin payment has run; both wait for an explicit go (D-036).

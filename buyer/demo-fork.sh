@@ -48,9 +48,13 @@ HEMI_JSON=$ROOT/shared/hemi.json
 
 log() { printf '\n[demo] %s\n' "$*" >&2; }
 
+# X402BtcSettler addresses that scripts/fork.sh deployed on the forks (phase 2); empty before `fork.sh up`.
+settler_var() { sed -n "s/^$1=//p" "$FORK_STATE_DIR/btc-settlers.env" 2>/dev/null; }
+
 # Compose interpolates these on both up and down; set them here so .env cannot override them.
 compose() {
   FACILITATOR_PORT=$FACILITATOR_PORT FACILITATOR_CONFIG=config.json \
+  X402_BTC_SETTLER_TESTNET=$(settler_var X402_BTC_SETTLER_TESTNET) X402_BTC_SETTLER_MAINNET=$(settler_var X402_BTC_SETTLER_MAINNET) \
   FACILITATOR_TESTNET_PRIVATE_KEY=$FAC_TESTNET_KEY FACILITATOR_MAINNET_PRIVATE_KEY=$FAC_MAINNET_KEY \
   HEMI_TESTNET_RPC_PRIMARY=http://host.docker.internal:$FORK_TESTNET_PORT \
   HEMI_TESTNET_RPC_FALLBACK=http://host.docker.internal:$FORK_TESTNET_PORT \
@@ -66,12 +70,25 @@ wait_for() { # url seconds
   return 1
 }
 
+# Colima publishes a container's port through an ssh forward its Lima agent adds and removes; on some
+# machines those calls fail (exit 255) and the facilitator stays unreachable although it runs, or a stale
+# forward is left behind (tests/setup/global.ts has the same workaround, DECISIONS.md D-036). This adds or
+# cancels the forward by hand through the mux socket, when it exists. Off with DEMO_NO_COLIMA_FIX=1.
+COLIMA_SOCK=$HOME/.colima/_lima/colima/ssh.sock
+ADDED_FORWARD=
+colima_forward() { # forward|cancel port
+  [ -z "${DEMO_NO_COLIMA_FIX:-}" ] && [ -S "$COLIMA_SOCK" ] || return 1
+  ssh -S "$COLIMA_SOCK" -O "$1" -L "127.0.0.1:$2:127.0.0.1:$2" lima-colima >/dev/null 2>&1 &&
+    log "colima: port forward $1 for :$2 done by hand"
+}
+
 SELLER_PID=
 cleanup() {
   log "tearing down"
   [ -n "$SELLER_PID" ] && kill "$SELLER_PID" 2>/dev/null || true
   compose down >/dev/null 2>&1 || true
   scripts/fork.sh down || true
+  [ -n "$ADDED_FORWARD" ] && colima_forward cancel "$FACILITATOR_PORT" || true
 }
 
 for p in "$FACILITATOR_PORT" "$SELLER_PORT"; do
@@ -85,7 +102,10 @@ scripts/fork.sh up
 
 log "starting facilitator ($PROJECT) on :$FACILITATOR_PORT"
 compose up -d
-wait_for "http://localhost:$FACILITATOR_PORT/supported" 60 || { compose logs --tail 50; exit 1; }
+if ! wait_for "http://localhost:$FACILITATOR_PORT/supported" 20; then
+  colima_forward forward "$FACILITATOR_PORT" && ADDED_FORWARD=1
+  wait_for "http://localhost:$FACILITATOR_PORT/supported" 60 || { compose logs --tail 50; exit 1; }
+fi
 curl -sS "http://localhost:$FACILITATOR_PORT/supported" | jq -c '[.kinds[] | {network, scheme}]'
 # The seller exits at startup if it is configured for a network the facilitator does not serve.
 if curl -sS "http://localhost:$FACILITATOR_PORT/supported" | jq -e --arg n "$BTC_MAINNET" 'any(.kinds[]; .network == $n)' >/dev/null; then

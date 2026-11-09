@@ -6,6 +6,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { MAINNET, TESTNET } from "@hemi-x402/shared";
 import { compose, run, waitForSupported } from "../lib/compose";
@@ -24,6 +25,30 @@ import {
 
 const FORK_SH = join(REPO_ROOT, "scripts", "fork.sh");
 const log = (msg: string) => console.log(`[e2e setup] ${msg}`);
+
+/**
+ * Colima publishes a container's port on the host through an ssh port forward that its Lima agent adds
+ * and removes. On this workstation that agent's `ssh -O forward` / `-O cancel` calls fail now and then
+ * (exit 255), which leaves either no forward (the facilitator is unreachable although the container
+ * runs) or a stale one (the port guard below trips after the container is gone). Both were hit while
+ * integrating phase 2 (docs/phase2/ts.md, TS-17). The same forward can be added or cancelled through the
+ * mux socket by hand; this does that, only when the socket exists, and logs it. Off with E2E_NO_COLIMA_FIX=1.
+ */
+const COLIMA_SOCK = join(homedir(), ".colima", "_lima", "colima", "ssh.sock");
+function colimaFixEnabled(): boolean {
+  return process.env.E2E_NO_COLIMA_FIX !== "1" && existsSync(COLIMA_SOCK);
+}
+function colimaForward(action: "forward" | "cancel", port: number): boolean {
+  const spec = `127.0.0.1:${port}:127.0.0.1:${port}`;
+  const r = spawnSync("ssh", ["-S", COLIMA_SOCK, "-O", action, "-L", spec, "lima-colima"], { encoding: "utf8", timeout: 15_000 });
+  log(`colima: ssh -O ${action} -L ${spec}: ${r.status === 0 ? "ok" : `exit ${r.status} ${(r.stderr ?? "").trim()}`}`);
+  return r.status === 0;
+}
+/** True when the listener on `port` is Colima's ssh mux (a forward with no container behind it). */
+function heldByColimaMux(port: number): boolean {
+  const pids = spawnSync("lsof", ["-t", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" }).stdout.trim().split(/\s+/).filter(Boolean);
+  return pids.length > 0 && pids.every(pid => spawnSync("ps", ["-o", "args=", "-p", pid], { encoding: "utf8" }).stdout.includes(".colima/_lima/colima/ssh.sock"));
+}
 
 function portInUse(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -82,10 +107,16 @@ export default async function setup(): Promise<() => Promise<void>> {
   stopStaleForks();
   for (const port of [FORK_PORT[TESTNET], FORK_PORT[MAINNET], FACILITATOR_PORT]) {
     if (await portInUse(port)) {
+      if (port === FACILITATOR_PORT && colimaFixEnabled() && heldByColimaMux(port)) {
+        log(`port ${port} is held by a stale Colima forward with no container behind it; cancelling it`);
+        colimaForward("cancel", port);
+        if (!(await portInUse(port))) continue;
+      }
       throw new Error(`port ${port} is in use by something this suite did not start; free it and rerun`);
     }
   }
 
+  let addedColimaForward = false;
   const teardown = async () => {
     if (process.env.KEEP_STACK === "1") {
       log(`KEEP_STACK=1: leaving forks on :${FORK_PORT[TESTNET]}/:${FORK_PORT[MAINNET]} and the facilitator on :${FACILITATOR_PORT}`);
@@ -96,6 +127,8 @@ export default async function setup(): Promise<() => Promise<void>> {
       compose(["down", "--remove-orphans"]);
     } finally {
       run(FORK_SH, ["down"], forkEnv(), 30_000);
+      // Lima's own cancel may fail too; a forward left behind would trip the next run's port guard.
+      if (colimaFixEnabled() && (addedColimaForward || heldByColimaMux(FACILITATOR_PORT))) colimaForward("cancel", FACILITATOR_PORT);
     }
   };
 
@@ -112,13 +145,32 @@ export default async function setup(): Promise<() => Promise<void>> {
       await rpc(url, "evm_mine", []);
     }
 
+    // fork.sh deployed X402BtcSettler on each fork (phase 2); the facilitator learns the addresses
+    // through X402_BTC_SETTLER_{TESTNET,MAINNET}. Without the file the bip122 chains stay off.
+    const settlersEnv = join(STATE_DIR, "btc-settlers.env");
+    if (existsSync(settlersEnv)) {
+      const lines = readFileSync(settlersEnv, "utf8").trim();
+      writeFileSync(COMPOSE_ENV_FILE, `# From scripts/fork.sh (btc-settlers.env)\n${lines}\n`, { flag: "a" });
+      log(`Bitcoin settlers on the forks: ${lines.replace(/\n/g, " ")}`);
+    } else {
+      log("no btc-settlers.env from fork.sh: the bip122 chains stay off");
+    }
+
     // The patched x402-rs image (facilitator/Dockerfile). A no-op when the layer cache is current;
     // the first build compiles x402-rs and takes several minutes.
     log("building the facilitator image (docker compose build)");
     compose(["build"], { timeoutMs: 3_600_000 });
     log("starting facilitator (docker compose, dead primary RPCs)");
     compose(["up", "-d", "--force-recreate", "--no-build"], { timeoutMs: 300_000 });
-    await waitForSupported(120_000);
+    try {
+      await waitForSupported(colimaFixEnabled() ? 25_000 : 120_000);
+    } catch (error) {
+      if (!colimaFixEnabled()) throw error;
+      log(`facilitator not reachable on :${FACILITATOR_PORT} after compose up; adding Colima's port forward by hand`);
+      colimaForward("forward", FACILITATOR_PORT);
+      addedColimaForward = true;
+      await waitForSupported(95_000);
+    }
     log(`facilitator ready on ${FACILITATOR_URL}`);
   } catch (e) {
     await teardown();

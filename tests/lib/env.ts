@@ -80,6 +80,9 @@ export function forkEnv(): NodeJS.ProcessEnv {
     FORK_BLOCK_TESTNET: String(FORK_BLOCK[TESTNET]),
     FORK_BLOCK_MAINNET: String(FORK_BLOCK[MAINNET]),
     FORK_BUYER: privateKeyToAccount(BUYER_KEY).address,
+    // X402BtcSettler on each fork lets only this address settle (phase 2).
+    FORK_FACILITATOR_TESTNET: FACILITATOR_SIGNER[TESTNET],
+    FORK_FACILITATOR_MAINNET: FACILITATOR_SIGNER[MAINNET],
   };
 }
 
