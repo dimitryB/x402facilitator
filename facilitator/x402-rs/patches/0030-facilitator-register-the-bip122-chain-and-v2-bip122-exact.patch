@@ -1,0 +1,406 @@
+From 6a2da94b640de82b70941c90849f272c1cdbfeda Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 12:37:27 -0500
+Subject: [PATCH 30/30] facilitator: register the bip122 chain and
+ v2-bip122-exact
+
+Adds Bitcoin networks (CAIP-2 namespace bip122) to the facilitator
+binary, behind the feature chain-bip122. The scheme is the crate
+x402-chain-bip122.
+
+- config.rs: a "bip122:<genesis hash prefix>" key reads the chain's
+  configuration: the Hemi chain that records its payments, the
+  X402BtcSettler address, and the confirmation policy.
+- chain.rs: ChainProvider::Bip122. The registry is built in two passes:
+  every chain with its own provider first, then each Bitcoin chain from
+  the provider of the Hemi chain it names. That provider is shared, not
+  rebuilt: a second provider for the same signer would have its own nonce
+  manager, so a BTC and a USDC.e settlement could take the same nonce.
+  A Bitcoin chain whose Hemi chain is not configured is a startup error.
+  One whose settler address is unset or empty is skipped with a warning,
+  so a config can list the Bitcoin chains before the contract exists.
+- schemes.rs, run.rs: V2Bip122Exact is built from that provider and
+  registered.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ facilitator/src/chain.rs   | 129 ++++++++++++++++++++++++++++++++++++-
+ facilitator/src/config.rs  |  85 ++++++++++++++++++++++++
+ facilitator/src/run.rs     |   6 ++
+ facilitator/src/schemes.rs |  19 ++++++
+ 4 files changed, 238 insertions(+), 1 deletion(-)
+
+diff --git a/facilitator/src/chain.rs b/facilitator/src/chain.rs
+index 223f8b4..d7c9665 100644
+--- a/facilitator/src/chain.rs
++++ b/facilitator/src/chain.rs
+@@ -41,6 +41,8 @@ use std::collections::HashMap;
+ use std::sync::Arc;
+ #[cfg(feature = "chain-aptos")]
+ use x402_chain_aptos::chain as aptos;
++#[cfg(feature = "chain-bip122")]
++use x402_chain_bip122::chain as bip122;
+ #[cfg(feature = "chain-eip155")]
+ use x402_chain_eip155::chain as eip155;
+ #[cfg(feature = "chain-solana")]
+@@ -75,6 +77,9 @@ pub enum ChainProvider {
+     /// TRON chain provider.
+     #[cfg(feature = "chain-tron")]
+     Tron(Arc<tron::TronChainProvider>),
++    /// Bitcoin network provider, sharing its Hemi chain's [`ChainProvider::Eip155`] provider.
++    #[cfg(feature = "chain-bip122")]
++    Bip122(Arc<bip122::Bip122ChainProvider>),
+ }
+ 
+ /// Creates a new chain provider from configuration.
+@@ -113,6 +118,16 @@ impl FromConfig<ChainConfig> for ChainProvider {
+                 let provider = tron::TronChainProvider::from_config(config).await?;
+                 ChainProvider::Tron(Arc::new(provider))
+             }
++            // A Bitcoin chain shares its Hemi chain's provider, so only the registry can build it.
++            #[cfg(feature = "chain-bip122")]
++            ChainConfig::Bip122(config) => {
++                return Err(format!(
++                    "{} is built with the chain registry: it needs the provider of {}",
++                    config.chain_id(),
++                    config.hemi()
++                )
++                .into());
++            }
+             #[allow(unreachable_patterns)] // For when no chain features enabled
+             _ => unreachable!("ChainConfig variant not enabled in this build"),
+         };
+@@ -132,6 +147,8 @@ impl ChainProviderOps for ChainProvider {
+             ChainProvider::Aptos(provider) => provider.signer_addresses(),
+             #[cfg(feature = "chain-tron")]
+             ChainProvider::Tron(provider) => provider.signer_addresses(),
++            #[cfg(feature = "chain-bip122")]
++            ChainProvider::Bip122(provider) => provider.signer_addresses(),
+             #[allow(unreachable_patterns)] // For when no chain features enabled
+             _ => unreachable!("ChainProvider variant not enabled in this build"),
+         }
+@@ -147,6 +164,8 @@ impl ChainProviderOps for ChainProvider {
+             ChainProvider::Aptos(provider) => provider.chain_id(),
+             #[cfg(feature = "chain-tron")]
+             ChainProvider::Tron(provider) => provider.chain_id(),
++            #[cfg(feature = "chain-bip122")]
++            ChainProvider::Bip122(provider) => provider.chain_id(),
+             #[allow(unreachable_patterns)] // For when no chain features enabled
+             _ => unreachable!("ChainProvider variant not enabled in this build"),
+         }
+@@ -158,17 +177,125 @@ impl ChainProviderOps for ChainProvider {
+ /// Initializes providers for all configured chains. Each chain configuration
+ /// is processed and a corresponding provider is created and stored.
+ ///
++/// It takes two passes. The first builds every chain that has its own provider. The second builds
++/// each Bitcoin (`bip122`) chain from the provider of the Hemi chain it names, which is shared, not
++/// copied: a second provider for the same signer would have its own nonce manager, and settlements
++/// sent through the two could take the same nonce. A Bitcoin chain whose settler is not set is skipped.
++///
+ /// # Errors
+ ///
+-/// Returns an error if any chain provider fails to initialize.
++/// Returns an error if any chain provider fails to initialize, or if a Bitcoin chain names a Hemi
++/// chain that is not configured.
+ #[async_trait::async_trait]
+ impl FromConfig<ChainsConfig> for ChainRegistry<ChainProvider> {
+     async fn from_config(chains: &ChainsConfig) -> Result<Self, Box<dyn std::error::Error>> {
+         let mut providers = HashMap::new();
+         for chain in chains.iter() {
++            #[cfg(feature = "chain-bip122")]
++            if matches!(chain, ChainConfig::Bip122(_)) {
++                continue;
++            }
+             let chain_provider = ChainProvider::from_config(chain).await?;
+             providers.insert(chain_provider.chain_id(), chain_provider);
+         }
++        #[cfg(feature = "chain-bip122")]
++        for chain in chains.iter() {
++            if let ChainConfig::Bip122(config) = chain
++                && let Some(provider) = bip122_provider(config, &providers).await?
++            {
++                providers.insert(provider.chain_id(), provider);
++            }
++        }
+         Ok(Self::new(providers))
+     }
+ }
++
++/// The provider of a Bitcoin chain, built on its Hemi chain's provider; `None` when no settler is set.
++#[cfg(feature = "chain-bip122")]
++async fn bip122_provider(
++    config: &bip122::Bip122ChainConfig,
++    providers: &HashMap<ChainId, ChainProvider>,
++) -> Result<Option<ChainProvider>, Box<dyn std::error::Error>> {
++    let Some(settler) = config.settler() else {
++        #[cfg(feature = "telemetry")]
++        tracing::warn!(
++            chain = %config.chain_id(),
++            settler = %config.settler_source(),
++            "No X402BtcSettler address set; this Bitcoin network is not served"
++        );
++        return Ok(None);
++    };
++    let hemi = match providers.get(config.hemi()) {
++        Some(ChainProvider::Eip155(hemi)) => Arc::clone(hemi),
++        Some(_) => {
++            return Err(format!(
++                "{} records its payments on {}, which is not an EVM chain",
++                config.chain_id(),
++                config.hemi()
++            )
++            .into());
++        }
++        None => {
++            return Err(format!(
++                "{} records its payments on {}, which is not configured: add it to \"chains\"",
++                config.chain_id(),
++                config.hemi()
++            )
++            .into());
++        }
++    };
++    let provider = bip122::Bip122ChainProvider::new(config, settler, hemi).await?;
++    Ok(Some(ChainProvider::Bip122(Arc::new(provider))))
++}
++
++#[cfg(all(test, feature = "chain-bip122"))]
++mod tests {
++    use super::*;
++
++    fn registry(json: &str) -> Result<ChainRegistry<ChainProvider>, String> {
++        let chains: ChainsConfig = serde_json::from_str(json).unwrap();
++        tokio::runtime::Builder::new_current_thread()
++            .enable_all()
++            .build()
++            .unwrap()
++            .block_on(ChainRegistry::from_config(&chains))
++            .map_err(|e| e.to_string())
++    }
++
++    #[test]
++    fn a_bitcoin_chain_without_its_hemi_chain_is_a_startup_error() {
++        let error = registry(
++            r#"{ "bip122:000000000019d6689c085ae165831e93": {
++                   "hemi": "eip155:43111", "settler": "0x00000000000000000000000000000000000B7C01" } }"#,
++        )
++        .unwrap_err();
++        assert!(error.contains("eip155:43111"), "{error}");
++        assert!(error.contains("not configured"), "{error}");
++    }
++
++    #[test]
++    fn a_bitcoin_chain_without_a_settler_is_skipped() {
++        let registry = registry(
++            r#"{ "bip122:000000000933ea01ad0ee984209779ba": {
++                   "hemi": "eip155:743111", "settler": "$X402_TEST_SETTLER_THAT_IS_NEVER_SET" } }"#,
++        )
++        .unwrap();
++        let testnet3 = ChainId::new("bip122", "000000000933ea01ad0ee984209779ba");
++        assert!(registry.by_chain_id(testnet3).is_none());
++    }
++
++    #[test]
++    fn a_bitcoin_chain_cannot_be_built_on_its_own() {
++        let chains: ChainsConfig = serde_json::from_str(
++            r#"{ "bip122:000000000019d6689c085ae165831e93": {
++                   "hemi": "eip155:43111", "settler": "0x00000000000000000000000000000000000B7C01" } }"#,
++        )
++        .unwrap();
++        let error = tokio::runtime::Builder::new_current_thread()
++            .build()
++            .unwrap()
++            .block_on(ChainProvider::from_config(&chains[0]))
++            .unwrap_err();
++        assert!(error.to_string().contains("chain registry"), "{error}");
++    }
++}
+diff --git a/facilitator/src/config.rs b/facilitator/src/config.rs
+index b855977..b9c3140 100644
+--- a/facilitator/src/config.rs
++++ b/facilitator/src/config.rs
+@@ -39,6 +39,10 @@ use x402_types::chain::ChainId;
+ use x402_chain_aptos::chain as aptos;
+ #[cfg(feature = "chain-aptos")]
+ use x402_chain_aptos::chain::config::{AptosChainConfig, AptosChainConfigInner};
++#[cfg(feature = "chain-bip122")]
++use x402_chain_bip122::chain as bip122;
++#[cfg(feature = "chain-bip122")]
++use x402_chain_bip122::chain::config::{Bip122ChainConfig, Bip122ChainConfigInner};
+ #[cfg(feature = "chain-eip155")]
+ use x402_chain_eip155::chain as eip155;
+ #[cfg(feature = "chain-eip155")]
+@@ -77,6 +81,10 @@ pub enum ChainConfig {
+     /// TRON chain configuration (for chains with "tron:" prefix).
+     #[cfg(feature = "chain-tron")]
+     Tron(Box<TronChainConfig>),
++    /// Bitcoin network configuration (for chains with "bip122:" prefix). Its payments are verified
++    /// and recorded on an EVM chain configured in the same file.
++    #[cfg(feature = "chain-bip122")]
++    Bip122(Box<Bip122ChainConfig>),
+ }
+ 
+ /// Configuration for chains.
+@@ -130,6 +138,12 @@ impl Serialize for ChainsConfig {
+                     let inner = &config.inner;
+                     map.serialize_entry(&chain_id, inner)?;
+                 }
++                #[cfg(feature = "chain-bip122")]
++                ChainConfig::Bip122(config) => {
++                    let chain_id = config.chain_id();
++                    let inner = &config.inner;
++                    map.serialize_entry(&chain_id, inner)?;
++                }
+                 #[allow(unreachable_patterns)] // For when no chain features enabled
+                 _ => unreachable!("ChainConfig variant not enabled in this build"),
+             }
+@@ -210,6 +224,17 @@ impl<'de> Deserialize<'de> for ChainsConfig {
+                             };
+                             ChainConfig::Tron(Box::new(config))
+                         }
++                        #[cfg(feature = "chain-bip122")]
++                        bip122::BIP122_NAMESPACE => {
++                            let inner: Bip122ChainConfigInner = access.next_value()?;
++                            let chain_reference = bip122::Bip122Network::try_from(&chain_id)
++                                .map_err(|e| serde::de::Error::custom(format!("{e}")))?;
++                            let config = Bip122ChainConfig {
++                                chain_reference,
++                                inner,
++                            };
++                            ChainConfig::Bip122(Box::new(config))
++                        }
+                         _ => {
+                             return Err(serde::de::Error::custom(format!(
+                                 "Unexpected namespace: {}",
+@@ -228,3 +253,63 @@ impl<'de> Deserialize<'de> for ChainsConfig {
+         deserializer.deserialize_map(ChainsVisitor)
+     }
+ }
++
++#[cfg(all(test, feature = "chain-bip122"))]
++mod tests {
++    use super::*;
++
++    const SETTLER: &str = "0x00000000000000000000000000000000000B7C01";
++
++    fn chains(json: &str) -> Result<ChainsConfig, serde_json::Error> {
++        serde_json::from_str(json)
++    }
++
++    #[test]
++    fn a_bip122_chain_parses_next_to_its_hemi_chain() {
++        let config = chains(&format!(
++            r#"{{
++              "eip155:43111": {{
++                "signers": ["0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"],
++                "rpc": [{{ "http": "http://127.0.0.1:1" }}]
++              }},
++              "bip122:000000000019d6689c085ae165831e93": {{
++                "hemi": "eip155:43111",
++                "settler": "{SETTLER}",
++                "min_confirmations": {{ "default": 2, "floor": 1, "ceiling": 6 }}
++              }}
++            }}"#
++        ))
++        .unwrap();
++        let bitcoin = config
++            .iter()
++            .find_map(|chain| match chain {
++                ChainConfig::Bip122(config) => Some(config),
++                _ => None,
++            })
++            .unwrap();
++        assert_eq!(
++            bitcoin.chain_id().to_string(),
++            "bip122:000000000019d6689c085ae165831e93"
++        );
++        assert_eq!(bitcoin.hemi().to_string(), "eip155:43111");
++        assert_eq!(bitcoin.settler(), Some(SETTLER.parse().unwrap()));
++        assert_eq!(bitcoin.confirmations().default, 2);
++        // It serializes back under its CAIP-2 key.
++        let json = serde_json::to_value(&config).unwrap();
++        assert_eq!(
++            json["bip122:000000000019d6689c085ae165831e93"]["hemi"],
++            "eip155:43111"
++        );
++    }
++
++    #[test]
++    fn an_unknown_bitcoin_network_or_a_bad_settler_is_refused() {
++        for json in [
++            r#"{ "bip122:000000000019d6689c085ae165831e94": { "hemi": "eip155:43111", "settler": "" } }"#,
++            r#"{ "bip122:000000000019d6689c085ae165831e93": { "hemi": "eip155:43111", "settler": "0x12" } }"#,
++            r#"{ "bip122:000000000019d6689c085ae165831e93": { "settler": "" } }"#,
++        ] {
++            assert!(chains(json).is_err(), "{json}");
++        }
++    }
++}
+diff --git a/facilitator/src/run.rs b/facilitator/src/run.rs
+index e53b8d7..8a6798f 100644
+--- a/facilitator/src/run.rs
++++ b/facilitator/src/run.rs
+@@ -42,6 +42,8 @@ use x402_types::scheme::{SchemeBlueprints, SchemeRegistry};
+ 
+ #[cfg(feature = "chain-aptos")]
+ use x402_chain_aptos::V2AptosExact;
++#[cfg(feature = "chain-bip122")]
++use x402_chain_bip122::V2Bip122Exact;
+ #[cfg(feature = "chain-eip155")]
+ use x402_chain_eip155::{V1Eip155Exact, V2Eip155Exact, V2Eip155Upto};
+ #[cfg(feature = "chain-solana")]
+@@ -102,6 +104,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+         {
+             scheme_blueprints.register(V2TronExact);
+         }
++        #[cfg(feature = "chain-bip122")]
++        {
++            scheme_blueprints.register(V2Bip122Exact);
++        }
+         scheme_blueprints
+     };
+     let scheme_registry =
+diff --git a/facilitator/src/schemes.rs b/facilitator/src/schemes.rs
+index 8f8f359..a81bcb4 100644
+--- a/facilitator/src/schemes.rs
++++ b/facilitator/src/schemes.rs
+@@ -15,6 +15,7 @@
+ //! | [`V2Eip155Upto`]  | EIP-155 (EVM) | V2 protocol with server-selected amount on EVM |
+ //! | [`V2SolanaExact`] | Solana        | V2 protocol with exact amount on Solana        |
+ //! | [`V2AptosExact`]  | Aptos         | V2 protocol with exact amount on Aptos         |
++//! | [`V2Bip122Exact`] | BIP-122 (Bitcoin) | V2 protocol, BTC paid on Bitcoin L1, recorded on Hemi |
+ //!
+ //! # Example
+ //!
+@@ -38,6 +39,8 @@ use x402_types::scheme::{X402SchemeFacilitator, X402SchemeFacilitatorBuilder};
+ 
+ #[cfg(feature = "chain-aptos")]
+ use x402_chain_aptos::V2AptosExact;
++#[cfg(feature = "chain-bip122")]
++use x402_chain_bip122::V2Bip122Exact;
+ #[cfg(feature = "chain-eip155")]
+ use x402_chain_eip155::{V1Eip155Exact, V2Eip155Exact, V2Eip155Upto};
+ #[cfg(feature = "chain-solana")]
+@@ -147,6 +150,22 @@ impl X402SchemeFacilitatorBuilder<&ChainProvider> for V2TronExact {
+     }
+ }
+ 
++#[cfg(feature = "chain-bip122")]
++impl X402SchemeFacilitatorBuilder<&ChainProvider> for V2Bip122Exact {
++    fn build(
++        &self,
++        provider: &ChainProvider,
++        config: Option<serde_json::Value>,
++    ) -> Result<Box<dyn X402SchemeFacilitator>, Box<dyn std::error::Error>> {
++        let bip122_provider = if let ChainProvider::Bip122(provider) = provider {
++            Arc::clone(provider)
++        } else {
++            return Err("V2Bip122Exact::build: provider must be a Bip122ChainProvider".into());
++        };
++        self.build(bip122_provider, config)
++    }
++}
++
+ #[cfg(feature = "chain-eip155")]
+ impl X402SchemeFacilitatorBuilder<&ChainProvider> for V1Eip155Exact {
+     fn build(

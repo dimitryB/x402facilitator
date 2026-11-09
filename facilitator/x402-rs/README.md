@@ -1,9 +1,13 @@
 # x402-rs patches
 
 The facilitator image is x402-rs at commit `e75adda8a0e3cf23db446883ba91b88bbab2fe28` plus the patches in
-[`patches/`](patches/), built by [`../Dockerfile`](../Dockerfile). Stock x402-rs cannot return the x402 v2
-spec's error shapes, and no setting in `config.json` changes that. The Definition of done requires those
-shapes (a failed signature and an insufficient balance must "return the spec's error shapes").
+[`patches/`](patches/) and one new crate, [`crates/x402-chain-bip122/`](crates/x402-chain-bip122/), built by
+[`../Dockerfile`](../Dockerfile). The crate adds BTC payments on Bitcoin L1 (phase 2, see
+[The exact scheme on bip122](#the-exact-scheme-on-bip122)); patches 0029 and 0030 wire it in.
+
+Stock x402-rs cannot return the x402 v2 spec's error shapes, and no setting in `config.json` changes that.
+The Definition of done requires those shapes (a failed signature and an insufficient balance must "return
+the spec's error shapes").
 
 Each patch is small, does one thing, has unit tests (0024 has e2e tests only) and is meant to go upstream. None changes to whom or
 how a payment is settled. What they change:
@@ -34,6 +38,11 @@ how a payment is settled. What they change:
   so a settlement sent after a run of tip-less blocks is still mined where the sequencer has a minimum
   tip, as Hemi testnet's does (0019), and a settlement whose tip cannot be read is not sent (0025). These,
   and 0021 to 0028, are about liveness rather than error shapes.
+- a new scheme, `exact` on `bip122` (0029, 0030 and the crate). The buyer pays the seller directly on
+  Bitcoin, to an address derived from the seller's xpub, so the facilitator moves no funds there either.
+  Its Hemi signer sends one transaction per payment, to the `X402BtcSettler` contract, which re-checks the
+  payment through hBK and marks the output consumed. The signer pays that transaction's gas, as it does for
+  EVM settlements.
 
 Spec references are to `x402-foundation/x402` at `e4a0868`:
 
@@ -71,11 +80,18 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 | [0026](patches/0026-eip155-bound-a-send-and-its-receipt-wait-together.patch) | a slow send plus the receipt wait can outlast the TS SDK's 90 s, and the hash is lost to the caller | §5.3.2 hash |
 | [0027](patches/0027-eip155-search-after-any-failed-send-no-node-answered.patch) | a fast 5xx or a slow lookup can still report a mined settlement as failed, and the search ignores the send's budget | §5.3.2 hash |
 | [0028](patches/0028-eip155-a-lagging-RPC-cannot-hide-a-settlement-s-rece.patch) | a receipt read takes the first answer, and `null` is one, so a fast RPC that lags reports a mined settlement as pending, on the first settle and on every retry | §9 `settlement_pending` |
+| [0029](patches/0029-types-error-codes-for-the-exact-bip122-scheme.patch) | `ErrorReason` has no codes for a Bitcoin payment's failures, and no way to report unusable requirements with a message | §9 `invalid_payment_requirements`; scheme codes in the style of §9's exact EVM ones |
+| [0030](patches/0030-facilitator-register-the-bip122-chain-and-v2-bip122-exact.patch) | the binary knows no `bip122` chains, and a chain cannot share another chain's provider | none: wiring for the crate |
 
 [`build/0001-build-EVM-only-workspace-for-the-hemi-x402-image.patch`](build/) is **not** for upstream. It
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
-resolve clones `aptos-core`, which is very large. `build/check-lock-subset.sh` checks that the pruned
-`Cargo.lock` only removed packages: every remaining crate keeps the version and checksum upstream locked.
+resolve clones `aptos-core`, which is very large. It also adds `crates/chains/x402-chain-bip122` as a
+member, `bitcoin` 0.32 as a workspace dependency, and the facilitator feature `chain-bip122`, off by default.
+`build/check-lock-subset.sh` checks that the pruned `Cargo.lock` only removed packages, except for the ones
+listed in [`build/lock-additions.txt`](build/lock-additions.txt): every remaining crate keeps the version
+and checksum upstream locked. The additions are `bitcoin` and the eight packages it brings that upstream's
+lock lacks. The file is in Cargo.lock format, and the Dockerfile appends it to the lock before
+`cargo fetch`, so a newer release of any of them on crates.io does not change the build.
 
 ## Related upstream pull requests
 
@@ -221,6 +237,27 @@ exact handler, where §9 has a scheme-specific code.
 | receipt not confirmed in time | `settlement_pending`, with the hash | §9 (0006, 0011) |
 | an RPC that cannot be reached | `unexpected_verify_error` / `unexpected_settle_error` | §9; the only case left as "unexpected" |
 
+The `exact` scheme on `bip122` (0029 and the crate) reports these. The settler contract's `verify` returns a
+`Verdict`, which `docs/phase2/DESIGN.md` maps to a code:
+
+| Failure | Code | Notes |
+|------|------|------|
+| request or payload does not parse (`txid` not 64 hex, `vout` not a `u32`) | `invalid_payload` (400) | as for EVM |
+| `accepted` differs from the requirements other than in `extra.paymentId` | `invalid_payment_requirements` | the seller's SDK makes a new `paymentId` per 402, so that one field may differ |
+| asset not `BTC`, `amount` not a positive whole number of satoshis, `extra.assetTransferMethod` not `utxo`, `extra.paymentFlow` not `upfront`, `extra.paymentId` not 32 lowercase hex, unknown `addressType`, `minConfirmations` outside the facilitator's range | `invalid_payment_requirements` | `PaymentVerificationError::InvalidPaymentRequirements` (0029) |
+| `network` not the handler's | `invalid_network` | |
+| `payTo` not an `xpub`/`tpub` (or `zpub`/`vpub`) for this network, a private key, `ypub`/`upub`, or `zpub`/`vpub` with `p2tr` | `invalid_exact_bip122_pay_to` | |
+| output being settled, or its Hemi transaction pending | `invalid_transaction_state` | 0011's record, keyed by (network, txid, vout) |
+| `TxNotFound` | `invalid_exact_bip122_payload_transaction_not_found` | not mined, or mined in a block hVM has not reached yet |
+| `OutputNotFound` | `invalid_exact_bip122_payload_vout` | |
+| `ScriptMismatch`, `OpReturn` | `invalid_exact_bip122_payload_recipient_mismatch` | the message names the derived address |
+| `BelowAmount` | `invalid_exact_bip122_payload_value_mismatch` | more than the amount is accepted |
+| `TooFewConfirmations` | `invalid_exact_bip122_payload_unconfirmed` | |
+| `AlreadyConsumed` | `invalid_transaction_state` | the output was settled before |
+| `HbkError`, an unknown verdict, Hemi unreachable | `unexpected_verify_error` / `unexpected_settle_error` (500) | |
+| Hemi settle transaction without a receipt in time | `settlement_pending`, Hemi hash in `transaction` | as 0006 |
+| Hemi settle transaction mined and reverted | `invalid_transaction_state`, Hemi hash in `transaction` | as 0011 |
+
 ## HTTP status codes
 
 Patch 0018 answers as the x402 TS reference facilitator does. References are to `x402-foundation/x402` at
@@ -274,14 +311,16 @@ payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an a
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.14` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.15` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
 1. Fetch x402-rs at the pinned commit and check `git rev-parse HEAD`.
-2. Apply the build patch, prune and check `Cargo.lock`, and compile all dependencies once against
-   unpatched sources.
-3. Apply each patch in order with `git apply --check`, then `git apply`, and build again.
+2. Copy the Bitcoin crate's manifest, with an empty `src/lib.rs` in place of its sources. Apply the build
+   patch, append `build/lock-additions.txt` to `Cargo.lock`, prune and check the lock, and compile all
+   dependencies once against unpatched sources, `bitcoin` included.
+3. Apply each patch in order with `git apply --check`, then `git apply`, copy the crate's sources, and
+   build again with `--features chain-bip122`. Editing a patch or the crate re-runs only this step.
 
 If a patch has drifted, step 3 fails and names the patch. Measured on Colima (4 CPUs, 8 GB, Apple
 silicon), with the base images already pulled:
@@ -290,7 +329,7 @@ silicon), with the base images already pulled:
   patches.
 - `docker compose build --no-cache`, which re-fetches x402-rs and the crates and compiles everything:
   113 s for hemi.3; 112 s for hemi.4 (57.1 s dependencies, 12.0 s after the patches); 113 s for hemi.5
-  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 118 s and 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11; 287 s for hemi.12; 194 s for hemi.13; 124 s for hemi.14.
+  (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 118 s and 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11; 287 s for hemi.12; 194 s for hemi.13; 124 s for hemi.14; 141 s for hemi.15, with no layer cached (58.9 s dependencies, 4.2 s `bitcoin`, 14.8 s after the patches and the crate).
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
 Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
@@ -305,11 +344,14 @@ git am <repo>/facilitator/x402-rs/patches/*.patch                    # one commi
 git format-patch --no-signature -o <repo>/facilitator/x402-rs/patches e75adda..HEAD
 ```
 
-The unit tests run with the build patch applied (`git apply <repo>/facilitator/x402-rs/build/*.patch`):
+The unit tests run with the build patch applied (`git apply <repo>/facilitator/x402-rs/build/*.patch`) and
+the crate copied in (`cp -r <repo>/facilitator/x402-rs/crates/x402-chain-bip122 crates/chains/`):
 
 ```sh
 cargo test -p x402-types -p x402-facilitator-local -p x402-chain-eip155 \
   --features x402-chain-eip155/facilitator,x402-chain-eip155/telemetry
+cargo test -p x402-chain-bip122 -p x402-facilitator \
+  --features x402-chain-bip122/facilitator,x402-chain-bip122/telemetry,x402-facilitator/chain-bip122
 ```
 
 Every patch was checked one by one: `cargo fmt --check`, `cargo clippy --tests -D warnings`, and the
@@ -1340,6 +1382,119 @@ D-025.
 each case: `null` receipts, frozen at an old block, a block during the wait, and a retry after
 `settlement_pending`. All four failed on hemi.13.
 
+### 0029 types: error codes for the exact bip122 scheme
+
+- **What changes.** Adds the codes the `exact` scheme on `bip122` reports, with a
+  `PaymentVerificationError` variant for each that carries its message:
+  - `invalid_exact_bip122_payload_transaction_not_found`
+  - `invalid_exact_bip122_payload_vout`
+  - `invalid_exact_bip122_payload_recipient_mismatch`
+  - `invalid_exact_bip122_payload_value_mismatch`
+  - `invalid_exact_bip122_payload_unconfirmed`
+  - `invalid_exact_bip122_pay_to`
+- It also adds `PaymentVerificationError::InvalidPaymentRequirements(String)`, reported as §9
+  `invalid_payment_requirements`. Until now only `AcceptedRequirementsMismatch` reached that code, with a
+  fixed message. A scheme can now say which field of the requirements it cannot use.
+- **HTTP status.** All are verdicts on a payment that could be read, so 0018's rule answers them with 200.
+  The status test in `handlers.rs` lists them.
+- **Naming.** §9 has no Bitcoin codes. These follow its exact EVM ones (`invalid_exact_evm_payload_*`).
+  `docs/phase2/DESIGN.md` fixes the same strings for the TS side and the scheme spec.
+- Existing variants and their serialization are unchanged. On its own the patch changes no behaviour.
+- **Tests.** Each code serializes as written above, and each variant maps to its code and keeps its message.
+
+### 0030 facilitator: register the bip122 chain and v2-bip122-exact
+
+- **What changes.** The binary reads `bip122:<genesis hash prefix>` chains and serves `v2-bip122-exact` on
+  them, behind the feature `chain-bip122`, which the image enables:
+  - `config.rs`: the namespace arm. The chain's object is the crate's `Bip122ChainConfig`, shown under
+    [The exact scheme on bip122](#the-exact-scheme-on-bip122).
+  - `chain.rs`: `ChainProvider::Bip122`, and a registry built in two passes.
+  - `schemes.rs`, `run.rs`: the builder and the registration.
+- **Two passes.** A Bitcoin chain's provider holds the provider of the Hemi chain it names: the same
+  `Arc<Eip155ChainProvider>` the EVM scheme uses, not a second one built from the same config. A second
+  provider for the same signer would have its own nonce manager, so a BTC and a USDC.e settlement could take
+  the same nonce. The registry builds every other chain first, then each Bitcoin chain from that map.
+  `ChainProvider::from_config` on a Bitcoin chain alone is an error that says so.
+- **Startup.**
+  - A Bitcoin chain whose Hemi chain is not configured stops the facilitator with an error that names both.
+  - One whose `settler` is unset or empty is skipped with a warning (`No X402BtcSettler address set`). The
+    scheme registry then logs `No chain provider found` for it, and `/supported` does not list it. That keeps
+    every config and the e2e suite working before the contract is deployed, and needs no second set of
+    config files.
+  - With a settler set, the provider calls its `SETTLER()` and checks it is one of the Hemi signers. A failed
+    check is a warning, not an error, so an RPC outage at startup cannot stop the EVM chains. With no contract
+    at the address, verify and settle answer `unexpected_verify_error` / `unexpected_settle_error`. With a
+    `SETTLER` that is not a signer, verify works and settle fails in gas estimation
+    (`unexpected_settle_error`), before anything is sent.
+- **Upstream.** The Cargo side (workspace member, dependency, feature) is in the build patch here, because
+  the crate lives outside x402-rs's tree. Upstream, the crate would be `crates/chains/x402-chain-bip122` and
+  this patch would carry those lines.
+- **Tests.** The config parses next to its Hemi chain and serializes back; an unknown Bitcoin network, a
+  settler that is not an address, and a missing `hemi` are refused; a missing Hemi chain is a startup error;
+  an unset settler skips the chain; a Bitcoin chain cannot be built on its own.
+
+## The exact scheme on bip122
+
+[`crates/x402-chain-bip122/`](crates/x402-chain-bip122/) is committed as plain files rather than as a patch:
+at 2,900 lines, 1,700 of them outside the tests, it would be an unreviewable diff, and upstream it is a new
+directory. The design, with the scheme's fields and the settler ABI, is `docs/phase2/DESIGN.md`; decisions
+and measurements are in `docs/phase2/facilitator.md`.
+
+**Configuration** (`facilitator/config*.json`):
+
+```json
+"bip122:000000000019d6689c085ae165831e93": {
+  "hemi": "eip155:43111",
+  "settler": "$X402_BTC_SETTLER_MAINNET",
+  "min_confirmations": { "default": 1, "floor": 1, "ceiling": 6 }
+}
+```
+
+`settler` is a literal or a `$VAR`; unset or empty skips the chain (0030). `min_confirmations` is in Bitcoin
+confirmations: `default` applies when the requirements name none, and a seller's `extra.minConfirmations`
+must be within `floor` and `ceiling`. Testnet3 (`bip122:000000000933ea01ad0ee984209779ba`) records on
+`eip155:743111` with `$X402_BTC_SETTLER_TESTNET`. Other keys are ignored, as on an EVM chain, and logged as a
+warning at startup (`Ignoring keys a bip122 chain does not read`): the e2e suite sets
+`receipt_timeout_secs` on every chain of the config it mounts.
+
+**What it does.**
+
+- **Requirements.** `asset` `BTC`; `amount` in satoshis; `payTo` the seller's account xpub (`xpub` on
+  mainnet, `tpub` on testnet3; SLIP-132 `zpub`/`vpub` are read as P2WPKH-only keys); `extra.assetTransferMethod`
+  `utxo`, `extra.paymentFlow` `upfront`, `extra.paymentId` 32 lowercase hex, `extra.addressType` `p2wpkh`
+  (default) or `p2tr`, `extra.minConfirmations` optional. `maxTimeoutSeconds` is accepted, not enforced: a
+  Bitcoin transaction does not expire.
+- **Payload.** `{ "txid": "<64 hex, display order>", "vout": <n> }`.
+- **Derivation.** `d = sha256("x402-btc" ‖ paymentId)`, then `i1`, `i2`, `i3` = bytes 0..4, 4..8 and 8..12 of `d`
+  as big-endian `u32 & 0x7fffffff`, child `0/i1/i2/i3` of `payTo`, then P2WPKH or BIP86 P2TR, with the
+  `bitcoin` crate. Three levels, because with a single 31-bit index anyone holding the xpub could
+  precompute every child, match a payment seen in the mempool, find a `paymentId` with the same index in
+  about 2^31 hashes and settle it for their own request (DESIGN.md, revised 2026-11-09). The facilitator
+  derives from `accepted.extra.paymentId`, never from the seller's copy of the requirements, which may
+  carry a newer one. Stream C's `btc/test-vectors.json` (16 cases: xpub and tpub, p2wpkh and p2tr) is
+  copied into the crate and reproduced by a unit test.
+- **Verify.** The checks in the order of the table above, then an `eth_call` of the settler's `verify`.
+  Valid answers `{"isValid": true}` with no `payer`: a Bitcoin payment has inputs, not one paying address.
+- **Settle.** The same checks under a record of (network, txid, vout), then `verify` again, then the
+  settler's `settle(…, paymentRef = sha256(paymentId))` through the Hemi provider's `send_transaction`. The
+  record is the EVM scheme's `PendingSettlements` (0011, 0016, 0020), keyed by the output, and a retry is
+  the same `accepted` and payload: the seller's copy of the requirements is left out of the key, so a stock
+  seller's retry with a fresh `paymentId` there is still recognised. Success is
+  `{"success": true, "transaction": "<bitcoin txid>", "network": "bip122:…"}`: the transaction is the
+  payment on that network. The Hemi hash is in the broadcast log line (0015) and in the contract's
+  `Settled` event. `settlement_pending` and a mined revert carry the Hemi hash, since that is the
+  transaction the facilitator broadcast.
+- **Supported.** One kind per network, with `extra` `{asset, assetTransferMethod, paymentFlow,
+  addressTypes, minConfirmations, settler, hemiNetwork}`, and the Hemi signer under the `bip122` network in
+  `signers`.
+
+**Tests.** 42 unit tests: the shared derivation vectors and rejections, P2TR, SLIP-132 and network mismatches, private and
+unsupported keys, every parse failure, each verdict to its code on verify and on settle, the settle
+flows against a mock settler (success and replay; pending, retry from the record, mined, one success, then
+replay; revert; a success whose caller left; Hemi unreachable), the confirmation policy, `/supported`, the
+config, and the ABI selectors and decoding. The end-to-end test needs the settler contract on the forks:
+see `docs/phase2/facilitator.md`.
+
 ## What these patches do not change
 
 - **v1 and `upto` keep x402-rs's own behaviour.** The changes specific to the v2 exact handler are:
@@ -1351,9 +1506,14 @@ each case: `null` receipts, frozen at an old block, a block during the wait, and
   The generic code mappings in `x402-types`, and 0015's settlement task, apply to every chain and scheme.
 - **Unknown payers are omitted.** v1 handlers and non-EVM chains don't implement `payer`, so their error
   bodies leave the field out. The spec allows that.
+- **No payer for Bitcoin.** The `bip122` scheme omits `payer` on success and on a valid verify too: a
+  Bitcoin payment has inputs, not one paying address.
 - **`invalidReasonDetails` remains.** It is the one non-spec field, kept for compatibility (see above).
 - **Untested end to end:**
   - The successful EIP-6492 deployment path (a real counterfactual wallet and factory). The suite has no
     wallet factory. It does test rejected wrapped signatures (funded and unfunded, both methods, nothing
     sent) and the EOA-wrapper shortcut.
   - A mined settlement revert. The unit tests cover it.
+  - The `bip122` scheme against the real `X402BtcSettler` and a mock hBK. Until stream A's contract is on the
+    forks, the scheme is covered by its unit tests and a fork smoke test with a stand-in contract
+    (`docs/phase2/facilitator.md`).

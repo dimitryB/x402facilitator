@@ -1,0 +1,231 @@
+From 1df2cd490ebe3c9721dbce3f3c6d0b922540e40c Mon Sep 17 00:00:00 2001
+From: Dimitry B <dimitryB@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 12:35:44 -0500
+Subject: [PATCH 29/30] types: error codes for the exact bip122 scheme
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The exact scheme on bip122 (BTC paid on Bitcoin L1, checked through
+Hemi's hBK) reports its failures with codes shaped like x402 v2 §9's
+exact EVM ones:
+
+- invalid_exact_bip122_payload_transaction_not_found: the transaction is
+  not known to the facilitator's view of Bitcoin
+- invalid_exact_bip122_payload_vout: it has no output at the payload's vout
+- invalid_exact_bip122_payload_recipient_mismatch: the output does not pay
+  the address derived for the payment
+- invalid_exact_bip122_payload_value_mismatch: the output is worth less
+  than the amount
+- invalid_exact_bip122_payload_unconfirmed: too few confirmations
+- invalid_exact_bip122_pay_to: payTo is not an extended public key for
+  the network
+
+Each has a PaymentVerificationError variant that carries its message. A
+generic InvalidPaymentRequirements(String) reports requirements a scheme
+cannot use (an asset, flow or extra field it does not take) as §9
+invalid_payment_requirements; until now only AcceptedRequirementsMismatch
+could, with a fixed message.
+
+All are verdicts on a payment that could be read, so handlers.rs answers
+them with 200 like every other rejection; its status test lists them.
+Existing variants and their serialization are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ crates/x402-facilitator-local/src/handlers.rs |   8 ++
+ crates/x402-types/src/proto/mod.rs            | 134 ++++++++++++++++++
+ 2 files changed, 142 insertions(+)
+
+diff --git a/crates/x402-facilitator-local/src/handlers.rs b/crates/x402-facilitator-local/src/handlers.rs
+index dff324a..5501efc 100644
+--- a/crates/x402-facilitator-local/src/handlers.rs
++++ b/crates/x402-facilitator-local/src/handlers.rs
+@@ -706,6 +706,14 @@ mod tests {
+             PaymentVerificationError::UnsupportedX402Version.into(),
+             PaymentVerificationError::AssetMismatch.into(),
+             PaymentVerificationError::InvalidPermit2Spender("x".into()).into(),
++            PaymentVerificationError::InvalidPaymentRequirements("x".into()).into(),
++            PaymentVerificationError::InvalidExactBip122PayloadTransactionNotFound("x".into())
++                .into(),
++            PaymentVerificationError::InvalidExactBip122PayloadVout("x".into()).into(),
++            PaymentVerificationError::InvalidExactBip122PayloadRecipientMismatch("x".into()).into(),
++            PaymentVerificationError::InvalidExactBip122PayloadValueMismatch("x".into()).into(),
++            PaymentVerificationError::InvalidExactBip122PayloadUnconfirmed("x".into()).into(),
++            PaymentVerificationError::InvalidExactBip122PayTo("x".into()).into(),
+             X402SchemeFacilitatorError::SettlementPending {
+                 transaction: "0x01".into(),
+                 details: "x".into(),
+diff --git a/crates/x402-types/src/proto/mod.rs b/crates/x402-types/src/proto/mod.rs
+index b79bf84..1272871 100644
+--- a/crates/x402-types/src/proto/mod.rs
++++ b/crates/x402-types/src/proto/mod.rs
+@@ -359,6 +359,44 @@ pub enum PaymentVerificationError {
+     /// Reported as x402 v2 §9 `invalid_exact_evm_payload_recipient_mismatch`.
+     #[error("Payment recipient is invalid with respect to the payment requirements")]
+     InvalidExactEvmPayloadRecipientMismatch,
++    /// The requirements the payload accepted are unusable: a field has a value the scheme does not
++    /// take (for example an asset or payment flow it does not serve, or a malformed `extra` field).
++    ///
++    /// Reported as x402 v2 §9 `invalid_payment_requirements`.
++    #[error("{0}")]
++    InvalidPaymentRequirements(String),
++    /// `exact` on `bip122`: the payload's transaction is not known on the Bitcoin view the facilitator
++    /// reads (not mined yet, not yet seen by that view, or not a transaction at all).
++    ///
++    /// Reported as `invalid_exact_bip122_payload_transaction_not_found`.
++    #[error("{0}")]
++    InvalidExactBip122PayloadTransactionNotFound(String),
++    /// `exact` on `bip122`: the payload's transaction has no output at `vout`.
++    ///
++    /// Reported as `invalid_exact_bip122_payload_vout`.
++    #[error("{0}")]
++    InvalidExactBip122PayloadVout(String),
++    /// `exact` on `bip122`: the output does not pay the address derived from `payTo` and the payment
++    /// id (or is an `OP_RETURN` output).
++    ///
++    /// Reported as `invalid_exact_bip122_payload_recipient_mismatch`.
++    #[error("{0}")]
++    InvalidExactBip122PayloadRecipientMismatch(String),
++    /// `exact` on `bip122`: the output is worth less than the required amount.
++    ///
++    /// Reported as `invalid_exact_bip122_payload_value_mismatch`.
++    #[error("{0}")]
++    InvalidExactBip122PayloadValueMismatch(String),
++    /// `exact` on `bip122`: the transaction has fewer confirmations than the requirements ask for.
++    ///
++    /// Reported as `invalid_exact_bip122_payload_unconfirmed`.
++    #[error("{0}")]
++    InvalidExactBip122PayloadUnconfirmed(String),
++    /// `exact` on `bip122`: `payTo` is not an extended public key this network can derive from.
++    ///
++    /// Reported as `invalid_exact_bip122_pay_to`.
++    #[error("{0}")]
++    InvalidExactBip122PayTo(String),
+ }
+ 
+ impl PaymentVerificationError {
+@@ -419,6 +457,27 @@ impl AsPaymentProblem for PaymentVerificationError {
+             PaymentVerificationError::InvalidExactEvmPayloadRecipientMismatch => {
+                 ErrorReason::InvalidExactEvmPayloadRecipientMismatch
+             }
++            PaymentVerificationError::InvalidPaymentRequirements(_) => {
++                ErrorReason::InvalidPaymentRequirements
++            }
++            PaymentVerificationError::InvalidExactBip122PayloadTransactionNotFound(_) => {
++                ErrorReason::InvalidExactBip122PayloadTransactionNotFound
++            }
++            PaymentVerificationError::InvalidExactBip122PayloadVout(_) => {
++                ErrorReason::InvalidExactBip122PayloadVout
++            }
++            PaymentVerificationError::InvalidExactBip122PayloadRecipientMismatch(_) => {
++                ErrorReason::InvalidExactBip122PayloadRecipientMismatch
++            }
++            PaymentVerificationError::InvalidExactBip122PayloadValueMismatch(_) => {
++                ErrorReason::InvalidExactBip122PayloadValueMismatch
++            }
++            PaymentVerificationError::InvalidExactBip122PayloadUnconfirmed(_) => {
++                ErrorReason::InvalidExactBip122PayloadUnconfirmed
++            }
++            PaymentVerificationError::InvalidExactBip122PayTo(_) => {
++                ErrorReason::InvalidExactBip122PayTo
++            }
+         };
+         PaymentProblem::new(error_reason, self.to_string())
+     }
+@@ -494,6 +553,18 @@ pub enum ErrorReason {
+     InvalidPayload,
+     /// x402 v2 §9: "Protocol version is not supported".
+     InvalidX402Version,
++    /// `exact` on `bip122`: the payment transaction is not known to the facilitator's view of Bitcoin.
++    InvalidExactBip122PayloadTransactionNotFound,
++    /// `exact` on `bip122`: the payment transaction has no output at the payload's `vout`.
++    InvalidExactBip122PayloadVout,
++    /// `exact` on `bip122`: the output does not pay the address derived for this payment.
++    InvalidExactBip122PayloadRecipientMismatch,
++    /// `exact` on `bip122`: the output is worth less than the required amount.
++    InvalidExactBip122PayloadValueMismatch,
++    /// `exact` on `bip122`: the payment transaction has fewer confirmations than required.
++    InvalidExactBip122PayloadUnconfirmed,
++    /// `exact` on `bip122`: `payTo` is not an extended public key for this network.
++    InvalidExactBip122PayTo,
+ }
+ 
+ /// Trait for converting errors into structured payment problems.
+@@ -594,6 +665,30 @@ mod tests {
+             ),
+             (ErrorReason::InvalidPayload, "invalid_payload"),
+             (ErrorReason::InvalidX402Version, "invalid_x402_version"),
++            (
++                ErrorReason::InvalidExactBip122PayloadTransactionNotFound,
++                "invalid_exact_bip122_payload_transaction_not_found",
++            ),
++            (
++                ErrorReason::InvalidExactBip122PayloadVout,
++                "invalid_exact_bip122_payload_vout",
++            ),
++            (
++                ErrorReason::InvalidExactBip122PayloadRecipientMismatch,
++                "invalid_exact_bip122_payload_recipient_mismatch",
++            ),
++            (
++                ErrorReason::InvalidExactBip122PayloadValueMismatch,
++                "invalid_exact_bip122_payload_value_mismatch",
++            ),
++            (
++                ErrorReason::InvalidExactBip122PayloadUnconfirmed,
++                "invalid_exact_bip122_payload_unconfirmed",
++            ),
++            (
++                ErrorReason::InvalidExactBip122PayTo,
++                "invalid_exact_bip122_pay_to",
++            ),
+             (ErrorReason::InsufficientFunds, "insufficient_funds"),
+         ];
+         for (reason, code) in cases {
+@@ -658,6 +753,45 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn exact_bip122_errors_map_to_their_codes_and_keep_their_message() {
++        let cases = [
++            (
++                PaymentVerificationError::InvalidPaymentRequirements("m".into()),
++                ErrorReason::InvalidPaymentRequirements,
++            ),
++            (
++                PaymentVerificationError::InvalidExactBip122PayloadTransactionNotFound("m".into()),
++                ErrorReason::InvalidExactBip122PayloadTransactionNotFound,
++            ),
++            (
++                PaymentVerificationError::InvalidExactBip122PayloadVout("m".into()),
++                ErrorReason::InvalidExactBip122PayloadVout,
++            ),
++            (
++                PaymentVerificationError::InvalidExactBip122PayloadRecipientMismatch("m".into()),
++                ErrorReason::InvalidExactBip122PayloadRecipientMismatch,
++            ),
++            (
++                PaymentVerificationError::InvalidExactBip122PayloadValueMismatch("m".into()),
++                ErrorReason::InvalidExactBip122PayloadValueMismatch,
++            ),
++            (
++                PaymentVerificationError::InvalidExactBip122PayloadUnconfirmed("m".into()),
++                ErrorReason::InvalidExactBip122PayloadUnconfirmed,
++            ),
++            (
++                PaymentVerificationError::InvalidExactBip122PayTo("m".into()),
++                ErrorReason::InvalidExactBip122PayTo,
++            ),
++        ];
++        for (error, reason) in cases {
++            let problem = error.as_payment_problem();
++            assert_eq!(problem.reason(), reason, "{error:?}");
++            assert_eq!(problem.details(), "m");
++        }
++    }
++
+     fn request(json: &str) -> VerifyRequest {
+         serde_json::from_str(json).unwrap()
+     }
