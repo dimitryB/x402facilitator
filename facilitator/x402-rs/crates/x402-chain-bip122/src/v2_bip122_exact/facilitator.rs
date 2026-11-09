@@ -767,10 +767,17 @@ mod tests {
             reason(error),
             ErrorReason::InvalidExactBip122PayloadRecipientMismatch
         );
-        assert!(settler.state().sent.is_empty(), "nothing was sent for the forged request");
+        assert!(
+            settler.state().sent.is_empty(),
+            "nothing was sent for the forged request"
+        );
         settler.state().verdict = Verdict::Ok;
         let response = facilitator.settle(&request()).await.unwrap();
-        assert_eq!(response.0["success"], json!(true), "the real settlement was not blocked");
+        assert_eq!(
+            response.0["success"],
+            json!(true),
+            "the real settlement was not blocked"
+        );
         assert_eq!(settler.state().sent.len(), 1);
     }
 
@@ -788,7 +795,11 @@ mod tests {
         );
         {
             let state = settler.state();
-            assert_eq!(state.verified.len(), 1, "verified once, before the record was taken");
+            assert_eq!(
+                state.verified.len(),
+                1,
+                "verified once, before the record was taken"
+            );
             let (query, reference, _) = &state.sent[0];
             let id: PaymentId = PAYMENT_ID.parse().unwrap();
             assert_eq!(*reference, B256::from(payment_ref(&id)));
