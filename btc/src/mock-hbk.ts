@@ -5,11 +5,12 @@
  *
  * Every function here refuses an RPC URL that is not a local address. Nothing in this file touches Bitcoin.
  *
- * Mock setter (agreed in docs/phase2/DESIGN.md, stream A):
+ * Mock setters (stream A, contracts/test/mocks/MockBitcoinKit.sol):
  *   setTx(bytes32 txid, Output[] outputs, uint32 confirmations)
- * with hBK's Output struct (hemilabs/bitcoin-tunnel-contracts contracts/bitcoinkit/BitcoinKitStructs.sol),
- * `txid` in display byte order, `confirmations` in hBK's own count (Bitcoin confirmations + the settler's
- * CONFIRMATION_OFFSET).
+ *   setConfirmations(bytes32 txid, uint32 confirmations)
+ * with the 8-member Output that mainnet hBK returns (contracts/src/btc/IHbkReader.sol; no spentDetail,
+ * unlike BitcoinKitStructs.sol), `txid` in display byte order, `confirmations` in hBK's own count
+ * (Bitcoin confirmations + the settler's CONFIRMATION_OFFSET, measured 0 on mainnet).
  */
 import { bytesToHex } from "@noble/hashes/utils";
 import { createPublicClient, createTestClient, createWalletClient, http, type Address, type Hash, type Hex } from "viem";
@@ -24,14 +25,6 @@ const outputComponents = [
   { name: "isSpent", type: "bool" },
   { name: "fullScriptLength", type: "uint256" },
   { name: "containsFullScript", type: "bool" },
-  {
-    name: "spentDetail",
-    type: "tuple",
-    components: [
-      { name: "spendingTxId", type: "bytes32" },
-      { name: "inputIndex", type: "uint256" },
-    ],
-  },
 ] as const;
 
 export const mockBitcoinKitAbi = [
@@ -42,6 +35,16 @@ export const mockBitcoinKitAbi = [
     inputs: [
       { name: "txid", type: "bytes32" },
       { name: "outputs", type: "tuple[]", components: outputComponents },
+      { name: "confirmations", type: "uint32" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "setConfirmations",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "txid", type: "bytes32" },
       { name: "confirmations", type: "uint32" },
     ],
     outputs: [],
@@ -99,7 +102,6 @@ export function hbkOutput(o: FakeOutput) {
     isSpent: o.isSpent ?? false,
     fullScriptLength: BigInt((script.length - 2) / 2),
     containsFullScript: true,
-    spentDetail: { spendingTxId: `0x${"00".repeat(32)}` as Hex, inputIndex: 0n },
   };
 }
 
@@ -112,24 +114,28 @@ export interface SeedTx {
   hbkConfirmations: number;
 }
 
-/** setTx on the mock hBK, sent from an impersonated address; resolves once mined. Rewriting a txid replaces it. */
-export async function seedMockHbkTx(s: SeedTx): Promise<Hash> {
-  assertLocalRpc(s.rpcUrl);
-  const transport = http(s.rpcUrl);
+/** Send one mock setter call from an impersonated address on the fork; resolves once mined. */
+async function sendToMock(rpcUrl: string, hbk: Address, call: { functionName: "setTx" | "setConfirmations"; args: readonly unknown[] }): Promise<Hash> {
+  assertLocalRpc(rpcUrl);
+  const transport = http(rpcUrl);
   const test = createTestClient({ mode: "anvil", transport });
   await test.impersonateAccount({ address: MOCK_HBK_SEEDER });
   await test.setBalance({ address: MOCK_HBK_SEEDER, value: 10n ** 18n });
   const wallet = createWalletClient({ account: MOCK_HBK_SEEDER, transport });
-  const hash = await wallet.writeContract({
-    chain: null,
-    address: s.hbk,
-    abi: mockBitcoinKitAbi,
-    functionName: "setTx",
-    args: [hex0x(s.txid), s.outputs.map(hbkOutput), s.hbkConfirmations],
-  });
+  const hash = await wallet.writeContract({ chain: null, address: hbk, abi: mockBitcoinKitAbi, ...call } as never);
   const receipt = await createPublicClient({ transport }).waitForTransactionReceipt({ hash, pollingInterval: 100 });
-  if (receipt.status !== "success") throw new Error(`setTx ${hash} reverted on ${s.rpcUrl}`);
+  if (receipt.status !== "success") throw new Error(`${call.functionName} ${hash} reverted on ${rpcUrl}`);
   return hash;
+}
+
+/** setTx on the mock hBK. Rewriting a txid replaces it. */
+export function seedMockHbkTx(s: SeedTx): Promise<Hash> {
+  return sendToMock(s.rpcUrl, s.hbk, { functionName: "setTx", args: [hex0x(s.txid), s.outputs.map(hbkOutput), s.hbkConfirmations] });
+}
+
+/** setConfirmations on the mock hBK: a new Bitcoin block arrived for `txid` (hBK's count). */
+export function setMockHbkConfirmations(rpcUrl: string, hbk: Address, txid: string, hbkConfirmations: number): Promise<Hash> {
+  return sendToMock(rpcUrl, hbk, { functionName: "setConfirmations", args: [hex0x(txid), hbkConfirmations] });
 }
 
 export interface MockHbkPayOptions {
@@ -137,7 +143,7 @@ export interface MockHbkPayOptions {
   hbk: Address;
   /** Bitcoin confirmations to record (default 1). */
   bitcoinConfirmations?: number;
-  /** hBK count = Bitcoin confirmations + this (default 1, the mainnet value in DESIGN.md). */
+  /** hBK count = Bitcoin confirmations + this (default 0, measured on mainnet by stream A). */
   confirmationOffset?: number;
   log?: (message: string) => void;
 }
@@ -157,7 +163,7 @@ export function mockHbkPayBtc(o: MockHbkPayOptions): PayBtc {
       hbk: o.hbk,
       txid,
       outputs: [decoy, { script: ctx.script, sats }],
-      hbkConfirmations: confirmations + (o.confirmationOffset ?? 1),
+      hbkConfirmations: confirmations + (o.confirmationOffset ?? 0),
     });
     o.log?.(`mock hBK at ${o.hbk}: fake tx ${txid} pays ${sats} sats to ${address} (vout 1), ${confirmations} confirmation(s)`);
     return { txid, vout: 1 };
@@ -189,6 +195,6 @@ export function hemiBtcContracts(hemiJson: unknown, hemiNetwork: string): HemiBt
     hbk: (c.hbk as Address | undefined) ?? (hemiNetwork === "eip155:43111" ? HBK_MAINNET : undefined),
     x402BtcSettler: c.x402BtcSettler as Address | undefined,
     hbkTestnetAdapter: c.hbkTestnetAdapter as Address | undefined,
-    confirmationOffset: typeof offset === "number" ? offset : 1,
+    confirmationOffset: typeof offset === "number" ? offset : 0,
   };
 }

@@ -146,7 +146,7 @@ export async function runBtcL1(args: BtcL1Args, defaultUrl: string): Promise<voi
     .registerPolicy((_version, reqs) => reqs.filter(r => r.scheme === "exact" && r.network === network && r.asset === "BTC"))
     .onBeforePaymentCreation(async ({ selectedRequirements: req }) => {
       const d = derivePaymentAddress(req.payTo, network, req.extra.paymentId as string, (req.extra.addressType ?? "p2wpkh") as "p2wpkh");
-      log(`paying ${req.amount} sats on ${info.name} to ${d.address} (paymentId ${d.paymentId}, ${req.payTo.slice(0, 12)}…/0/${d.index})`);
+      log(`paying ${req.amount} sats on ${info.name} to ${d.address} (paymentId ${d.paymentId}, ${req.payTo.slice(0, 12)}…/${d.path.slice(2)})`);
       log(`  needs ${req.extra.minConfirmations ?? 1} confirmation(s); seller waits up to ${req.maxTimeoutSeconds}s`);
     });
   const http = new x402HTTPClient(client);

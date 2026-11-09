@@ -6,7 +6,8 @@ import { BtcWallet, EsploraClient, selectLargestFirst, VSIZE, type Utxo } from "
 import { BTC_MAINNET, BTC_TESTNET3 } from "../src/networks.js";
 
 const MNEMONIC = vectors.mnemonic;
-const PAY_TO_ADDRESS = "bc1qh7vt6al504zckqydvk0963ht2k82kanru70ysp";
+/** The vector address for the DESIGN.md xpub and paymentId (p2wpkh, mainnet). */
+const PAY_TO_ADDRESS = vectors.vectors[0].address;
 const P2WPKH = { input: VSIZE.input.p2wpkh, paymentOutput: 31, changeOutput: 31 };
 const utxo = (byte: string, value: number, vout = 0, confirmed = true): Utxo => ({ txid: byte.repeat(32), vout, value, status: { confirmed } });
 
@@ -114,7 +115,8 @@ describe("pay through Esplora (faked)", () => {
     expect(out).toEqual({ txid: tx.id, vout: 0 });
     expect(Buffer.from(tx.getInput(0).txid!).toString("hex")).toBe("bb".repeat(32));
     expect(tx.getOutput(1).amount).toBe(60_000n - 1_000n - 720n); // ceil(5.1 sat/vB * 141 vB)
-    expect(logs[0]).toMatch(/sending 1000 sats to bc1qh7vt.*fee 720 sats/);
+    expect(logs[0]).toContain(`sending 1000 sats to ${PAY_TO_ADDRESS}`);
+    expect(logs[0]).toMatch(/fee 720 sats/);
   });
 
   it("refuses a fee rate above the cap", async () => {

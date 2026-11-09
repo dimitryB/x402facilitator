@@ -123,8 +123,8 @@ const accepts: RouteConfig["accepts"] = [
 
 /**
  * For bip122 the settled `transaction` is the Bitcoin txid; the Hemi settle tx, if reported, is in `extra`.
- * The line also names the paymentId and the derived address's index: the funds sit at payTo/0/<index>, a
- * random index no wallet's gap-limit scan finds, so this log (or the seller's own records) is what lets
+ * The line also names the paymentId and the derived path: the funds sit at payTo/0/i1/i2/i3, a
+ * random path no wallet's gap-limit scan finds, so this log (or the seller's own records) is what lets
  * the seller spend them later.
  */
 function settledTx(network: string, transaction: string, result: object, accepted: { payTo: string; extra: object }): string {
@@ -135,7 +135,7 @@ function settledTx(network: string, transaction: string, result: object, accepte
   const d = derivePaymentAddress(accepted.payTo, network, paymentId, addressType);
   return (
     `bitcoin tx ${transaction} (${btcTxUrl(network, transaction)})${hemi}; ` +
-    `paymentId ${paymentId} -> ${d.address} at ${accepted.payTo.slice(0, 12)}…/0/${d.index}`
+    `paymentId ${paymentId} -> ${d.address} at ${accepted.payTo.slice(0, 12)}…/${d.path.slice(2)}`
   );
 }
 

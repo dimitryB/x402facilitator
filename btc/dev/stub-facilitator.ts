@@ -63,7 +63,7 @@ function check(p: PaymentPayload | undefined): { code?: string; note?: string } 
   if (!isPaymentId(paymentId) || !isAddressType(addressType)) return { code: "invalid_payload" };
   try {
     const d = derivePaymentAddress(p.accepted.payTo, p.accepted.network, paymentId, addressType);
-    return { note: `pays ${p.accepted.amount} sats to ${d.address} (index ${d.index})` };
+    return { note: `pays ${p.accepted.amount} sats to ${d.address} (${d.path})` };
   } catch {
     return { code: "invalid_exact_bip122_pay_to" };
   }

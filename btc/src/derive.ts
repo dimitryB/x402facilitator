@@ -2,14 +2,16 @@
  * The payment address rule shared by the seller, the facilitator and the buyer
  * (docs/specs/scheme_exact_bip122.md, "Payment address"):
  *
- *   index   = BE_uint32(sha256(utf8("x402-btc") || bytes16(paymentId))[0..4]) & 0x7fffffff
- *   address = non-hardened child m/0/<index> of payTo (the seller's account xpub)
+ *   d       = sha256(utf8("x402-btc") || bytes16(paymentId))
+ *   i1, i2, i3 = BE_uint32(d[0..4]), BE_uint32(d[4..8]), BE_uint32(d[8..12]), each & 0x7fffffff
+ *   address = non-hardened child m/0/i1/i2/i3 of payTo (the seller's account xpub)
  *   p2wpkh  : script 0x0014 || hash160(pubkey)
  *   p2tr    : BIP86 key path, no script tree: 0x5120 || x(P + H_TapTweak(x(P))·G)
  *
- * Test vector (BIP84 test mnemonic, account 0): payTo xpub6CatWdiZ…PW6V, paymentId
- * 00112233445566778899aabbccddeeff -> index 1745573513, p2wpkh bc1qh7vt6al504zckqydvk0963ht2k82kanru70ysp.
- * btc/test-vectors.json has it with the tpub and p2tr cases.
+ * Three levels, 93 bits: with one 31-bit level, anyone holding the public xpub could precompute every
+ * child address and find another paymentId with the same index in seconds, then claim a payment seen in
+ * the mempool (DESIGN.md, revised 2026-11-09). btc/test-vectors.json has the vectors every implementation
+ * must reproduce.
  */
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils";
@@ -44,10 +46,18 @@ function paymentIdBytes(paymentId: string): Uint8Array {
   return hexToBytes(paymentId);
 }
 
-/** The non-hardened child index for `paymentId`: always below 2^31. */
-export function paymentIndex(paymentId: string): number {
-  const digest = sha256(new Uint8Array([...utf8ToBytes(PAYMENT_ID_DOMAIN), ...paymentIdBytes(paymentId)]));
-  return new DataView(digest.buffer, digest.byteOffset, 4).getUint32(0, false) & 0x7fffffff;
+export type PaymentIndices = [number, number, number];
+
+/** The three non-hardened child indices below payTo/0 for `paymentId`: each below 2^31. */
+export function paymentIndices(paymentId: string): PaymentIndices {
+  const d = sha256(new Uint8Array([...utf8ToBytes(PAYMENT_ID_DOMAIN), ...paymentIdBytes(paymentId)]));
+  const view = new DataView(d.buffer, d.byteOffset, 12);
+  return [0, 4, 8].map(o => view.getUint32(o, false) & 0x7fffffff) as PaymentIndices;
+}
+
+/** `m/0/i1/i2/i3`, relative to payTo. */
+export function paymentPath(paymentId: string): string {
+  return `m/0/${paymentIndices(paymentId).join("/")}`;
 }
 
 /**
@@ -91,8 +101,8 @@ export interface PaymentAddress {
   network: BtcNetwork;
   addressType: AddressType;
   paymentId: string;
-  index: number;
-  /** Relative to payTo. */
+  indices: PaymentIndices;
+  /** Relative to payTo: m/0/i1/i2/i3. */
   path: string;
   /** Compressed SEC1 public key of the child, hex. */
   pubkey: string;
@@ -116,16 +126,16 @@ export function derivePaymentAddress(
   addressType: AddressType = DEFAULT_ADDRESS_TYPE,
 ): PaymentAddress {
   if (!isAddressType(addressType)) throw new Error(`addressType must be one of ${ADDRESS_TYPES.join(", ")}, got ${JSON.stringify(addressType)}`);
-  const index = paymentIndex(paymentId);
-  const child = parseAccountXpub(xpub, network).deriveChild(0).deriveChild(index);
+  const indices = paymentIndices(paymentId);
+  const child = indices.reduce((key, i) => key.deriveChild(i), parseAccountXpub(xpub, network).deriveChild(0));
   if (!child.publicKey) throw new Error("derived key has no public key");
   const { script, address } = scriptForPubkey(child.publicKey, network, addressType);
   return {
     network,
     addressType,
     paymentId,
-    index,
-    path: `m/0/${index}`,
+    indices,
+    path: `m/0/${indices.join("/")}`,
     pubkey: bytesToHex(child.publicKey),
     script: bytesToHex(script),
     address,

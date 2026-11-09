@@ -1,32 +1,31 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { HDKey } from "@scure/bip32";
+import { mnemonicToSeedSync } from "@scure/bip39";
+import { getAddress } from "@scure/btc-signer";
 import vectors from "../test-vectors.json" with { type: "json" };
 import {
   derivePaymentAddress,
   isPaymentId,
   newPaymentId,
   parseAccountXpub,
-  paymentIndex,
+  paymentIndices,
+  paymentPath,
   paymentRef,
   type AddressType,
 } from "../src/derive.js";
-import { BTC_MAINNET, BTC_TESTNET3, parseBtcNetwork, type BtcNetwork } from "../src/networks.js";
+import { BTC_MAINNET, BTC_NETWORKS, BTC_TESTNET3, parseBtcNetwork, type BtcNetwork } from "../src/networks.js";
 
 const DESIGN_XPUB =
   "xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4RHwCD3XyuvPEbvqAQY3rAPshWcMLoP2fMFMKHPJ4ZeZXYVUhLv1VMrjPC7PW6V";
 const DESIGN_PAYMENT_ID = "00112233445566778899aabbccddeeff";
 
-describe("the DESIGN.md vector", () => {
-  it("index 1745573513, pubkey 0326c1a6…e6ab, bc1qh7vt6al504zckqydvk0963ht2k82kanru70ysp", () => {
-    expect(paymentIndex(DESIGN_PAYMENT_ID)).toBe(1745573513);
+describe("the DESIGN.md vector (three levels, revised 2026-11-09)", () => {
+  it("i1 is the original single-level index 1745573513; the path is m/0/1745573513/250221288/1390224838", () => {
+    expect(paymentIndices(DESIGN_PAYMENT_ID)).toEqual([1745573513, 250221288, 1390224838]);
+    expect(paymentPath(DESIGN_PAYMENT_ID)).toBe("m/0/1745573513/250221288/1390224838");
     const d = derivePaymentAddress(DESIGN_XPUB, BTC_MAINNET, DESIGN_PAYMENT_ID);
-    expect(d).toMatchObject({
-      index: 1745573513,
-      path: "m/0/1745573513",
-      addressType: "p2wpkh",
-      address: "bc1qh7vt6al504zckqydvk0963ht2k82kanru70ysp",
-    });
-    expect(d.pubkey.startsWith("0326c1a6")).toBe(true);
-    expect(d.pubkey.endsWith("e6ab")).toBe(true);
+    expect(d).toMatchObject({ addressType: "p2wpkh", address: "bc1qcjpwqf8yvtpfqq65dghnt64r6cw653kjs6yrca" });
     expect(d.script).toMatch(/^0014[0-9a-f]{40}$/);
   });
 
@@ -35,12 +34,30 @@ describe("the DESIGN.md vector", () => {
   });
 });
 
+describe("cross-checks that do not reuse derive.ts", () => {
+  const seed = mnemonicToSeedSync(vectors.mnemonic);
+  for (const v of vectors.vectors) {
+    it(`${v.network.slice(0, 15)}… ${v.addressType} ${v.paymentId}: node crypto digest, private-key path, btc-signer address`, () => {
+      const digest = createHash("sha256").update(Buffer.concat([Buffer.from("x402-btc"), Buffer.from(v.paymentId, "hex")])).digest();
+      expect(digest.toString("hex")).toBe(v.digest);
+      const indices = [0, 4, 8].map(o => digest.readUInt32BE(o) & 0x7fffffff);
+      expect(indices).toEqual(v.indices);
+      // The seller's wallet reaches the same key from the seed: account path + /0/i1/i2/i3, private derivation.
+      const info = BTC_NETWORKS[v.network as BtcNetwork];
+      const priv = HDKey.fromMasterSeed(seed, info.bip32).derive(`${v.accountPath}/0/${indices.join("/")}`);
+      expect(Buffer.from(priv.publicKey!).toString("hex")).toBe(v.pubkey);
+      expect(getAddress(v.addressType === "p2tr" ? "tr" : "wpkh", priv.privateKey!, info.params)).toBe(v.address);
+      expect(createHash("sha256").update(Buffer.from(v.paymentId, "hex")).digest("hex")).toBe(v.paymentRef.slice(2));
+    });
+  }
+});
+
 describe("btc/test-vectors.json (shared with the Rust facilitator)", () => {
   for (const v of vectors.vectors) {
     it(`${v.network.slice(0, 15)}… ${v.addressType} ${v.paymentId}`, () => {
       const d = derivePaymentAddress(v.payTo, v.network as BtcNetwork, v.paymentId, v.addressType as AddressType);
-      expect({ index: d.index, pubkey: d.pubkey, script: d.script, address: d.address }).toEqual({
-        index: v.index,
+      expect({ indices: d.indices, pubkey: d.pubkey, script: d.script, address: d.address }).toEqual({
+        indices: v.indices,
         pubkey: v.pubkey,
         script: v.scriptPubKey,
         address: v.address,
@@ -97,9 +114,10 @@ describe("paymentId", () => {
     expect(new Set(ids).size).toBe(ids.length);
     for (const id of ids) {
       expect(isPaymentId(id)).toBe(true);
-      const i = paymentIndex(id);
-      expect(i).toBeGreaterThanOrEqual(0);
-      expect(i).toBeLessThan(2 ** 31);
+      for (const i of paymentIndices(id)) {
+        expect(i).toBeGreaterThanOrEqual(0);
+        expect(i).toBeLessThan(2 ** 31);
+      }
     }
   });
 
