@@ -6,6 +6,8 @@ It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned 
 
 **Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). On 2026-11-04 live mainnet payments settled in USDC.e, in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031), and in hemiBTC, in [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27) (D-032). Phase 2, native BTC paid on Bitcoin L1 and verified through hBK in a Hemi contract, is built and tested on forks (D-036), audited (D-038), and its settler contract is deployed on Hemi mainnet (D-039). On 2026-11-10 a live payment of 1000 sats on Bitcoin mainnet, [`43cb9bdc…cea4`](https://mempool.space/tx/43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4), was verified through hBK and recorded on Hemi mainnet in [`0xcaea6da8…ef3b`](https://explorer.hemi.xyz/tx/0xcaea6da85cda3bb9d6135f57b65128a47d9c18af82a900c79cf91cea5b7fef3b) (D-040). See [Definition of done](#definition-of-done).
 
+**Independent and experimental:** this is not an official product of Hemi Labs, the x402 Foundation or the x402-rs authors, and none of them endorses it. It has had no independent security audit ([SECURITY.md](SECURITY.md)). Licensed under [Apache-2.0](LICENSE).
+
 | Path | What it is |
 |------|------|
 | [`docker-compose.yml`](docker-compose.yml), [`facilitator/`](facilitator/) | The facilitator: pinned x402-rs image and its Hemi config |
@@ -350,7 +352,7 @@ Latest results, from 2026-11-09 on hemi.15 with the phase 2 streams merged (D-03
 | Suite | Result |
 |------|------|
 | `npm test -w tests` | 14 files, 147 tests passed, 0 failed (565 s): the 116 existing tests plus the 31 of `11-btc-l1` |
-| `forge test` | 85 passed, 0 failed (17 existing, 49 for `X402BtcSettler`, its adapter, mock and deployment, 19 ported from the security audit, D-038) |
+| `forge test` | 85 passed, 0 failed (17 existing, 49 for `X402BtcSettler`, its adapter, mock and deployment, 19 ported from the pre-deployment security review, D-038) |
 | `npm test -w btc` | 90 passed, 0 failed |
 | `buyer/demo-fork.sh` | all five payments settled, the fifth being 1000 sats of fabricated BTC on the mainnet fork through the mock hBK and `X402BtcSettler`; payTo received exactly the price each time. Before patch 0022, hemi.9 settled all four in 20 of 20 runs |
 
@@ -398,4 +400,10 @@ Latest results, from 2026-11-09 on hemi.15 with the phase 2 streams merged (D-03
 - **Bitcoin L1 reorganisations:** a payment accepted at 1 confirmation can be reorganised out of Bitcoin. The consumption record can be reorganised out of Hemi before PoP finality. `minConfirmations` and idempotent handlers per paymentId are the levers.
 - **Bitcoin L1 settle hash:** the success response carries the Bitcoin txid. The Hemi settle transaction is in the facilitator log and the settler's `Settled` event, not yet in the response.
 - **Bitcoin L1 on mainnet:** one live payment has run, 1000 sats at `minConfirmations` 1 (D-040). Deeper confirmation settings, p2tr addresses, a facilitator restart between payment and settle, and Bitcoin testnet3 have run only on forks or not at all. The testnet settler is not deployed.
-- **Bitcoin L1 settler, audited (D-038):** nothing above low. Known and accepted: a settle's gas grows with the Bitcoin transaction's size (about 134k gas for 2 outputs, 909k for 948, under a cent on Hemi), chosen by the buyer; a compromised `SETTLER` key could mark outputs consumed with a bogus reference, a griefing that puts no funds at risk and needs a redeploy; payments at output index 32 or later, or with a script over 64 bytes, cannot be verified through hBK. Two facilitator-side limits remain for a later patch: after a facilitator restart a settle that succeeded on chain but whose answer was lost is reported as a replay although the contract's `settledBy` would identify it, and a settle that reverts in the block because the builder's hBK count lagged the `eth_call` node's is final for the buyer although a retry would pass.
+- **Bitcoin L1 settler, reviewed before deployment (D-038):** an internal, AI-assisted security review, not an independent audit, found nothing above low. Known and accepted: a settle's gas grows with the Bitcoin transaction's size (about 134k gas for 2 outputs, 909k for 948, under a cent on Hemi), chosen by the buyer; a compromised `SETTLER` key could mark outputs consumed with a bogus reference, a griefing that puts no funds at risk and needs a redeploy; payments at output index 32 or later, or with a script over 64 bytes, cannot be verified through hBK. Two facilitator-side limits remain for a later patch: after a facilitator restart a settle that succeeded on chain but whose answer was lost is reported as a replay although the contract's `settledBy` would identify it, and a settle that reverts in the block because the builder's hBK count lagged the `eth_call` node's is final for the buyer although a retry would pass.
+
+## Licence and security
+
+Apache-2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE). The Solidity sources under `contracts/` keep the MIT headers they were deployed and verified with ([contracts/LICENSE-MIT](contracts/LICENSE-MIT)); `contracts/src/x402` and `contracts/lib` are third-party code under the licenses in those directories. The facilitator image is built from [x402-rs](https://github.com/x402-rs/x402-rs) (Apache-2.0), fetched at a pinned commit at build time and not copied into this repository.
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).

@@ -1,6 +1,7 @@
 {
   "name": "hemi-x402-facilitator",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "workspaces": ["shared", "btc", "seller", "buyer", "tests"],
   "engines": { "node": ">=22.9" },
