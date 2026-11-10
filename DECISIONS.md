@@ -1692,6 +1692,50 @@ Not done: a patch or bug report for anvil's silent drop; saving the facilitator'
 
 **Limits.** Other upstream reads can still fail. A wallet that estimates first reads a transaction's state during the estimate, where a failure is reported and retried. A transaction sent with an explicit gas limit, or through `eth_sendTransaction` after anvil's internal estimate failed, first reads its state while the block is mined and can still be stranded. A stalled read elsewhere costs up to 45 s.
 
+## D-044. The repository is recreated with a clean history; the old one is a private archive
+
+**Why.** D-041 removed the ISP's name, the two warning-page URLs with their tokens, the local checkout path and a gendered pronoun from the current files, and noted that they remained in earlier commits. D-041 also said the repository was still private. That was wrong: GitHub's event log has a `PublicEvent` for `dimitryB/x402facilitator` at its creation, 2026-10-31 00:22:55 UTC. Its traffic for the 14 days to 2026-11-09 was 6 views and 3 clones from one unique visitor, with no forks, stars or watchers.
+
+A force-push would not have removed the old commits. GitHub keeps `refs/pull/1/head` to `refs/pull/7/head` pointing at them; the owner cannot change those refs, so the merged pull requests would still show the old diffs. On 2026-11-10 the owner chose to recreate the repository instead.
+
+**What was done.**
+
+1. PR #7 was merged after its three checks passed at `a6f7ea7` (merge commit `aad7d01`).
+2. The repository was renamed `dimitryB/x402facilitator-archive` and made private. It keeps PRs #1 to #7, their discussions and the Actions history. PR numbers cited in this file before D-044 refer to it.
+3. A fresh copy of `main` and `feat/facilitator-mvp` was rewritten with `git filter-branch --index-filter … --msg-filter …`. The filter rewrote the six files that ever held these strings: `DECISIONS.md`, `README.md`, `contracts/README.md` and the three deploy logs in `docs/spike/`. It applied the D-041 wording to every earlier version: the ISP's name became "the ISP" or "the spike machine's ISP", each warning-page URL became `https://<the ISP's warning page>?url=…&token=<redacted>`, `/Users/…/x402facilitator/` became `<repo>/` and "his browser" became "a browser". One commit message was reworded the same way.
+4. A new public `dimitryB/x402facilitator` was created (2026-11-10 19:11 UTC) and the two rewritten branches were pushed to it. Its settings were compared with the old repository's: 21 repository fields matched, including the merge options, secret scanning and push protection (on), wiki (off) and the default branch. Private vulnerability reporting, which `SECURITY.md` points to, was off on the new repository and was turned on. Dependabot alerts and security updates are off, as before. Actions is enabled with a read-only default token. Neither repository has secrets, variables, rulesets, branch protection, webhooks, deploy keys, environments, custom labels, issues or releases.
+
+**Verification** on the rewritten copy before it was pushed:
+
+```
+tip trees before/after: main SAME, feat/facilitator-mvp SAME
+main: 82 commits old, 82 new; feat/facilitator-mvp: 78 old, 78 new
+author and committer names, emails and dates: identical, commit by commit
+lines matching the removed strings, in every blob and message: 0 (old history: 136)
+commits with a new hash: 79 of 82 (the first three are unchanged)
+```
+
+`git ls-remote` on the new repository gives `main` at `3c60cc2` and `feat/facilitator-mvp` at `f8108e3`. The local checkout was moved to them; its files did not change, since the trees are identical. The new repository's first `CI` run on `main` passed.
+
+**Old and new hashes.** Earlier entries and some files cite commits by their old hashes. They were left as written: the forge broadcast records under `contracts/broadcast/` are what forge wrote at deployment, and the comment in the bip122 crate is part of the image source. The old hashes resolve only in the archive. Their new equivalents:
+
+| Old | New | Cited in |
+|------|------|------|
+| `7bd6bd5` | `8037db8` | testnet `DeployHemi` broadcast record |
+| `404d96f` | `f1845ad` | D-025 |
+| `1325d54` to `3eb0670` | `4f007d9` to `67a5f99` | D-033 |
+| `b2a8576` | `c89c195` | mainnet `DeployHemi` broadcast record |
+| `41a73b4` | `47eaea7` | `docs/phase2/ts.md` |
+| `6607a91` | `5b91d7f` | `docs/phase2/{DESIGN,facilitator,ts}.md`, `derive.rs` |
+| `07df2e3`, `f4c8b16`, `9321b76` | `15f078f`, `4693566`, `b389cf2` | D-036 |
+| `d4a8d06` | `099ab9f` | D-037 |
+| `caf8402` | `3b83b54` | mainnet `DeployBtcSettler` broadcast record |
+| `8d66b7e` | `ee1a18e` | D-042 |
+| `7f30831` | `2bcfd1b` | D-043 |
+| `a6f7ea7`, `aad7d01` | `f8108e3`, `3c60cc2` | this entry |
+
+**Left as it is.** The local-only branches `claude/*` and `phase2/contracts` still hold the old commits, and so does the local object store. Neither is published.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).
