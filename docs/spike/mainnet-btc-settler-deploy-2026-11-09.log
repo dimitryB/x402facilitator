@@ -1,0 +1,182 @@
+$ contracts/deploy-btc.sh mainnet    # simulation, sends nothing, 2026-11-09T20:12:56Z
+== Hemi mainnet (chain id 43111) via https://rpc.hemi.network
+   signer: DEPLOYER_PRIVATE_KEY
+
+contract             address                                      status       L2 gas   L1 fee (wei)  est. cost (ETH)
+X402BtcSettler       0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f   DEPLOY       793029  4308315724991 0.000005101544568299
+
+   L2 gas price now: 1000252 wei. Estimated total: 0.000005101544568299 ETH for 1 contract(s).
+   (L1 fee from GasPriceOracle.getL1Fee over the calldata; forge sets a 130% gas limit, actual cost is gas used.)
+
+== Simulation (no transactions sent)
+No files changed, compilation skipped
+Script ran successfully.
+
+== Logs ==
+  mode: simulation (no transactions are sent)
+  signer (HEMI_DEPLOY_PRIVATE_KEY): 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+  signer balance (wei): 198648014882468
+  chain id: 43111
+  X402BtcSettler HBK: 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12
+  X402BtcSettler SETTLER: 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+  X402BtcSettler CONFIRMATION_OFFSET: 0
+  [deploy] X402BtcSettler -> 0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f
+  checks passed: code present, HBK(), SETTLER(), CONFIRMATION_OFFSET()
+  contracts deployed in this run: 1
+
+## Setting up 1 EVM.
+
+==========================
+
+Chain 43111
+
+Estimated gas price: 0.001000504 gwei
+
+Estimated total gas used for script: 1138319
+
+Estimated amount required: 0.000001138892712776 ETH
+
+==========================
+
+SIMULATION COMPLETE. To broadcast these transactions, add --broadcast and wallet configuration(s) to the previous command. See forge script --help for more.
+
+Transactions saved to: <repo>/contracts/broadcast/DeployBtcSettler.s.sol/43111/dry-run/run-latest.json
+
+Sensitive values saved to: <repo>/contracts/cache/DeployBtcSettler.s.sol/43111/dry-run/run-latest.json
+
+
+Simulation only. Re-run with --broadcast to send the transactions.
+exit=0
+
+$ CONFIRM_MAINNET_DEPLOY=yes contracts/deploy-btc.sh mainnet --broadcast    # 2026-11-09T20:13:27Z, on Dimitry's go
+== Hemi mainnet (chain id 43111) via https://rpc.hemi.network
+   signer: DEPLOYER_PRIVATE_KEY
+
+contract             address                                      status       L2 gas   L1 fee (wei)  est. cost (ETH)
+X402BtcSettler       0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f   DEPLOY       793029  4406711740449 0.000005199940583757
+
+   L2 gas price now: 1000252 wei. Estimated total: 0.000005199940583757 ETH for 1 contract(s).
+   (L1 fee from GasPriceOracle.getL1Fee over the calldata; forge sets a 130% gas limit, actual cost is gas used.)
+
+== Simulation (no transactions sent)
+No files changed, compilation skipped
+Script ran successfully.
+
+== Logs ==
+  mode: simulation (no transactions are sent)
+  signer (HEMI_DEPLOY_PRIVATE_KEY): 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+  signer balance (wei): 198648014882468
+  chain id: 43111
+  X402BtcSettler HBK: 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12
+  X402BtcSettler SETTLER: 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+  X402BtcSettler CONFIRMATION_OFFSET: 0
+  [deploy] X402BtcSettler -> 0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f
+  checks passed: code present, HBK(), SETTLER(), CONFIRMATION_OFFSET()
+  contracts deployed in this run: 1
+
+## Setting up 1 EVM.
+
+==========================
+
+Chain 43111
+
+Estimated gas price: 0.001000504 gwei
+
+Estimated total gas used for script: 1138319
+
+Estimated amount required: 0.000001138892712776 ETH
+
+==========================
+
+SIMULATION COMPLETE. To broadcast these transactions, add --broadcast and wallet configuration(s) to the previous command. See forge script --help for more.
+
+Transactions saved to: <repo>/contracts/broadcast/DeployBtcSettler.s.sol/43111/dry-run/run-latest.json
+
+Sensitive values saved to: <repo>/contracts/cache/DeployBtcSettler.s.sol/43111/dry-run/run-latest.json
+
+
+== Broadcasting to Hemi mainnet
+No files changed, compilation skipped
+Script ran successfully.
+
+== Logs ==
+  mode: BROADCAST
+  signer (HEMI_DEPLOY_PRIVATE_KEY): 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+  signer balance (wei): 198648014882468
+  chain id: 43111
+  X402BtcSettler HBK: 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12
+  X402BtcSettler SETTLER: 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+  X402BtcSettler CONFIRMATION_OFFSET: 0
+  [deploy] X402BtcSettler -> 0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f
+  checks passed: code present, HBK(), SETTLER(), CONFIRMATION_OFFSET()
+  contracts deployed in this run: 1
+
+## Setting up 1 EVM.
+
+==========================
+
+Chain 43111
+
+Estimated gas price: 0.001000504 gwei
+
+Estimated total gas used for script: 1138319
+
+Estimated amount required: 0.000001138892712776 ETH
+
+==========================
+
+
+==========================
+
+ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
+
+Transactions saved to: <repo>/contracts/broadcast/DeployBtcSettler.s.sol/43111/run-latest.json
+
+Sensitive values saved to: <repo>/contracts/cache/DeployBtcSettler.s.sol/43111/run-latest.json
+
+
+Transactions (from broadcast/DeployBtcSettler.s.sol/43111/run-latest.json):
+  https://explorer.hemi.xyz/tx/0xeaef24d99180b27b9cc541d52f51f44a3760e60f20c00011dd360bbe2e101ae1 status=0x1 gasUsed=0xbe062
+
+== Post-deployment check (simulation, should deploy nothing)
+No files changed, compilation skipped
+Script ran successfully.
+
+== Logs ==
+  mode: simulation (no transactions are sent)
+  signer: forge --sender/wallet, or forge's default sender in a simulation
+  chain id: 43111
+  X402BtcSettler HBK: 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12
+  X402BtcSettler SETTLER: 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+  X402BtcSettler CONFIRMATION_OFFSET: 0
+  [skip]   X402BtcSettler: code already at 0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f
+  checks passed: code present, HBK(), SETTLER(), CONFIRMATION_OFFSET()
+  contracts deployed in this run: 0
+X402BtcSettler is in place on Hemi mainnet. Next: contracts/check-btc-live.sh mainnet
+exit=0
+
+$ contracts/check-btc-live.sh mainnet    # read-only, 2026-11-09T20:16:30Z
+== Hemi mainnet (chain id 43111) via https://rpc.hemi.network, Hemi block 5699056
+   hBK 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12
+   fixture tx 0x95bca0291cdecef1dc71c3ff174ed827f6b34ada52c6f32649e85449ce9d367e vout 1, expected 83050000 sats to 0x0020ff64a4670b85c23ef392a5be0f0ff40d4024de223d4f7242d707714b44e012c4, Bitcoin block 975189
+
+1. getLastHeader(): height 975210
+2. getTxConfirmations(bytes32): 24
+   getSpecificTxOutput(vout 1): (83050000 [8.305e7], 0x0020ff64a4670b85c23ef392a5be0f0ff40d4024de223d4f7242d707714b44e012c4, "", false, 0x, true, 34, true)
+     (outValue, script, outputAddress, isOpReturn, opReturnData, isSpent, fullScriptLength, containsFullScript)
+
+3. Confirmation offset
+   vs hVM's header: hBK 24 - (lastHeader 975210 - 975189 + 1 = 22) = 2
+   vs Bitcoin:      hBK 24 - (tip 975212 - 975189 + 1 = 24) = 0   (tip from https://btcscan.org)
+
+4. X402BtcSettler.verify
+   X402BtcSettler 0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f: deployed
+   CONFIRMATION_OFFSET() = 0
+   verify(txid, 1, script, 83050000, minConfirmations 1):
+     verdict Ok, sats 83050000, hbkConfirmations 24, confirmations 24, isSpent true, settledBy 0x0000000000000000000000000000000000000000000000000000000000000000
+
+5. settle gas (eth_estimateGas from the facilitator's signer 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875; nothing is sent)
+   settle: 175780 gas
+
+OK: verify returned Ok with 83050000 sats.
+exit=0

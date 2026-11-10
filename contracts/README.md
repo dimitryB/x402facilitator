@@ -224,7 +224,7 @@ are in `docs/phase2/contracts.md`.
 
 | Network | Contract | Address | Status |
 |------|------|------|------|
-| Hemi mainnet | X402BtcSettler | `0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f` | predicted, not deployed |
+| Hemi mainnet | X402BtcSettler | `0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f` | deployed 2026-11-09, tx `0xeaef24d9…1ae1` (D-039); first live `settle` 2026-11-10, tx `0xcaea6da8…ef3b`, 166753 gas (D-040) |
 | Hemi testnet | HbkTestnetAdapter | `0x1D561c41067aB82Ab90be4dd385E4a704CC3D8F5` | predicted, not deployed |
 | Hemi testnet | X402BtcSettler | `0x56AdDfcC77b087D9101ddEE8D3A38e95E0A365B0` | predicted, not deployed |
 

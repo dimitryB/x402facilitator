@@ -26,6 +26,7 @@ import {
   btcTxUrl,
   BtcWallet,
   derivePaymentAddress,
+  EsploraClient,
   ExactBtcClientScheme,
   FilePaymentJournal,
   isAddressType,
@@ -100,7 +101,11 @@ function payer(network: BtcNetwork, args: BtcL1Args): { pay: PayBtc; stub: boole
   if (!isAddressType(addressType)) fail("BUYER_BTC_ADDRESS_TYPE must be p2wpkh or p2tr");
   const feeRate = args["fee-rate"] === undefined ? undefined : Number(args["fee-rate"]);
   if (feeRate !== undefined && !(feeRate >= 1)) fail("--fee-rate must be a number of sat/vB, at least 1");
-  const options = { addressType, feeRate, log };
+  // BUYER_BTC_ESPLORA: another Esplora REST base (a mempool.space mirror), for when mempool.space is unreachable.
+  const esploraBase = process.env.BUYER_BTC_ESPLORA?.trim().replace(/\/+$/, "");
+  if (esploraBase && !/^https:\/\/[^\s]+$/.test(esploraBase)) fail("BUYER_BTC_ESPLORA must be an https:// Esplora API base, e.g. https://mempool.emzy.de/api");
+  const esplora = esploraBase ? new EsploraClient(esploraBase) : undefined;
+  const options = { addressType, feeRate, log, esplora };
   const wallet = wif ? BtcWallet.fromWif(wif, network, options) : BtcWallet.fromMnemonic(mnemonic!, network, options);
   return {
     stub: false,
@@ -109,7 +114,7 @@ function payer(network: BtcNetwork, args: BtcL1Args): { pay: PayBtc; stub: boole
       const { confirmed, unconfirmed } = await wallet.balance();
       log(`wallet ${wallet.address} (${addressType}) holds ${confirmed} sats confirmed, ${unconfirmed} unconfirmed`);
       log(`  ${btcAddressUrl(network, wallet.address)}`);
-      log(`fee rate: ${feeRate ?? `${await wallet.esplora.feeRate(3)} (mempool.space 3-block estimate)`} sat/vB`);
+      log(`fee rate: ${feeRate ?? `${await wallet.esplora.feeRate(3)} (3-block estimate from ${wallet.esplora.base})`} sat/vB`);
     },
   };
 }

@@ -1476,6 +1476,109 @@ Under the same attack the victim's first settle succeeded; the attackers got `re
 
 The critic could not run the Rust unit tests itself (no cargo on the machine), any live settle (forbidden), or open the explorers (the ISP filter, D-034).
 
+## D-038. Security audit of X402BtcSettler before the mainnet deployment
+
+Dimitry stopped the mainnet deployment simulation on 2026-11-09 and asked for a security audit of the contract first. Nothing had been sent: the settler address had no code and the deployer's nonce was unchanged. A fresh-context auditor read `X402BtcSettler.sol`, `IHbkReader.sol`, `HbkTestnetAdapter.sol`, `DeployBtcSettler.s.sol`, `deploy-btc.sh`, the tests and the Rust caller, with Hemi's hBK source beside them, wrote 19 scratch tests, and read raw answers from the live mainnet hBK for three real Bitcoin transactions. It could not broadcast or read `.env`.
+
+**Nothing above low in the contracts.** What it checked and found sound, with its evidence:
+
+- **External calls:** the runtime bytecode has two `STATICCALL`s and one `SSTORE`; the write precedes the event; no payable function, `receive` or `fallback` (an ETH send reverts).
+- **The hand-rolled decoding** of hBK's `getSpecificTxOutput` answer: every bound traced (`base + 256 ≤ len`, `base + scriptOffset + 32 ≤ len`, `scriptPos + 32 + scriptLength ≤ len`), no underflow; 256 fuzzed raw answers and offsets into the head never revert; an empty successful answer is `HbkError`; both the live eight-word head and the source's ten-word layout decode; script equality is length plus keccak over the returned bytes plus `containsFullScript` and `fullScriptLength`, so a prefix of a cut script cannot match.
+- **Live hBK behaviour, replayed from captured raw answers:** for `8bae12b5…5684`, vout 0 is `OP_RETURN "charley loves heidi"` and verifies as `OpReturn`, vout 1 a P2PKH of 200000 sats verifies `Ok` and `BelowAmount` at 200001, so OP_RETURN outputs are indexed and vout numbering matches Bitcoin's; for `54e48e5f…e713` (948 outputs), vout 0's 201-byte script comes back cut to 64 with `containsFullScript` false (`ScriptMismatch`) and vout 32 panics `0x32` live, so the 32-output cap behaves as modelled.
+- **Integers:** `outValue > uint64.max` is `HbkError` (both sides of the boundary tested); `hbkConf > OFFSET ? … : 0` cannot underflow; the confirmation word is width-checked; `uint32.max` handled.
+- **The record:** written only on `Ok`, which requires `settledBy == 0`, so it can be neither overwritten nor undone, even by `SETTLER`; a zero `paymentRef` is refused; keyed by `(txid, vout)`.
+- **Access control:** `settle` gated on the immutable `SETTLER`; nothing else mutates state; no owner, no upgrade path.
+- **hBK availability:** `0x7007…8F12` is 8415 bytes of code with no `DELEGATECALL` and zero EIP-1967 slots, so not a proxy. A pause, revert, empty answer or changed revert string degrades to `HbkError`, where `settle` reverts and nothing is consumed.
+- **txid byte order:** display order end to end (Rust `settler.rs`, `types.rs`; hBK), the reversed order being `TxNotFound`.
+- **The Rust decoding** reads the verdict as `uint8`, and values ≥ 9 become `Unknown` → `unexpected_*_error`, never success; selectors match; startup asserts `SETTLER()` is a configured signer.
+- **CREATE2 and the deployment:** the address is `keccak(0xff ‖ deployer ‖ salt ‖ keccak(initcode))` through Arachnid's deployer, which binds nothing to the sender, so a front-runner can only put the identical code at the identical address, which the script then skips and post-checks; no metadata, pinned solc and optimizer make the initcode reproducible; the constructor rejects zero and code-less addresses; chain id, deployer codehash and `CONFIRM_MAINNET_DEPLOY=yes` are checked in the script and the shell. Hemi mainnet executes Cancun (a state-override `eth_call` with `PUSH0` and `MCOPY` succeeded), which the settler's runtime uses.
+
+**Findings, all low or informational, and what was done:**
+
+| # | Finding | Outcome |
+|------|------|------|
+| L-1 | A settle forwards all gas to hBK, whose cost grows with the Bitcoin transaction's size: 133604 gas for the 2-output fixture, 909400 for a 948-output transaction, roughly 15M extrapolated for a 400 kB one, under Hemi's 30M block limit. The buyer chooses the transaction, so it chooses the facilitator's gas within that bound, under a cent at Hemi prices | Accepted; noted in README limits |
+| L-2 | The Rust scheme never reads `settledBy`: `AlreadyConsumed` is always `invalid_transaction_state`. After a facilitator restart, a buyer whose settle succeeded on chain but whose answer was lost gets a final error (charged, not served) although the contract shows `settledBy == sha256(paymentId)`. Answering success there is the replay-versus-restart trade-off B-5 chose | Left as B-5 decided; recorded as a limit, candidate for a later patch |
+| L-3 | A settle that reverts in the block with `NotPayable(TooFewConfirmations)` (the builder's hBK count behind the `eth_call` node's) is `invalid_transaction_state`, final for the buyer, though nothing was consumed and a retry would pass | Recorded as a limit, candidate for a later patch mapping that revert to `…_unconfirmed` |
+| I-1 | Any `Panic(0x32)` from hBK is `OutputNotFound`, including a truncated precompile answer inside hBK's own parser; never a wrong `Ok` | No change |
+| I-2 | `deploy-btc.sh` splits `.env` lines on the first `=` and keeps quotes; a URL with `=` in its query would be cut, loudly | No change |
+| I-3 | Test gaps, all covered by the auditor's scratch tests: short and wide confirmation answers, hBK becoming an EOA, the exact 64-byte script accepted and a 65-byte one rejected, inconsistent `containsFullScript`/`fullScriptLength`, `SETTLER` cannot overwrite a record, a revert payload with trailing bytes is `HbkError` | **Ported** into `contracts/test/X402BtcSettlerAudit.t.sol` and `X402BtcSettlerLiveReplay.t.sol` (the captured hBK answers as constants); `forge test` now 85 passed |
+| I-4 | Accepted limits to keep documented: a compromised `SETTLER` key can mark outputs consumed with a bogus ref (griefing, no funds, redeploy to fix); a Bitcoin reorg after settle leaves the record; with hVM's lag the floor is about 3 confirmations today, but the lag moves; payments at vout ≥ 32 or with scripts over 64 bytes are unverifiable | In README limits |
+
+The contract is deployed unchanged by this audit. The deployment itself waits for a new go.
+
+## D-039. X402BtcSettler deployed on Hemi mainnet
+
+On Dimitry's go, after the audit (D-038), on 2026-11-09 at about 20:13Z, from the deployer and facilitator signer `0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875`. The simulation ran first (estimate 0.0000051 ETH), then the broadcast, then the script's read-only post-check. Full output in `docs/spike/mainnet-btc-settler-deploy-2026-11-09.log`; forge's run files in `contracts/broadcast/DeployBtcSettler.s.sol/43111/`.
+
+```
+$ CONFIRM_MAINNET_DEPLOY=yes contracts/deploy-btc.sh mainnet --broadcast
+  X402BtcSettler HBK: 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12   SETTLER: 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875   CONFIRMATION_OFFSET: 0
+  [deploy] X402BtcSettler -> 0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f
+ONCHAIN EXECUTION COMPLETE & SUCCESSFUL.
+  https://explorer.hemi.xyz/tx/0xeaef24d99180b27b9cc541d52f51f44a3760e60f20c00011dd360bbe2e101ae1 status=0x1 gasUsed=0xbe062
+== Post-deployment check (simulation): [skip] X402BtcSettler: code already at 0x9Df0…ab9f; checks passed
+$ cast receipt 0xeaef24d9…1ae1 --rpc-url https://rpc.hemi.network/rpc
+status 0x1  block 5699044  from 0x1155…0875  to 0x4e59…956C (CREATE2 deployer)  gasUsed 778338  effectiveGasPrice 1000252  l1Fee 4280163982436  fee 5058698123612 wei
+$ cast call 0x9Df0…ab9f HBK() / SETTLER() / CONFIRMATION_OFFSET()
+0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12 / 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875 / 0
+$ cast balance / cast nonce 0x1155…0875
+193589316758856 wei (fell by exactly the fee), nonce 5
+```
+
+The address is the one predicted since stream A (`shared/hemi.json`). The on-chain runtime has the same length as the compiled runtime and differs only in the 26 short runs where the three immutables sit. dRPC reset every connection from this workstation during the read-back (the hostname block of D-027 again), so the receipt was read from the public RPC only.
+
+`contracts/check-btc-live.sh mainnet` against the deployed contract: `verify` of the fixture tx `95bca029…367e` vout 1 answers `Ok`, 83050000 sats, hbkConfirmations 24, `settledBy` 0; `settle` estimates 175780 gas from the signer; offset against Bitcoin's tip 0 (against hVM's own header 2: the header lags the node's count by two blocks, as A-2 says).
+
+The facilitator then started live with `config.mainnet.json` and `X402_BTC_SETTLER_MAINNET=0x9Df0…ab9f`. `/supported` lists `exact` on `bip122:000000000019d6689c085ae165831e93` with `extra.settler` the deployed address, `hemiNetwork eip155:43111` and the confirmation policy {1, 1, 6}, with the Hemi signer for both networks; the log has no warning. It was stopped again. No `/settle` was called. `X402_BTC_SETTLER_MAINNET` is now in `.env` (a public address, appended without reading the file's other lines), so `docker compose up` serves the Bitcoin scheme on mainnet by default.
+
+Explorer verification of the settler has not run (the ISP filter, D-034); the default build has no metadata, so a full match is possible when it does. No Bitcoin payment has run; that needs a buyer wallet with real BTC, a seller xpub, and a separate go.
+
+## D-040. First live Bitcoin L1 payment: 1000 sats, verified through hBK, recorded on Hemi mainnet
+
+On Dimitry's go ("Go, pay BTC"), on 2026-11-10 between 01:53Z and 02:25Z (the evening of 2026-11-09 local). One Bitcoin transaction and one Hemi mainnet transaction were sent; nothing else. Full output in `docs/spike/mainnet-btc-l1-payment-2026-11-10.log`.
+
+**Setup.** Dimitry put a fresh seller account xpub (`xpub6CoqSXen…M5EjXH`) and a buyer WIF in `.env`; neither secret was read or printed. The buyer wallet `bc1qyz862zzkswtfxlh7qzxt4ectfl52rtj9tyswkh` held 3000 sats in two UTXOs. The facilitator ran image `hemi.15` with `config.mainnet.json`; the seller advertised 1000 sats on `bip122:000000000019d6689c085ae165831e93`, `minConfirmations` 1, `maxTimeoutSeconds` 7200 (`SELLER_BTC_MAX_TIMEOUT_SECONDS`; the 3600 default leaves little room over the 30 minutes hVM needs).
+
+```
+$ ALLOW_MAINNET=yes npm run pay -w buyer -- --asset btc-l1 --network btc-mainnet --poll 60
+[buyer] paying 1000 sats on Bitcoin mainnet to bc1qv6v32p9kw0az6lv6mz62famwf5acajp3wyntsa (paymentId 674294bb435d4208deccabbcdfc1243a, xpub6CoqSXen…/0/389963158/2013573210/756408873)
+[buyer] sending 1000 sats …: 1 input(s), fee 141 sats (141 vB), change 859 sats, txid 43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4
+[buyer] attempt 1 … attempt 28: not yet: invalid_exact_bip122_payload_transaction_not_found
+[buyer] response: {"echo":{"live":"btc-l1","network":"btc-mainnet"},"timestamp":"2026-11-10T02:22:39.820Z"}
+[buyer] settled on bip122:000000000019d6689c085ae165831e93: bitcoin tx 43cb9bdc…cea4
+[seller] settled 1000 of BTC on bip122:… from n/a: bitcoin tx 43cb9bdc…cea4; paymentId 674294bb… -> bc1qv6v3…ntsa at xpub6CoqSXen…/0/389963158/2013573210/756408873
+facilitator: Bitcoin payment recorded on Hemi network=bip122:… txid=43cb9bdc…cea4 vout=0 hemi_tx=0xcaea6da8…ef3b payment_ref=0xb43e2ee7…ab71
+$ cast receipt 0xcaea6da85cda3bb9d6135f57b65128a47d9c18af82a900c79cf91cea5b7fef3b      # public RPC; dRPC agrees on status and block
+status 0x1  block 5700887 (02:22:35Z)  from 0x1155…0875  to 0x9Df0…ab9f  gasUsed 166753  l1Fee 161408938348  fee 328203960104 wei
+Settled: txid 0x43cb9bdc…cea4  scriptPubKeyHash 0x805b1e6b…791e  paymentRef 0xb43e2ee7…ab71  vout 0  sats 1000  settler 0x1155…0875
+$ cast call settler 'settledBy(bytes32,uint32)(bytes32)' 0x43cb9bdc…cea4 0
+0xb43e2ee7516a1cd7827cb6c59548ca97aaf08e964ae04b353cc0a7726e17ab71      # = sha256(bytes16(paymentId))
+$ cast call settler 'verify(…)' 0x43cb9bdc…cea4 0 0x001466991504b673fa2d7d9ad8b4a4f76e4d3b8ec831 1000 1
+verdict 1 (AlreadyConsumed)
+$ … pay … --resume 674294bb435d4208deccabbcdfc1243a      # the same payment a second time
+[buyer] seller answered 402 (invalid_transaction_state): Payment authorization was already used on chain
+```
+
+**What the read-back shows.**
+
+- Bitcoin: [`43cb9bdc…cea4`](https://mempool.space/tx/43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4) spends one 2000-sat input into 1000 sats to the derived address (vout 0) and 859 sats change, fee 141 sats at 1 sat/vB, in block 975240.
+- Hemi: [`0xcaea6da8…ef3b`](https://explorer.hemi.xyz/tx/0xcaea6da85cda3bb9d6135f57b65128a47d9c18af82a900c79cf91cea5b7fef3b) is the facilitator signer calling `settle` on `X402BtcSettler`. `scriptPubKeyHash` is the keccak of the derived script, and `paymentRef` and `settledBy` both equal `sha256(bytes16(paymentId))` computed here. The signer's balance fell by exactly the fee, 0.00000033 ETH; nonce 5 to 6.
+- The facilitator and the seller never held or moved BTC: the 1000 sats sit unspent on the seller's derived address.
+- Replay: the second use got a 402 with `invalid_transaction_state`. The facilitator answered in 288 ms without sending a transaction; the signer's nonce and balance did not move.
+
+**Timing.** Paid 01:54:18Z. Mined 02:00:22Z (block 975240). 28 polls a minute apart answered `…_transaction_not_found`. The settle was broadcast at 02:22:25Z, 42 seconds after block 975242 (02:21:43Z), the payment's third confirmation, and the buyer was served at 02:22:39Z. So 28 minutes from broadcast and 22 from the first confirmation, as the two-block hVM lag predicts (A-2); `minConfirmations` 1 was never the binding condition. hBK then reported 3 confirmations at Bitcoin tip 975242, which confirms `CONFIRMATION_OFFSET` 0 on the live contract. Each early attempt was a failed `eth_call` only (D-037), so the 28 polls cost no gas.
+
+**Costs.** Buyer: 1000 sats plus a 141-sat miner fee. Facilitator: 328203960104 wei of Hemi gas, 0.00000033 ETH, well under a cent, half of it L1 data fee. Seller: nothing.
+
+**Things that came up on the way.**
+
+- *The seller needs an account xpub, not an address.* The first `.env` had a `bc1q…` address in `SELLER_BTC_XPUB`, and UniSat cannot export an xpub. Dimitry made a fresh wallet that can. A new read-only script, `npm run preflight-btc -w buyer`, reports this before any money moves: it checks that the xpub parses for the network, derives a sample address, shows the buyer wallet's address and balance, the fee rate, and whether the funds cover price plus fee. It prints public data only and sends nothing.
+- *mempool.space was unreachable for a while.* The ISP filter of D-027 and D-034 reset TLS connections to mempool.space and blockstream.info. `BUYER_BTC_ESPLORA` now points the buyer and the preflight at any other Esplora base (`https://mempool.ninja/api` worked; `mempool.emzy.de` rate-limits after a few calls). The block lifted before the payment, which went through mempool.space.
+- *Colima's port forward* for 8080 was missing again after `compose up` (D-036); it was added by hand through the mux socket and cancelled at teardown.
+
+**Still open.** The success response carries the Bitcoin txid but not the Hemi settle hash (it is in the facilitator log and the `Settled` event). Audit items L-2 (reconcile from `settledBy` after a restart) and L-3 (treat an in-block `TooFewConfirmations` revert as retryable) are unpatched; neither came up in this run. The seller's 1000 sats are at `m/0/389963158/2013573210/756408873`, a path no standard wallet scans; there is no sweep tool yet, so the paymentId in the seller log and in this entry is what makes them spendable. Explorer verification of the settler has not run.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).
