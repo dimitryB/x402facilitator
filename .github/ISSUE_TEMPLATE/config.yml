@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/dimitryB/x402facilitator/security/advisories/new
+    about: Please report vulnerabilities privately, not in a public issue. See SECURITY.md.
+  - name: Bugs in x402-rs or the x402 SDK themselves
+    url: https://github.com/x402-rs/x402-rs/issues
+    about: This repository patches x402-rs at a pinned commit. Bugs that reproduce on unpatched x402-rs belong upstream.

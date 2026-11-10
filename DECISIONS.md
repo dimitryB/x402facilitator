@@ -1604,6 +1604,94 @@ So neither the mainnet signer's key nor the buyer's is there. The seller's real 
 
 **Left as they are:** the owner's first name in these entries and in the patches' `From:` lines (the commits carry it anyway); the signer, buyer and payment addresses (public on chain, and the evidence for D-029 to D-040); no CI; Rust dependencies not checked with `cargo audit`; `npm audit --omit=dev` reports 0 vulnerabilities.
 
+## D-042. Open-source audit of the public repository
+
+On 2026-11-09, after the repository had been made public (D-041 prepared that; `main` is at `8d66b7e`, PR #6), it was audited as a stranger would meet it: every document read against the code, the dependencies and licences checked, the GitHub settings read, and the README followed from a fresh clone by an agent with no other context. What could be fixed in the files was fixed; what needs the owner's decision is listed at the end.
+
+**Documents against the code.** Each README, `SECURITY.md`, `NOTICE`, the spec draft, the phase 2 notes and the code comments were read against what the code and the chain say today. Corrected: the README's opening and path table, which predated phase 2 (the bip122 crate, the settler, the fifth demo payment); test counts and a commit date that had moved; a status line that called the settler "audited"; wording that assumed the reader knew the brief or the three work streams; and broken relative links in `docs/phase2/ts.md`. `docs/BRIEF.md` and the four phase 2 notes now open with a line saying they are kept for the record and where the current state is. A link check over the 24 Markdown files finds no broken relative link or anchor.
+
+**Dependencies and licences.**
+
+- npm: `npm audit` reports 0 vulnerabilities, development dependencies included. Licences of the 196 installed packages: MIT 164, Apache-2.0 10, MPL-2.0 12, ISC 5, BSD 4, Unlicense 1. The MPL-2.0 ones are `lightningcss` and its platform builds, which only vitest pulls in; nothing from them is distributed.
+- Rust: there is no `cargo` on this machine, so the dependency tree was taken from the builder image (`cargo tree --features chain-bip122 -e normal,build`: 317 crates in the binary) and each crate at its locked version was looked up in the OSV database. Twelve have advisories at upstream x402-rs's locked versions, none critical: `rustls 0.23.40`, `rustls-webpki 0.103.13`, `h2 0.4.14`, `tokio 1.52.3`, `serde_with 3.20.0`, `anyhow 1.0.102`, `block-buffer 0.12.0`, `ruint 1.18.0`, `lru 0.16.4`, `crypto-bigint 0.5.5`, `paste` and `proc-macro-error2` (the last two unmaintained). They are left as they are: the image builds only from upstream's lock, so a bump means an allow-list of overrides in `build/`, image hemi.16, a rebuild and a full e2e run. No licence tally was made for the Rust crates.
+
+**GitHub.** Read through `gh`, nothing changed: public, Apache-2.0 detected, security policy shown, private vulnerability reporting on, secret scanning and push protection on with 0 alerts, issues on. Not set: description, homepage and topics; branch protection on `main`; Dependabot alerts and security updates; any tag or release. PR #5's title still says "settler audited".
+
+**Added.** `.github/workflows/ci.yml` (typecheck, unit tests, `forge fmt --check`, build and tests) and `e2e.yml` (builds the image, runs the Rust tests inside the builder stage without network, then the e2e suite), both with read-only permissions and Actions pinned by commit SHA; `dependabot.yml` for npm and Actions; an issue template, a pull request template and `CONTRIBUTING.md`; root npm scripts `typecheck`, `test`, `test:unit` and `test:e2e`.
+
+**Fresh-clone walkthrough.** The agent cloned the public repository into an empty directory and followed the README with nothing else. What it hit, and what was done:
+
+| Finding | Fix |
+|------|------|
+| `11-btc-l1` failed 1 to 4 tests on a cold Foundry RPC cache (146/147, 143/147), and passed 147/147 warm: the public Hemi RPCs stalled for longer than viem's 10-second default | the tests' fork clients and `sendToMock` now wait 60 seconds; the README says a first run can time out. Not proven against a cold cache. D-043 found a different cause for 180-second timeouts of this kind |
+| With Colima, a clone outside `$HOME` fails late with `config.json: Is a directory` | `demo-fork.sh` and the e2e setup print the container log and say why; the README has the warning on its own line |
+| The manual `fork.sh` and compose path printed nothing when Lima's port forward failed, and the workaround stood after the teardown line with no way to undo it | `curl -sS`, the note moved before the request, the cancel command named |
+| `scripts/fork.sh` took a wrapper script around anvil for a foreign process and failed | it now looks at the whole command line, and stops what it started when it gives up; `tests/setup/global.ts` likewise |
+| No quick start; "fill in the keys" read as required | a three-command quick start at the top; the fork paths are said to need no `.env` |
+| `.env.example` lacked `FACILITATOR_CONFIG` and the `HEMI_*_RPC_URL` variables | added, with a pointer to each script's header for the rest |
+| hBK, hVM, spike, phase 2, §9, D-0xx and hemi.N were never explained; no tool versions | a list of terms after the quick start; the versions last checked |
+| The manual path lists two networks while the demo shows a Bitcoin payment | the README says why and how to pass the fork settlers |
+| Testnet and mainnet sections read as if every step were still to do | they say which contracts exist, that a newcomer starts at mainnet step 4, and where the signer address comes from |
+
+The agent did not check Linux, Docker Desktop, Node 22.9 itself, or the live-network sections.
+
+**Verification after the changes.** on 2026-11-09, with everything above in the working tree: `npm run typecheck` clean; `npm test` 90 passed; `forge fmt --check` clean and `forge test` 85 passed in nine suites; `npm run test:e2e` 14 files, 147 tests passed in 616 s; `buyer/demo-fork.sh` settled all five payments in about a minute; the two `cargo test --frozen` commands of `e2e.yml`, run in the builder stage with `--network none`, passed (55, 15 and 25 tests in the patched crates, 43 in `x402-chain-bip122`, 5 in the facilitator). The README's manual path (`scripts/fork.sh up`, the settlers file, compose, `/supported`, teardown) was followed once: four networks listed, and Colima's forward had to be added and cancelled by hand as the README now says. The two workflows have not run on GitHub yet, since nothing is pushed.
+
+**Left for the owner.** Committing and pushing these changes; the repository description, topics and homepage; Dependabot alerts and security updates; branch protection on `main`; the Rust dependency bump; a `CODE_OF_CONDUCT.md`, which needs a contact address; PR #5's title; the `Co-Authored-By` trailers in patches 0020 to 0030 and `sdk-patch/0001`, which name a model version where the others do not; a first release tag; submitting the mainnet settler's source to the explorer (`contracts/verify.sh mainnet`, from a network that reaches it); the "stream A/B/C" wording in two Rust comments, which would need an image tag bump; a history rewrite to drop what D-041 lists, which on a public repository would also break every existing link and clone.
+
+## D-043. A failed upstream read while anvil mines a block strands the transaction; the forks drop two system contracts
+
+**What failed.** On 2026-11-10 the first run of `e2e.yml` on GitHub (run 42841940153, PR #7 at `7f30831`) ended with `Tests 1 failed | 141 passed | 5 skipped (147)`:
+
+```
+FAIL  e2e/03-bad-signature.test.ts > bad signature, Permit2 (USDC.e on eip155:743111)
+Error: Hook timed out in 180000ms.
+FAIL  e2e/11-btc-l1.test.ts > exact on bip122:000000000933ea01ad0ee984209779ba (eip155:743111 fork) > an output to another paymentId's address ...
+Error: Test timed out in 180000ms.
+```
+
+Both are on the testnet fork, both sit in code that sends one transaction to the fork and waits for its receipt (`ensurePermit2Approval`, `sendToMock`), and every other test ran at normal speed. The runner had no Foundry RPC cache, so every read went to the public Hemi RPC.
+
+**Mechanism.** Measured on this machine with anvil 1.8.6 forking testnet at block 7094000 through a local proxy that logs each upstream request and can leave a chosen one unanswered, or answer it with HTTP 429.
+
+- Under Prague, every block anvil mines begins with a call into the beacon roots contract (EIP-4788, `0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02`) and the block-hash history contract (EIP-2935, `0x0000F90827F1C53a10cb7A02335B175320002935`). Both have code on Hemi (97 and 83 bytes at the pinned testnet block). The calls write slots keyed by the new block's timestamp and number, so the fork reads three new slots from the upstream for each block, and no cache can hold them. A gas estimate makes the same reads, because anvil estimates on a pending block.
+- In a full suite run on a cold cache these were the largest group of upstream storage reads: 279 of 464 on the testnet fork and 232 of 451 on the mainnet fork.
+- When one of these reads fails while a block is mined, anvil leaves the transaction in its pool, writes nothing to its log and does not try again until another transaction arrives. One `approve` sent with an explicit gas limit, the beacon roots read left unanswered once (`anvil --timeout 5000`):
+
+  ```
+  eth_sendTransaction answered after .02 s: 0x9ccc5a1e…
+  NO RECEIPT after 20 s; txpool: {"pending":"0x1","queued":"0x0"}; block 7094000
+  after an unrelated second tx: first receipt status '0x1', txpool: {"pending":"0x0","queued":"0x0"}; block 7094001
+  ```
+
+  Nine 429 answers in a row (anvil's first request and its 8 retries) give the same result; three are absorbed and the receipt comes about 3 s late.
+- A read that fails during the estimate is different: anvil answers with an error, and viem retries the request. With one such stall in `03-bad-signature` the file passed, 45 s slower.
+- The same fault aimed at mining, in the suite: the proxy answered the estimate's read 1.2 s late, so the block was mined in a later second and needed a new timestamp slot, and left that read unanswered. Result of `npm run test:e2e -- e2e/03-bad-signature.test.ts`:
+
+  ```
+  FAIL  e2e/03-bad-signature.test.ts > bad signature, Permit2 (USDC.e on eip155:743111)
+  Error: Hook timed out in 180000ms.
+  Tests  26 passed | 5 skipped (31)
+  ```
+
+  That is the first CI failure, message for message.
+- The public RPC does answer 429 during the suite: the proxies saw 5 in the cold run before the change and 38 in the one after it, one of them on a beacon roots slot. All were absorbed by anvil's retries.
+
+What is not established: the runner has no log of what the upstream answered, so that a read failed there, and whether it was a stall past anvil's 45 s or more than eight 429s, is inferred from the match above. The D-042 failures of `11-btc-l1` on a cold cache had the same shape (a 180 s timeout, then tests that found state from the stranded transaction) and were not re-examined.
+
+**Decision.** `scripts/fork.sh` removes the code of both system contracts on each fork right after it starts (`anvil_setCode <address> 0x`, three attempts each, since anvil fetches the account from the upstream first). The two system calls then do nothing and mining a block reads nothing from the upstream. Nothing in this project reads either contract; a test that needs EIP-4788 roots or EIP-2935 block hashes on a fork would have to put them back. Anvil's `--timeout` and `--retries` are unchanged.
+
+Not done: a patch or bug report for anvil's silent drop; saving the facilitator's log before the suite's teardown, without which the workflow's "Facilitator and fork logs" step prints nothing useful.
+
+**Verification** on 2026-11-10, with the change in the working tree:
+
+- three blocks in a row on a fork with the code removed: 6 upstream requests for the first (accounts every block touches), 0 for the second and third;
+- the mining-time fault above, armed again: nothing matched it, `03-bad-signature` passed 31/31, and the testnet fork made 0 system-contract reads;
+- `npm run test:e2e` on a cold cache through the logging proxies: 14 files, 147 tests passed in 414 s (704 s before the change, same setup); upstream requests fell from 641 to 337 on the testnet fork and from 672 to 448 on the mainnet fork;
+- `buyer/demo-fork.sh` settled all five payments; `npm run typecheck` clean.
+
+**Limits.** Other upstream reads can still fail. A wallet that estimates first reads a transaction's state during the estimate, where a failure is reported and retried. A transaction sent with an explicit gas limit, or through `eth_sendTransaction` after anvil's internal estimate failed, first reads its state while the block is mined and can still be stranded. A stalled read elsewhere costs up to 45 s.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

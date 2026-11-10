@@ -1,7 +1,7 @@
 /**
  * A stand-in facilitator for local runs of the seller and buyer while the real bip122 scheme is not in
  * the facilitator image yet. It touches no chain and no network: /supported lists the Hemi kinds and both
- * bip122 kinds (shaped like stream B's), /verify and /settle answer bip122 payments from a script:
+ * bip122 kinds (shaped like the facilitator's), /verify and /settle answer bip122 payments from a script:
  *
  *   the first STUB_UNCONFIRMED_POLLS settles of a (txid, vout) -> invalid_exact_bip122_payload_unconfirmed
  *   the next one                                                -> success, transaction = the Bitcoin txid

@@ -1,5 +1,7 @@
 # Phase 2, stream A: the Hemi contract
 
+> **Working notes, kept for the record.** Written on 2026-11-09 while phase 2 was built in three parallel work streams (A: contracts, B: facilitator, C: TypeScript). They describe the state at that time, so some statuses, file names and next steps in them are out of date, and a few refer to scratch files that were never committed. The current state is in the [README](../../README.md) and [DECISIONS.md](../../DECISIONS.md) (D-036 to D-040).
+
 Stream A of `docs/phase2/DESIGN.md`, written on 2026-11-09. It adds `X402BtcSettler`, the contract that verifies a Bitcoin L1 payment through Hemi's Bitcoin Kit (hBK) and records the consumed output on Hemi. Everything here was run read-only against the live chains. No transaction was sent to any live network.
 
 **The ABI is exactly DESIGN.md's.** Nothing in it changed. The contract adds custom errors only:

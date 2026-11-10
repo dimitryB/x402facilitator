@@ -1,0 +1,66 @@
+# Builds the facilitator image (x402-rs at the pinned commit plus the patches and the bip122 crate),
+# runs the Rust unit tests on the patched tree, then the end-to-end suite against the image on local
+# anvil forks of both Hemi chains. The forks read from the public Hemi RPCs; every write stays local,
+# and the only keys are anvil's published dev keys.
+name: Image and e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "facilitator/**"
+      - "tests/**"
+      - "scripts/fork.sh"
+      - "shared/**"
+      - "btc/**"
+      - "seller/**"
+      - "buyer/**"
+      - "contracts/src/**"
+      - "contracts/script/**"
+      - "contracts/deploy-data/**"
+      - "docker-compose*.yml"
+      - "package-lock.json"
+      - ".github/workflows/e2e.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-e2e:
+    name: Image build, Rust tests, e2e on forks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
+        with:
+          version: v1.8.6
+      - run: npm ci
+      - name: Build the facilitator image
+        run: docker compose build
+      - name: Rust unit tests on the patched tree
+        run: |
+          docker build --target builder -t hemi-x402-builder:ci facilitator
+          docker run --rm --network none hemi-x402-builder:ci sh -ec '
+            cargo test --frozen -p x402-types -p x402-facilitator-local -p x402-chain-eip155 \
+              --features x402-chain-eip155/facilitator,x402-chain-eip155/telemetry
+            cargo test --frozen -p x402-chain-bip122 -p x402-facilitator \
+              --features x402-chain-bip122/facilitator,x402-chain-bip122/telemetry,x402-facilitator/chain-bip122
+          '
+      - name: End-to-end suite on anvil forks
+        run: npm run test:e2e
+      - name: Facilitator and fork logs
+        if: failure()
+        run: |
+          docker compose ls || true
+          tail -n 200 .scratch/*/*.log 2>/dev/null || true

@@ -9,7 +9,7 @@ This patch registers Hemi in the upstream x402 TypeScript SDK ([x402-foundation/
 
 ## Upstream commit
 
-The patch targets `e4a086819f419e9395acbbdc1679fe6627029ff7` ("chore: version typescript packages (#4036)", 2026-10-29). It follows the conventions of the most recent default-asset PRs:
+The patch targets `e4a086819f419e9395acbbdc1679fe6627029ff7` ("chore: version typescript packages (#4036)", 2026-10-28). It follows the conventions of the most recent default-asset PRs:
 
 - `dd896985` feat(evm): add Arc default stablecoins (#3590): a mainnet and testnet pair, a docs table row, a `@x402/evm` minor changeset
 - `a9955ae5` feat(evm): add Monad testnet USDC default asset (#3570): a v1 network name in `constants.ts`

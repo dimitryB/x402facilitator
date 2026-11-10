@@ -5,6 +5,12 @@
   "type": "module",
   "workspaces": ["shared", "btc", "seller", "buyer", "tests"],
   "engines": { "node": ">=22.9" },
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test:unit",
+    "test:unit": "npm test -w btc",
+    "test:e2e": "npm test -w tests"
+  },
   "devDependencies": {
     "tsx": "4.23.15",
     "typescript": "6.0.3",

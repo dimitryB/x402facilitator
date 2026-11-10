@@ -95,8 +95,8 @@ lock lacks. The file is in Cargo.lock format, and the Dockerfile appends it to t
 
 ## Related upstream pull requests
 
-Read on 2026-11-09 (DECISIONS.md D-035). Upstream `main` is still `e75adda`, with nothing merged since
-2026-07-08. Three open PRs by `zachsplat`, stacked on one another, cover the same ground as the settlement
+Read on 2026-11-09 (DECISIONS.md D-035). Upstream `main` is still `e75adda`, its last commit, from
+2026-07-13. Three open PRs by `zachsplat`, stacked on one another, cover the same ground as the settlement
 patches here. They were opened on 2026-10-11, 12 and 23, before this repo's patches were written, and
 nothing here was taken from them. None of ours were submitted.
 
@@ -355,7 +355,7 @@ cargo test -p x402-chain-bip122 -p x402-facilitator \
 ```
 
 Every patch was checked one by one: `cargo fmt --check`, `cargo clippy --tests -D warnings`, and the
-tests, with 63 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
+tests, with 69 new unit tests in total. `tests/` (`npm test -w tests`) runs the end-to-end suite against
 the built image on anvil forks.
 
 ## The one non-spec field: `invalidReasonDetails`
@@ -605,7 +605,7 @@ reasons:
 - x402-rs's own facilitator client (`x402-axum`) only reads the body of a 200, 400 or 412. A 5xx would
   lose the hash.
 
-Before, with automine off and `receipt_timeout_secs` 10: the critic's repro on the previous patch set,
+Before, with automine off and `receipt_timeout_secs` 10: a review's repro on the previous patch set,
 `hemi.1`, where `network` and `payer` were already filled. Stock x402-rs gives the same, with
 `unexpected_error`, `"network": ""` and `"payer": ""`.
 
@@ -655,7 +655,7 @@ mempool transactions.
     cannot serve, now maps to `invalid_network` instead of the non-spec `unsupported_chain`.
 - No handler reads the payload in this case, so `payer` is unknown and omitted.
 
-Before: `"invalidReason": "unsupported_scheme"`, which the critic observed. With stock x402-rs, the
+Before: `"invalidReason": "unsupported_scheme"`, which a review run observed. With stock x402-rs, the
 full body follows from its code: `{"isValid":false,"invalidReason":"unsupported_scheme","invalidReasonDetails":"Unsupported scheme","payer":""}`.
 
 After (HTTP 400):
@@ -1244,7 +1244,7 @@ the send with no limit. Reads race and the loser records nothing, so a stalled R
 On a fork with a stalled primary, hemi.9 gave `/settle` no answer in 100 s, past the 60 s receipt timeout
 and the TS SDK's 90 s, and every other settlement hung behind it. hemi.8 settled the same case in 2.7 s.
 When the sockets dropped, the detached settlement went on and paid after the client had left. D-013 sets
-the receipt timeout because the brief expects stalled RPCs, so this is an expected condition.
+the receipt timeout because stalled RPCs are expected on Hemi, so this is an expected condition.
 
 **Change.** Two parts, and the first needs the second.
 
@@ -1320,7 +1320,7 @@ and the SDK threw at 90 s before the hash came back.
 **Change.** `send_transaction` has one budget, the receipt timeout plus 5 s, for its reads and sends. A slow
 send shortens the receipt wait, and when the budget is gone the wait ends after its first reads, and the
 transaction is reported as pending with its hash. The 60 s timeout leaves 25 s for the checks before the send. 0027 brings the search into the budget.
-**Tests.** A unit test for the arithmetic. With no mining and both RPCs stalling sends, the critic measured
+**Tests.** A unit test for the arithmetic. With no mining and both RPCs stalling sends, a review run measured
 65.2 s at no read delay and 69.6 s at 2 s, against 92.7 s on hemi.10.
 
 ### 0027 eip155: search after any failed send no node answered, within the budget
@@ -1419,7 +1419,7 @@ each case: `null` receipts, frozen at an old block, a block during the wait, and
   - A Bitcoin chain whose Hemi chain is not configured stops the facilitator with an error that names both.
   - One whose `settler` is unset or empty is skipped with a warning (`No X402BtcSettler address set`). The
     scheme registry then logs `No chain provider found` for it, and `/supported` does not list it. That keeps
-    every config and the e2e suite working before the contract is deployed, and needs no second set of
+    every config working on a chain that has no settler (Hemi testnet today), and needs no second set of
     config files.
   - With a settler set, the provider calls its `SETTLER()` and checks it is one of the Hemi signers. A failed
     check is a warning, not an error, so an RPC outage at startup cannot stop the EVM chains. With no contract
@@ -1471,7 +1471,7 @@ warning at startup (`Ignoring keys a bip122 chain does not read`): the e2e suite
   precompute every child, match a payment seen in the mempool, find a `paymentId` with the same index in
   about 2^31 hashes and settle it for their own request (DESIGN.md, revised 2026-11-09). The facilitator
   derives from `accepted.extra.paymentId`, never from the seller's copy of the requirements, which may
-  carry a newer one. Stream C's `btc/test-vectors.json` (16 cases: xpub and tpub, p2wpkh and p2tr) is
+  carry a newer one. The TypeScript package's `btc/test-vectors.json` (16 cases: xpub and tpub, p2wpkh and p2tr) is
   copied into the crate and reproduced by a unit test.
 - **Verify.** The checks in the order of the table above, then an `eth_call` of the settler's `verify`.
   Valid answers `{"isValid": true}` with no `payer`: a Bitcoin payment has inputs, not one paying address.
@@ -1492,12 +1492,12 @@ warning at startup (`Ignoring keys a bip122 chain does not read`): the e2e suite
   addressTypes, minConfirmations, settler, hemiNetwork}`, and the Hemi signer under the `bip122` network in
   `signers`.
 
-**Tests.** 42 unit tests: the shared derivation vectors and rejections, P2TR, SLIP-132 and network mismatches, private and
+**Tests.** 43 unit tests: the shared derivation vectors and rejections, P2TR, SLIP-132 and network mismatches, private and
 unsupported keys, every parse failure, each verdict to its code on verify and on settle, the settle
 flows against a mock settler (success and replay; pending, retry from the record, mined, one success, then
 replay; revert; a success whose caller left; Hemi unreachable), the confirmation policy, `/supported`, the
-config, and the ABI selectors and decoding. The end-to-end test needs the settler contract on the forks:
-see `docs/phase2/facilitator.md`.
+config, and the ABI selectors and decoding. The end-to-end test, `tests/e2e/11-btc-l1.test.ts`,
+runs the scheme against the real `X402BtcSettler` and a mock hBK on the forks.
 
 ## What these patches do not change
 
@@ -1518,6 +1518,6 @@ see `docs/phase2/facilitator.md`.
     wallet factory. It does test rejected wrapped signatures (funded and unfunded, both methods, nothing
     sent) and the EOA-wrapper shortcut.
   - A mined settlement revert. The unit tests cover it.
-  - The `bip122` scheme against the real `X402BtcSettler` and a mock hBK. Until stream A's contract is on the
-    forks, the scheme is covered by its unit tests and a fork smoke test with a stand-in contract
-    (`docs/phase2/facilitator.md`).
+  - The `bip122` scheme on Bitcoin testnet3: no settler is deployed on Hemi testnet. On forks the scheme
+    runs against the real `X402BtcSettler` and a mock hBK (`tests/e2e/11-btc-l1.test.ts`), and one live
+    payment has settled on mainnet (DECISIONS.md D-040).

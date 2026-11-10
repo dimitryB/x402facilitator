@@ -64,8 +64,10 @@ function stopStaleForks(): void {
     const pidFile = join(STATE_DIR, `${name}.pid`);
     if (!existsSync(pidFile)) continue;
     const pid = readFileSync(pidFile, "utf8").trim();
-    const comm = spawnSync("ps", ["-p", pid, "-o", "comm="], { encoding: "utf8" }).stdout.trim();
-    if (!comm.endsWith("anvil")) {
+    // The full command line, as scripts/fork.sh checks it: behind a version manager's shim the process
+    // name is the shim's interpreter.
+    const command = spawnSync("ps", ["-p", pid, "-o", "command="], { encoding: "utf8" }).stdout.trim();
+    if (!command.includes("anvil")) {
       log(`removing stale ${pidFile} (pid ${pid} is not anvil)`);
       rmSync(pidFile);
     }

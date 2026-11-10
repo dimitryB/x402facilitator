@@ -1,6 +1,8 @@
 # Phase 2, stream C: TypeScript scheme, seller, buyer, spec, e2e
 
-> **Derivation vectors (three-level rule): `btc/test-vectors.json`, committed in `6607a91e08126264435a616ce11994b0d7d9c7b0`** on branch `claude/optimistic-meninsky-f0b705`, unchanged since. For the DESIGN.md xpub and paymentId `00112233445566778899aabbccddeeff`:
+> **Working notes, kept for the record.** Written on 2026-11-09 while phase 2 was built in three parallel work streams (A: contracts, B: facilitator, C: TypeScript). They describe the state at that time, so some statuses, file names and next steps in them are out of date, and a few refer to scratch files that were never committed. The current state is in the [README](../../README.md) and [DECISIONS.md](../../DECISIONS.md) (D-036 to D-040).
+
+> **Derivation vectors (three-level rule): `btc/test-vectors.json`, committed in `6607a91e08126264435a616ce11994b0d7d9c7b0`**, unchanged since. For the DESIGN.md xpub and paymentId `00112233445566778899aabbccddeeff`:
 >
 > | Field | Value |
 > |------|------|
@@ -13,7 +15,7 @@
 >
 > The testnet3 case uses `tpubDC8msFGeGuwnKG9Upg7DM2b4DaRqg3CUZa5g8v2SRQ6K4NSkxUgd7HsL2XVWbVm39yBA4LAxysQAm397zwQSQoQgewGiYZqrA9DsP4zbQ1M` (`m/84'/1'/0'` of the same mnemonic). Its p2wpkh address is `tb1qakyl8vdjmkzr7a99ylf7jx9axh4f43u4znf3lq`, with script `0014ed89f3b1b2dd843f74a527d3e918bd35ea9ac795`; the p2tr address is `tb1pnzwq4w85mtxz5rvyu6rqelglju3xj0papu85x70d040gqe2hrjgs2gk439`. The file holds 16 vectors in all plus rejection cases.
 
-Stream C of `docs/phase2/DESIGN.md`, on branch `claude/optimistic-meninsky-f0b705`. Decisions are numbered TS-1 onward for the integration session to fold into `DECISIONS.md`. Nothing here sent a transaction to any live network; the only network reads were GitHub (the x402 spec, hBK's struct, the sibling branches) and the npm registry.
+Stream C of `docs/phase2/DESIGN.md`. Decisions are numbered TS-1 onward for the integration session to fold into `DECISIONS.md`. Nothing here sent a transaction to any live network; the only network reads were GitHub (the x402 spec, hBK's struct, the sibling branches) and the npm registry.
 
 ## What landed
 
@@ -73,7 +75,7 @@ The default timeout is 3600 as the brief says. DESIGN.md's scheme table says 720
 
 **TS-14. `tests/lib/spec.ts`: what `transaction` looks like on bip122.** A success names the Bitcoin txid, 64 lowercase hex without `0x` (`txPatternFor`). A failure that broadcast something, `settlement_pending` or a reverted settle, names the Hemi settle transaction (stream B), so it is an EVM hash; that is `settleFailureViolations`' default `txPattern`. `payer` is address-checked only on `eip155:*`. The bip122 codes are typed (`ErrorCode = SpecErrorCode | Bip122ErrorCode`), and `settleSuccessViolations` is new. All existing callers compile unchanged.
 
-**TS-15. The e2e decides what it can test before collecting.** Its top-level `await` reads `/supported`, and for each listed bip122 kind it checks three things on the matching fork: the settler (from `extra.settler`, else `shared/hemi.json`), code at `hbk`, and the settler's `CONFIRMATION_OFFSET()`. Anything missing becomes a `describe.skipIf` and one warning line naming the reason. The file is `11-btc-l1.test.ts` as the brief says; DESIGN.md's stream B section calls the shared file `11-bip122-exact.test.ts`. Stream B's branch has no e2e file, so there is nothing to merge.
+**TS-15. The e2e decides what it can test before collecting.** Its top-level `await` reads `/supported`, and for each listed bip122 kind it checks three things on the matching fork: the settler (from `extra.settler`, else `shared/hemi.json`), code at `hbk`, and the settler's `CONFIRMATION_OFFSET()`. Anything missing becomes a `describe.skipIf` and one warning line naming the reason. The file is `11-btc-l1.test.ts` as the brief says; DESIGN.md's stream B section calls the shared file `11-btc-l1.test.ts`. Stream B's branch has no e2e file, so there is nothing to merge.
 
 **TS-16. `demo-fork.sh` fifth payment.** It runs only when the demo facilitator's `/supported` lists `bip122:000000000019d6689c085ae165831e93`; otherwise the seller would exit at startup (`missing_facilitator`). The seller then takes BTC on Bitcoin mainnet to the vector xpub. The buyer pays with `--stub-pay <mainnet fork>`, recording 1 confirmation, with `--poll 2`, so it settles on the first re-send.
 
@@ -176,7 +178,7 @@ Startup refusals:
 
 ### Interface check against stream A's contracts
 
-Stream A's committed contracts (`claude/quirky-mclaren-678b23` @ `41a73b4`) were exported with `git archive` to the scratch directory and built there with `forge build`. They ran on a throwaway local anvil, not a fork, on port 48545. The mock's runtime code went to the mainnet hBK address with `anvil_setCode`, and `X402BtcSettler(hbk, anvil #0, offset 0)` was deployed. A script that was not committed then drove them with `btc/src/derive.ts` and `btc/src/mock-hbk.ts` (`setTx` with the 8-member `Output`, `setConfirmations`):
+Stream A's committed contracts (commit `41a73b4`) were exported with `git archive` to the scratch directory and built there with `forge build`. They ran on a throwaway local anvil, not a fork, on port 48545. The mock's runtime code went to the mainnet hBK address with `anvil_setCode`, and `X402BtcSettler(hbk, anvil #0, offset 0)` was deployed. A script that was not committed then drove them with `btc/src/derive.ts` and `btc/src/mock-hbk.ts` (`setTx` with the 8-member `Output`, `setConfirmations`):
 
 ```
 ok   derived p2wpkh, 1 conf: Ok sats=1000 hbkConf=1 conf=1
@@ -230,11 +232,11 @@ For the integration session to place in the top-level `README.md`. Stream C did 
 
 ### For sellers (append)
 
-> **Bitcoin L1.** The same seller can take native BTC on Bitcoin mainnet or testnet3, paid on chain and verified by the facilitator through Hemi's hBK. Set `SELLER_BTC_NETWORKS=btc-mainnet` and `SELLER_BTC_XPUB` to an account xpub (`tpub` for testnet3); the price is `SELLER_BTC_AMOUNT_SATS` (default 1000). With the SDK, register `new ExactBtcServerScheme({ network, payTo: xpub })` from `@hemi-x402/btc` once per Bitcoin network and price the accept as `{ asset: "BTC", amount: "<sats>" }` with `payTo` = the xpub. Every 402 gets a fresh `extra.paymentId`. Each payment goes to its own address, `xpub/0/i1/i2/i3`, derived from that paymentId. The flow is `upfront`: the SDK skips `/verify` and settles before the handler. Keep the paymentIds of settled payments (the demo seller logs them): no wallet scan finds these addresses, and you need the path to spend the funds. [`docs/specs/scheme_exact_bip122.md`](docs/specs/scheme_exact_bip122.md) is the scheme; [`seller/README.md`](seller/README.md) has the settings.
+> **Bitcoin L1.** The same seller can take native BTC on Bitcoin mainnet or testnet3, paid on chain and verified by the facilitator through Hemi's hBK. Set `SELLER_BTC_NETWORKS=btc-mainnet` and `SELLER_BTC_XPUB` to an account xpub (`tpub` for testnet3); the price is `SELLER_BTC_AMOUNT_SATS` (default 1000). With the SDK, register `new ExactBtcServerScheme({ network, payTo: xpub })` from `@hemi-x402/btc` once per Bitcoin network and price the accept as `{ asset: "BTC", amount: "<sats>" }` with `payTo` = the xpub. Every 402 gets a fresh `extra.paymentId`. Each payment goes to its own address, `xpub/0/i1/i2/i3`, derived from that paymentId. The flow is `upfront`: the SDK skips `/verify` and settles before the handler. Keep the paymentIds of settled payments (the demo seller logs them): no wallet scan finds these addresses, and you need the path to spend the funds. [`docs/specs/scheme_exact_bip122.md`](../specs/scheme_exact_bip122.md) is the scheme; [`seller/README.md`](../../seller/README.md) has the settings.
 
 ### For buyers (append)
 
-> **Bitcoin L1.** `npm run pay -w buyer -- --asset btc-l1 --network btc-testnet3` pays a real Bitcoin transaction from `BUYER_BTC_WIF` or `BUYER_BTC_MNEMONIC` to the address derived from the seller's xpub and the 402's paymentId. It then re-sends the same payment every `--poll` seconds until the seller serves it. Expect 30 minutes or more on mainnet: hVM must see about 3 confirmations. Don't use `wrapFetchWithPayment` for this scheme, because it would pay again on the next 402. `ExactBtcClientScheme` journals every payment by paymentId and never pays one twice. The journal is in `.scratch/buyer-btc/journal.jsonl`, and `--resume <paymentId>` continues after a restart. `ALLOW_MAINNET=yes` is required for `btc-mainnet`. See [`buyer/README.md`](buyer/README.md).
+> **Bitcoin L1.** `npm run pay -w buyer -- --asset btc-l1 --network btc-testnet3` pays a real Bitcoin transaction from `BUYER_BTC_WIF` or `BUYER_BTC_MNEMONIC` to the address derived from the seller's xpub and the 402's paymentId. It then re-sends the same payment every `--poll` seconds until the seller serves it. Expect 30 minutes or more on mainnet: hVM must see about 3 confirmations. Don't use `wrapFetchWithPayment` for this scheme, because it would pay again on the next 402. `ExactBtcClientScheme` journals every payment by paymentId and never pays one twice. The journal is in `.scratch/buyer-btc/journal.jsonl`, and `--resume <paymentId>` continues after a restart. `ALLOW_MAINNET=yes` is required for `btc-mainnet`. See [`buyer/README.md`](../../buyer/README.md).
 
 ### Tests (add)
 

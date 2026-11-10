@@ -42,8 +42,14 @@ export async function waitForSupported(timeoutMs: number): Promise<void> {
     }
     await new Promise(r => setTimeout(r, 1000));
   }
-  spawnSync("docker", [...COMPOSE_ARGS, "logs", "--no-color", "--tail", "50"], { env: composeEnv(), stdio: "inherit" });
-  throw new Error(`facilitator did not list both Hemi networks on /supported within ${timeoutMs} ms: ${last}`);
+  const logs = spawnSync("docker", [...COMPOSE_ARGS, "logs", "--no-color", "--tail", "50"], { env: composeEnv(), encoding: "utf8" });
+  const output = `${logs.stdout ?? ""}${logs.stderr ?? ""}`;
+  process.stderr.write(output);
+  // Docker mounts a host file it cannot see as an empty directory.
+  const hint = output.includes("config.json: Is a directory")
+    ? " The container cannot see facilitator/config.json: Docker does not share this folder. With Colima, keep the clone under $HOME."
+    : "";
+  throw new Error(`facilitator did not list both Hemi networks on /supported within ${timeoutMs} ms: ${last}.${hint}`);
 }
 
 /** (Re)create the facilitator container, optionally with other compose variables, and wait for it. */

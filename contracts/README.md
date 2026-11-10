@@ -11,11 +11,11 @@ each consumed output on Hemi. It is described in the section "Phase 2: X402BtcSe
 
 | Contract | Address | What it is | Mainnet | Testnet |
 |------|------|------|------|------|
-| Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | Uniswap's signature-transfer contract; buyers approve it once per token | present (D-004) | deploy |
-| EIP-6492 validator | `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` | `UniversalSigValidator`; x402-rs calls it only for counterfactual-wallet signatures | deploy | deploy |
-| x402 exact Permit2 proxy | `0x402085c248EeA27D92E8b30b2C58ed07f9E20001` | `x402ExactPermit2Proxy`; the only spender the facilitator accepts in a Permit2 payload | deploy | deploy |
+| Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` | Uniswap's signature-transfer contract; buyers approve it once per token | present (D-004) | deployed 2026-10-29 |
+| EIP-6492 validator | `0xdAcD51A54883eb67D95FAEb2BBfdC4a9a6BD2a3B` | `UniversalSigValidator`; x402-rs calls it only for counterfactual-wallet signatures | deployed 2026-11-04 (D-029) | deployed 2026-10-29 |
+| x402 exact Permit2 proxy | `0x402085c248EeA27D92E8b30b2C58ed07f9E20001` | `x402ExactPermit2Proxy`; the only spender the facilitator accepts in a Permit2 payload | deployed 2026-11-04 (D-029) | deployed 2026-10-29 |
 
-The "Mainnet" and "Testnet" columns show the state at the time of writing (the spike, D-004 to D-006). All three now exist on both networks: on testnet since 2026-10-29, and on mainnet since 2026-11-04 (D-029).
+At the time of the spike (D-004 to D-006) only mainnet's Permit2 existed. This project deployed the rest: on testnet on 2026-10-29, and on mainnet on 2026-11-04 (D-029).
 
 ## Where the bytes come from
 
@@ -60,13 +60,15 @@ src/x402/               vendored x402ExactPermit2Proxy source (unchanged), for r
 lib/forge-std/          forge-std v1.17.0 (f3dae6e6), vendored with `forge install --no-git`
 lib/openzeppelin-contracts/  the three OpenZeppelin v5.5.0 files the proxy imports, unchanged
 deploy.sh               plan, simulate, and (with --broadcast) deploy
-verify.sh               best-effort Blockscout verification (also the phase 2 contracts once deployed)
+verify.sh               best-effort Blockscout verification (also the phase 2 contracts)
 
 Phase 2 (Bitcoin L1 payments):
 src/btc/                X402BtcSettler, IHbkReader (the two hBK functions it reads), HbkTestnetAdapter
 script/DeployBtcSettler.s.sol  idempotent CREATE2 deployment of the settler (and the testnet adapter)
 test/X402BtcSettler.t.sol      offline: settler, adapter, deployment constants vs shared/hemi.json
 test/X402BtcSettler.fork.t.sol forks of both chains with MockBitcoinKit etched at the real hBK address
+test/X402BtcSettlerAudit.t.sol offline: edge cases from the pre-deployment security review (D-038)
+test/X402BtcSettlerLiveReplay.t.sol  offline: raw answers captured from mainnet's hBK, replayed (D-038)
 test/mocks/MockBitcoinKit.sol  hBK stand-in with both hBK ABIs and hBK's exact reverts
 deploy-btc.sh           deploy.sh's flow for the settler
 check-btc-live.sh       read-only check of a real Bitcoin payment through the live hBK
@@ -85,7 +87,8 @@ cd contracts
 forge test
 ```
 
-66 tests in seven suites: the 17 below, and 49 for phase 2 (see "Phase 2: X402BtcSettler").
+85 tests in nine suites: the 17 below, 49 for phase 2 (see "Phase 2: X402BtcSettler") and 19 ported
+from the pre-deployment security review (D-038).
 `DeployDataTest` needs no network. `HemiTestnetForkTest` and
 `HemiMainnetForkTest` fork the live chains at pinned blocks (testnet 7094100, mainnet 5614400), run the
 deployment script's logic, and assert:
@@ -178,7 +181,7 @@ and a confirmed mainnet-fork broadcast. On 2026-10-29 it deployed all three cont
 
 ```sh
 contracts/verify.sh testnet
-contracts/verify.sh mainnet     # the spike machine's ISP filters explorer.hemi.xyz (D-034); run elsewhere,
+contracts/verify.sh mainnet     # if curl cannot reach explorer.hemi.xyz (D-034), run it elsewhere,
                                 # or set HEMI_MAINNET_EXPLORER_URL
 ```
 
@@ -237,6 +240,8 @@ are in `docs/phase2/contracts.md`.
   settlement by consuming the output first.
 - No owner, no upgrade, no funds. Changing hBK, the signer or the confirmation offset means a new
   contract at a new address.
+- The mainnet settler's source has not been submitted to the explorer yet (D-039). `contracts/verify.sh
+  mainnet` submits it; the default build has no metadata, so a full match is possible.
 - `CONFIRMATION_OFFSET` is 0: on 2026-11-09 hBK's count equalled Bitcoin's. A payment becomes visible
   to hBK only once its block reaches hVM's Bitcoin header, which lagged the tip by 2 blocks.
 - Testnet's hBK has an older `btc*` ABI; `HbkTestnetAdapter` sits in front of it, so the settler's
@@ -250,7 +255,7 @@ mismatch between the compiled code, the constants and `shared/hemi.json`.
 ```sh
 contracts/check-btc-live.sh mainnet          # read-only; verify() on a real payment, prints the offset
 contracts/deploy-btc.sh mainnet              # plan, cost and simulation; sends nothing
-CONFIRM_MAINNET_DEPLOY=yes contracts/deploy-btc.sh mainnet --broadcast   # only on the owner's go
+CONFIRM_MAINNET_DEPLOY=yes contracts/deploy-btc.sh mainnet --broadcast   # sends a mainnet transaction
 contracts/deploy-btc.sh testnet --broadcast
 ```
 

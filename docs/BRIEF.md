@@ -1,5 +1,7 @@
 # Brief: Hemi x402 facilitator MVP
 
+> **Kept for the record.** This is the brief the project was built from, unchanged apart from this note. "The session", "lead agent", "sub-agent" and "critic" refer to the AI-assisted working sessions that built it. What exists now is described in the [README](../README.md), and how each item was decided in [DECISIONS.md](../DECISIONS.md).
+
 Build and run an x402 v2 facilitator that verifies and settles payments on Hemi (eip155:43111 and eip155:743111) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint. Deliverable: a deployable facilitator, the on-chain contracts it needs, a demo seller and buyer, and a /supported response that lists Hemi.
 
 Out of scope for the MVP: verifying Bitcoin L1 payments through hBK (phase 2, below); the upto and deferred schemes; a hosted production deployment; any token other than USDC.e and hemiBTC; a UI.
@@ -45,7 +47,7 @@ A fresh-context critic passes all of these from the README alone:
 
 ## How to run the session
 
-Repo hemi-x402-facilitator (local folder ~/dev/x402facilitator), branch feat/facilitator-mvp. Lead agent plans; one sub-agent on contracts, one on facilitator config and tests, one on seller/buyer; a separate fresh-context critic runs the Definition of done from the README only and reports failures as issues. Loop until the critic passes twice in a row. No mainnet transactions without an explicit go from Dimitry; testnet is unrestricted.
+Repo hemi-x402-facilitator, branch feat/facilitator-mvp. Lead agent plans; one sub-agent on contracts, one on facilitator config and tests, one on seller/buyer; a separate fresh-context critic runs the Definition of done from the README only and reports failures as issues. Loop until the critic passes twice in a row. No mainnet transactions without an explicit go from Dimitry; testnet is unrestricted.
 
 ## Phase 2 (not now)
 

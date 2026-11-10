@@ -1,5 +1,5 @@
 {
-  "_source": "DECISIONS.md D-001..D-011. Token addresses from hemilabs/token-list@7a326ac4 and on-chain reads; contract addresses are canonical CREATE2 addresses. Per-network contracts.hbk, contracts.x402BtcSettler, contracts.hbkTestnetAdapter and btcConfirmationOffset: docs/phase2/contracts.md (the settler and adapter addresses are predicted CREATE2 addresses until deployed).",
+  "_source": "DECISIONS.md D-001..D-011. Token addresses from hemilabs/token-list@7a326ac4 and on-chain reads; contract addresses are canonical CREATE2 addresses. Per-network contracts.hbk, contracts.x402BtcSettler, contracts.hbkTestnetAdapter and btcConfirmationOffset: docs/phase2/contracts.md (mainnet's settler is deployed, D-039; testnet's settler and adapter are predicted CREATE2 addresses, not deployed).",
   "contracts": {
     "create2Deployer": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
     "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
