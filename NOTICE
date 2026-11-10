@@ -1,0 +1,26 @@
+hemi-x402-facilitator
+Copyright 2026 Dimitry B and Neva Technologies Inc
+
+Licensed under the Apache License, Version 2.0 (see LICENSE), except where a file or
+directory says otherwise:
+
+- contracts/src/btc, contracts/script, contracts/test: Solidity sources marked
+  "SPDX-License-Identifier: MIT" (see contracts/LICENSE-MIT). The headers are part of
+  the sources the deployed contracts were verified against, so they are kept as they are.
+- contracts/src/x402: the x402 exact Permit2 proxy from the x402 reference
+  implementation, Copyright 2026 x402 Foundation, Apache-2.0 (see its LICENSE and NOTICE).
+- contracts/lib/forge-std and contracts/lib/openzeppelin-contracts: vendored
+  third-party libraries under their own licenses, included in each directory.
+
+This project builds on third-party work:
+
+- x402-rs (https://github.com/x402-rs/x402-rs), Apache-2.0. The facilitator image is
+  x402-rs at a pinned commit. The patches in facilitator/x402-rs/patches and
+  facilitator/x402-rs/build modify it, and the crate in
+  facilitator/x402-rs/crates/x402-chain-bip122 is built inside its workspace.
+- x402 (https://github.com/x402-foundation/x402), Apache-2.0. sdk-patch is a draft
+  change to its TypeScript SDK.
+- hemilabs/bitcoin-tunnel-contracts (https://github.com/hemilabs/bitcoin-tunnel-contracts),
+  MIT, Copyright (c) 2025 Hemi Labs, Inc. The interface in
+  contracts/src/btc/IHbkReader.sol is taken from its IBitcoinKit.sol and
+  BitcoinKitStructs.sol.

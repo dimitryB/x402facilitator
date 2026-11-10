@@ -1478,6 +1478,8 @@ The critic could not run the Rust unit tests itself (no cargo on the machine), a
 
 ## D-038. Security audit of X402BtcSettler before the mainnet deployment
 
+> Note (2026-11-09): "audit" here means an internal review by an AI agent with fresh context, not an independent third-party audit (D-041).
+
 Dimitry stopped the mainnet deployment simulation on 2026-11-09 and asked for a security audit of the contract first. Nothing had been sent: the settler address had no code and the deployer's nonce was unchanged. A fresh-context auditor read `X402BtcSettler.sol`, `IHbkReader.sol`, `HbkTestnetAdapter.sol`, `DeployBtcSettler.s.sol`, `deploy-btc.sh`, the tests and the Rust caller, with Hemi's hBK source beside them, wrote 19 scratch tests, and read raw answers from the live mainnet hBK for three real Bitcoin transactions. It could not broadcast or read `.env`.
 
 **Nothing above low in the contracts.** What it checked and found sound, with its evidence:
@@ -1578,6 +1580,29 @@ $ … pay … --resume 674294bb435d4208deccabbcdfc1243a      # the same payment 
 - *Colima's port forward* for 8080 was missing again after `compose up` (D-036); it was added by hand through the mux socket and cancelled at teardown.
 
 **Still open.** The success response carries the Bitcoin txid but not the Hemi settle hash (it is in the facilitator log and the `Settled` event). Audit items L-2 (reconcile from `settledBy` after a restart) and L-3 (treat an in-block `TooFewConfirmations` revert as retryable) are unpatched; neither came up in this run. The seller's 1000 sats are at `m/0/389963158/2013573210/756408873`, a path no standard wallet scans; there is no sweep tool yet, so the paymentId in the seller log and in this entry is what makes them spendable. Explorer verification of the settler has not run.
+
+## D-041. Licence and preparation for publishing the repository
+
+On 2026-11-09 the repository was checked for publication and prepared for it. It is still private; making it public is a separate step.
+
+**Licence: Apache-2.0** (`LICENSE`, `NOTICE`, `"license"` in every `package.json`). Copyright is held by Dimitry B and Neva Technologies Inc. It is the licence of x402-rs and of the x402 SDK, which the patches, the bip122 crate (`license.workspace = true` inside the x402-rs workspace) and `sdk-patch` build on. The Solidity sources keep their `SPDX-License-Identifier: MIT` headers, with the text in `contracts/LICENSE-MIT`: a header is part of the source the deployed contracts were compiled and verified from, so changing it would break the match with the bytecode on chain. `IHbkReader.sol` is taken from hemilabs/bitcoin-tunnel-contracts (MIT), credited in `NOTICE` and `contracts/LICENSE-MIT`.
+
+**Secrets: none in the history.** All 77 commits on every ref were dumped with `git log --all -p` and searched for keys, mnemonics, WIFs, extended private keys, tokens and keyed RPC URLs. The only env file ever committed is `.env.example`. Every hit is a published test value: anvil development keys #0 to #3, the private-key-1 WIF, a BIP32 test vector, the forge-std and BIP84 test mnemonics, forge-std's default Infura URL. As a second check, each of the 173 distinct 64-hex strings in the history was tried as a private key against each of the 165 EVM addresses and 23 p2wpkh addresses in the history:
+
+```
+checked 169 candidate keys
+000000… is the key of 0x7e5f4552091a69125d5dfcb7b8c2659029395bdf      (private key 1)
+000000… is the key of bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4      (private key 1)
+59c699… 5de411… 7c8521… ac0974…                                        (anvil #1, #2, #3, #0)
+```
+
+So neither the mainnet signer's key nor the buyer's is there. The seller's real xpub appears only in shortened form. Commits carry the GitHub noreply address.
+
+**Removed from the current files:** the local checkout path in three deploy logs (now `<repo>/`), the ISP's name and the two warning-page URLs with their tokens (D-002, D-034, README, `contracts/README.md`), and a gendered pronoun in D-034. These remain in earlier commits; publishing with the existing history publishes them too. Removing them for good means publishing from a new history.
+
+**Added:** `SECURITY.md` (status, private reporting, scope); a line near the top of the README that the project is independent of Hemi Labs, the x402 Foundation and x402-rs and has had no independent audit; a "Licence and security" section. The README no longer calls the settler "audited": D-038 was an internal review by an AI agent with fresh context, and its entry now says so.
+
+**Left as they are:** the owner's first name in these entries and in the patches' `From:` lines (the commits carry it anyway); the signer, buyer and payment addresses (public on chain, and the evidence for D-029 to D-040); no CI; Rust dependencies not checked with `cargo audit`; `npm audit --omit=dev` reports 0 vulnerabilities.
 
 ## Pre-spike context: what the reference code requires
 
