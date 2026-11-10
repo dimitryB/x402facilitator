@@ -1,11 +1,11 @@
 /**
  * Local-fork only: write a fabricated Bitcoin transaction into the MockBitcoinKit that scripts/fork.sh
- * places at the real hBK address (contracts/test/mocks/MockBitcoinKit.sol, stream A), so the facilitator's
+ * places at the real hBK address (contracts/test/mocks/MockBitcoinKit.sol), so the facilitator's
  * X402BtcSettler.verify sees a "Bitcoin payment" without any Bitcoin network.
  *
  * Every function here refuses an RPC URL that is not a local address. Nothing in this file touches Bitcoin.
  *
- * Mock setters (stream A, contracts/test/mocks/MockBitcoinKit.sol):
+ * Mock setters (contracts/test/mocks/MockBitcoinKit.sol):
  *   setTx(bytes32 txid, Output[] outputs, uint32 confirmations)
  *   setConfirmations(bytes32 txid, uint32 confirmations)
  * with the 8-member Output that mainnet hBK returns (contracts/src/btc/IHbkReader.sol; no spentDetail,
@@ -117,7 +117,9 @@ export interface SeedTx {
 /** Send one mock setter call from an impersonated address on the fork; resolves once mined. */
 async function sendToMock(rpcUrl: string, hbk: Address, call: { functionName: "setTx" | "setConfirmations"; args: readonly unknown[] }): Promise<Hash> {
   assertLocalRpc(rpcUrl);
-  const transport = http(rpcUrl);
+  // A fork may fetch the state this touches from its upstream RPC first, which can take longer than
+  // viem's default 10 s timeout.
+  const transport = http(rpcUrl, { timeout: 60_000 });
   const test = createTestClient({ mode: "anvil", transport });
   await test.impersonateAccount({ address: MOCK_HBK_SEEDER });
   await test.setBalance({ address: MOCK_HBK_SEEDER, value: 10n ** 18n });
@@ -143,7 +145,7 @@ export interface MockHbkPayOptions {
   hbk: Address;
   /** Bitcoin confirmations to record (default 1). */
   bitcoinConfirmations?: number;
-  /** hBK count = Bitcoin confirmations + this (default 0, measured on mainnet by stream A). */
+  /** hBK count = Bitcoin confirmations + this (default 0, as measured on mainnet). */
   confirmationOffset?: number;
   log?: (message: string) => void;
 }

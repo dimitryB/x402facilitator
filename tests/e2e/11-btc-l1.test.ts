@@ -3,11 +3,11 @@
  * the mock hBK and X402BtcSettler on the Hemi forks. A "Bitcoin payment" is a fabricated transaction
  * written into the mock (tests/lib/btc.ts); nothing here touches Bitcoin.
  *
- * Needs the phase 2 pieces: the facilitator with the bip122 scheme (stream B), and scripts/fork.sh placing
- * the mock hBK at the real hBK address and deploying the settler with the fork signer as SETTLER (stream A,
- * integration). Without them the file skips, saying why, so the rest of the suite is unaffected.
+ * Needs the phase 2 pieces: the facilitator with the bip122 scheme, and scripts/fork.sh placing
+ * the mock hBK at the real hBK address and deploying the settler with the fork signer as SETTLER.
+ * Without them the file skips, saying why, so the rest of the suite is unaffected.
  *
- * Codes (stream B, docs/phase2/facilitator.md): TxNotFound -> …_transaction_not_found, OutputNotFound ->
+ * Codes (docs/phase2/facilitator.md): TxNotFound -> …_transaction_not_found, OutputNotFound ->
  * …_vout, ScriptMismatch -> …_recipient_mismatch, BelowAmount -> …_value_mismatch, TooFewConfirmations ->
  * …_unconfirmed, AlreadyConsumed -> invalid_transaction_state; malformed payload -> invalid_payload (400).
  */
@@ -63,7 +63,7 @@ const kinds = await supported().then(
 const forks = new Map<BtcNetwork, BtcFork>();
 const skipReasons: string[] = [];
 if (supportedError) skipReasons.push(`GET ${FACILITATOR_URL}/supported failed: ${supportedError}`);
-else if (kinds.length === 0) skipReasons.push("the facilitator's /supported lists no exact kind on bip122:* (stream B not in this image)");
+else if (kinds.length === 0) skipReasons.push("the facilitator's /supported lists no exact kind on bip122:* (no settler address set, or an image without the bip122 scheme)");
 for (const network of BTC_NETWORKS_UNDER_TEST) {
   const kind = kinds.find(k => k.network === network);
   if (!kind) continue;

@@ -2,24 +2,47 @@
 
 An x402 v2 facilitator for Hemi. It verifies and settles `exact` payments on Hemi mainnet (`eip155:43111`) and Hemi testnet (`eip155:743111`) in USDC.e and hemiBTC, so any x402-aware agent can pay a Hemi endpoint.
 
-It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config and thirty small patches. Eighteen make its error responses match the x402 v2 spec, one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018), and nine keep a settlement's outcome correct under load and when RPCs stall, lag or fail (D-019 to D-025), and two add phase 2: native Bitcoin L1 payments verified through Hemi's hBK (D-036). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, Hemi only needs three standard contracts at their canonical addresses (see [Contracts](#contracts-and-addresses)).
+It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned commit, with a Hemi config, thirty small patches and one new crate. Eighteen patches make its error responses match the x402 v2 spec, one keeps a settlement from being priced below Hemi testnet's minimum tip (D-018), nine keep a settlement's outcome correct under load and when RPCs stall, lag or fail (D-019 to D-025), and two, with the crate, add phase 2: native Bitcoin L1 payments verified through Hemi's hBK (D-036). The patches never change to whom funds go. One of them narrows what is accepted to the exact amount (D-016). The image is built locally. The x402 SDKs are used unmodified. On chain, payments in Hemi tokens only need three standard contracts at their canonical addresses. Bitcoin L1 payments add one contract from this repo, `X402BtcSettler` (see [Contracts](#contracts-and-addresses)).
 
-**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). On 2026-11-04 live mainnet payments settled in USDC.e, in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031), and in hemiBTC, in [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27) (D-032). Phase 2, native BTC paid on Bitcoin L1 and verified through hBK in a Hemi contract, is built and tested on forks (D-036), audited (D-038), and its settler contract is deployed on Hemi mainnet (D-039). On 2026-11-10 a live payment of 1000 sats on Bitcoin mainnet, [`43cb9bdc…cea4`](https://mempool.space/tx/43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4), was verified through hBK and recorded on Hemi mainnet in [`0xcaea6da8…ef3b`](https://explorer.hemi.xyz/tx/0xcaea6da85cda3bb9d6135f57b65128a47d9c18af82a900c79cf91cea5b7fef3b) (D-040). See [Definition of done](#definition-of-done).
+**Status:** built and tested end to end on local forks of both Hemi chains. On Hemi testnet, the contracts are deployed and live payments have settled in USDC.e and hBTC ([docs/testnet-run.md](docs/testnet-run.md)). On Hemi mainnet, the two missing contracts were deployed on 2026-11-04 (D-029), and the facilitator then ran live on both chains and passed read-only `/verify` checks (D-030). On 2026-11-04 live mainnet payments settled in USDC.e, in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031), and in hemiBTC, in [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27) (D-032). Phase 2, native BTC paid on Bitcoin L1 and verified through hBK in a Hemi contract, is built and tested on forks (D-036), was reviewed internally before deployment (D-038), and its settler contract is deployed on Hemi mainnet (D-039). On 2026-11-10 (UTC) a live payment of 1000 sats on Bitcoin mainnet, [`43cb9bdc…cea4`](https://mempool.space/tx/43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4), was verified through hBK and recorded on Hemi mainnet in [`0xcaea6da8…ef3b`](https://explorer.hemi.xyz/tx/0xcaea6da85cda3bb9d6135f57b65128a47d9c18af82a900c79cf91cea5b7fef3b) (D-040). See [Definition of done](#definition-of-done).
 
 **Independent and experimental:** this is not an official product of Hemi Labs, the x402 Foundation or the x402-rs authors, and none of them endorses it. It has had no independent security audit ([SECURITY.md](SECURITY.md)). Licensed under [Apache-2.0](LICENSE).
 
 | Path | What it is |
 |------|------|
-| [`docker-compose.yml`](docker-compose.yml), [`facilitator/`](facilitator/) | The facilitator: pinned x402-rs image and its Hemi config |
-| [`contracts/`](contracts/) | Foundry project that deploys Permit2, the EIP-6492 validator and the x402 exact proxy to their canonical addresses |
-| [`seller/`](seller/) | Demo paid endpoint `GET /echo` ($0.001), accepting USDC.e and hemiBTC |
+| [`docker-compose.yml`](docker-compose.yml), [`facilitator/`](facilitator/) | The facilitator: x402-rs at a pinned commit, the patches, the `x402-chain-bip122` crate and the Hemi config |
+| [`contracts/`](contracts/) | Foundry project that deploys Permit2, the EIP-6492 validator and the x402 exact proxy to their canonical addresses, and holds phase 2's `X402BtcSettler` |
+| [`seller/`](seller/) | Demo paid endpoint `GET /echo` ($0.001), accepting USDC.e and hemiBTC, and optionally native BTC on Bitcoin L1 |
 | [`buyer/`](buyer/) | Demo buyer using `@x402/fetch`; pays the seller and prints the settlement tx |
 | [`tests/`](tests/) | End-to-end tests of `/verify` and `/settle` on local forks of both Hemi chains, plus read-only live checks |
 | [`sdk-patch/`](sdk-patch/) | Draft upstream patch adding Hemi to the x402 TypeScript SDK's default assets |
 | [`btc/`](btc/) | Phase 2: the `exact` scheme on Bitcoin L1 for the x402 TypeScript SDK (seller and buyer sides), derivation, a minimal wallet |
-| [`docs/specs/scheme_exact_bip122.md`](docs/specs/scheme_exact_bip122.md), [`docs/phase2/`](docs/phase2/) | Phase 2: the scheme spec draft, the design and each stream's notes |
+| [`docs/specs/scheme_exact_bip122.md`](docs/specs/scheme_exact_bip122.md), [`docs/phase2/`](docs/phase2/) | Phase 2: the scheme spec draft, the design and the working notes it was built from |
 | [`shared/hemi.json`](shared/hemi.json) | Every Hemi address used here, in one file |
 | [`DECISIONS.md`](DECISIONS.md) | The spike and every decision, with commands and outputs |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md), [`SECURITY.md`](SECURITY.md) | How to set up, test and send a change; how to report a vulnerability |
+
+## Quick start
+
+No keys and no funds are needed. Everything runs on local forks of both Hemi chains, and nothing is sent to a live network:
+
+```bash
+git clone https://github.com/dimitryB/x402facilitator && cd x402facilitator
+npm install
+buyer/demo-fork.sh
+```
+
+You need Docker with Compose v2, Foundry, `jq` and Node 22.9 or later; [Run it](#run-it) has the details. The first run builds the facilitator image, which takes a few minutes. After that the demo takes about a minute and settles five payments through the facilitator, printing each settlement transaction. With Colima, clone under `$HOME`.
+
+Terms used throughout:
+
+- **hVM, hBK:** Hemi's EVM carries a view of the Bitcoin chain (hVM). hBK, the Hemi Bitcoin Kit, is the contract through which other contracts read it: transactions, outputs and confirmation counts.
+- **hemiBTC, hBTC:** Hemi's bitcoin ERC-20 tokens. Mainnet has hemiBTC. It has no testnet deployment, so testnet uses hBTC, the tunnel's BTC representation (D-008).
+- **Spike:** the read-only on-chain checks made before any code was written. They decided each asset's transfer method (D-001 to D-012).
+- **Phase 2:** BTC paid on Bitcoin L1 itself and verified through hBK. Phase 1 was ERC-20 payments on Hemi.
+- **§9:** section 9 of the x402 v2 specification, its list of error codes.
+- **D-0xx:** an entry in [DECISIONS.md](DECISIONS.md).
+- **hemi.N:** the Nth build of this repo's facilitator image, tagged `hemi-x402-facilitator:e75adda-hemi.N`.
 
 ## Spike result
 
@@ -68,12 +91,16 @@ Networks:
 
 ## Run it
 
-You need Docker (any engine with Compose v2), Foundry (`cast`, `anvil`, `forge`), `jq` and Node 22.9 or later. With Colima, keep the clone under `$HOME`, the only path it shares by default. Elsewhere the facilitator exits with `Failed to read config file at /app/config.json: Is a directory`. The npm scripts use `--env-file-if-exists`, which Node added in 22.9. The seller, buyer and tests take their Hemi values from [`shared/hemi.json`](shared/hemi.json). The facilitator configs and compose defaults repeat the chain ids and RPC URLs.
+You need Docker (any engine with Compose v2), Foundry (`cast`, `anvil`, `forge`), `jq` and Node 22.9 or later. The npm scripts use `--env-file-if-exists`, which Node added in 22.9. Last checked on macOS with Foundry 1.8.6, Docker 29 under Colima, Compose 5.6 and Node 26. Linux and Docker Desktop have not had a walkthrough.
+
+**With Colima, keep the clone under `$HOME`.** That is the only path Colima shares with its VM by default. Elsewhere the facilitator exits with `Failed to read config file at /app/config.json: Is a directory`. The seller, buyer and tests take their Hemi values from [`shared/hemi.json`](shared/hemi.json). The facilitator configs and compose defaults repeat the chain ids and RPC URLs.
 
 ```bash
-cp -n .env.example .env    # only if you have no .env yet; then fill in the keys
 npm install
+cp -n .env.example .env    # optional: only the live networks need it, and it never overwrites an existing .env
 ```
+
+The fork paths below (`buyer/demo-fork.sh`, `scripts/fork.sh`, `npm run test:e2e`) need no `.env` and no keys: they use anvil's published development keys. Fill `.env` in only for a [testnet run](#testnet-run) or the [mainnet steps](#mainnet-deployment); `scripts/new-key.sh` makes a key and writes it there without printing it.
 
 ### Without funds: everything on local forks
 
@@ -83,7 +110,7 @@ npm install
 buyer/demo-fork.sh
 ```
 
-This starts both forks, the facilitator (pointed at the forks) and the seller. It then pays once in each asset on each network: testnet USDC.e, testnet hBTC, mainnet USDC.e and mainnet hemiBTC. For each payment it prints the settlement tx and payTo's balance.
+This starts both forks, the facilitator (pointed at the forks) and the seller. It then pays once in each asset on each network: testnet USDC.e, testnet hBTC, mainnet USDC.e and mainnet hemiBTC. A fifth payment is native BTC on Bitcoin L1, fabricated in a mock hBK on the mainnet fork, so nothing goes to Bitcoin. For each payment it prints the settlement tx and payTo's balance.
 
 ### The facilitator
 
@@ -93,16 +120,19 @@ x402-rs refuses to start if any configured chain lacks Permit2, the x402 exact p
 # Local forks, works now. Primaries point at a dead port; fallbacks at the forks.
 scripts/fork.sh up
 docker compose -f docker-compose.yml -f docker-compose.fork.yml up -d
-curl -s localhost:8080/supported | jq      # lists eip155:743111 and eip155:43111, scheme exact
+# On Colima, if the next line fails to connect although the container logs "Starting server", Lima's port forward
+# failed (D-036). Add it by hand, and cancel it after teardown with the same command and -O cancel:
+#   ssh -S ~/.colima/_lima/colima/ssh.sock -O forward -L 127.0.0.1:8080:127.0.0.1:8080 lima-colima
+curl -sS localhost:8080/supported | jq     # lists eip155:743111 and eip155:43111, scheme exact
 docker compose -f docker-compose.yml -f docker-compose.fork.yml down && scripts/fork.sh down   # teardown
-# On Colima, if /supported gets no answer although the container logs "Starting server", Lima's port forward failed
-# (D-036): ssh -S ~/.colima/_lima/colima/ssh.sock -O forward -L 127.0.0.1:8080:127.0.0.1:8080 lima-colima
 
 # Live networks.
 FACILITATOR_CONFIG=config.testnet.json docker compose up   # testnet only
 FACILITATOR_CONFIG=config.mainnet.json docker compose up   # mainnet only
 docker compose up                                          # both chains (config.json)
 ```
+
+Bitcoin L1 payments are off by default, which is why the fork commands above list only the two Hemi networks. To serve them, set the settler contract's address in `.env` or the shell: `X402_BTC_SETTLER_MAINNET` for Bitcoin mainnet (recorded on Hemi mainnet) and `X402_BTC_SETTLER_TESTNET` for testnet3. On the forks, `scripts/fork.sh up` deploys a settler on each and writes both addresses to `.scratch/fork/btc-settlers.env`; run `set -a; . .scratch/fork/btc-settlers.env; set +a` before `docker compose … up`, as `buyer/demo-fork.sh` and the e2e setup do for themselves. With a variable empty, the facilitator logs a warning, leaves that Bitcoin network out of `/supported` and serves the Hemi chains as before. A settler's `settle` can only be called by the signer fixed in it at deployment. The one on Hemi mainnet, `0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f` ([`shared/hemi.json`](shared/hemi.json)), is bound to this project's facilitator signer, so with your own key deploy your own: change `SETTLER_MAINNET` in [`contracts/script/DeployBtcSettler.s.sol`](contracts/script/DeployBtcSettler.s.sol) and the predicted address there and in `shared/hemi.json`, then run `contracts/deploy-btc.sh` ([`contracts/README.md`](contracts/README.md)). No settler is deployed on Hemi testnet.
 
 If a contract or key is missing, the container exits with the reason. A missing contract shows as `Contract at address … does not exist`. An empty `FACILITATOR_*_PRIVATE_KEY` shows as `Invalid evm private key: invalid string length`. If every RPC stalls at startup, it exits after about 10 seconds with `error sending request for url (…)`. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently, so after an RPC outage at startup, start it again by hand.
 
@@ -135,7 +165,7 @@ None of them changes where funds go. The exact-amount patch narrows what is acce
 - **RPCs:** dRPC first, the Hemi public RPC second, overridable with `HEMI_{TESTNET,MAINNET}_RPC_{PRIMARY,FALLBACK}`. x402-rs sends every read to all RPCs at once and takes the first answer, so for reads a dead or stalled RPC adds no delay at low load, as long as one answers (D-015). A receipt is looked for on each RPC separately, because `null` from a lagging RPC would otherwise count as the answer (D-025). A transaction goes to one RPC at a time, starting with the best-ranked one (D-019). Every RPC request ends after 10 seconds, so a stalled best-ranked RPC adds about 10 seconds to a settlement. An RPC that stalls everything loses its rank after a few failed sends. How many depends on the load, because the fallback's throttle counts as latency in alloy's score. An RPC that stalls only sends keeps winning reads, so it keeps its rank, and each settlement pays those 10 seconds for as long as that lasts (D-021). Receipt lookups, and lookups after a failed send, use their own clients and share each RPC's throttle. Each request gets 8 seconds once the throttle lets it through. The public RPC is throttled to 4 requests per second, under its ~300 per minute limit.
 - **Signers:** one key per chain, `FACILITATOR_TESTNET_PRIVATE_KEY` and `FACILITATOR_MAINNET_PRIVATE_KEY`. The signer only pays gas. Run exactly one facilitator process per signer key, and don't use the key elsewhere while it runs. The nonce manager and the pending-settlement records live in that one process.
 - **Reachability:** compose publishes the port on `127.0.0.1`, so only this machine can reach it. `/settle` has no authentication and the signer pays its gas, so anyone who can reach the port can spend that gas on valid payments of their own, such as paying themselves. A seller on another machine needs `FACILITATOR_BIND` set to a wider interface, and then authentication or rate limits in front of the facilitator, for example in a reverse proxy. This repo provides neither.
-- **Receipt timeout:** 60 seconds. Hemi RPCs do stall (the brief's outage note), and if a broadcast tx has no receipt by then, `/settle` returns `settlement_pending` with the tx hash instead of losing it. A slow send shortens the wait, so that a send and its wait aim to take about 65 seconds, which leaves 25 of the seller SDK's 90 seconds for the checks before the send. That is a target, not a limit: reads and lookups run to their own limits once started. With every RPC slow, `/settle` has taken 83 to 96 seconds, and past 90 a stock seller gives up first. The hash is then in the facilitator's log (D-023).
+- **Receipt timeout:** 60 seconds. Hemi RPCs do stall, and if a broadcast tx has no receipt by then, `/settle` returns `settlement_pending` with the tx hash instead of losing it. A slow send shortens the wait, so that a send and its wait aim to take about 65 seconds, which leaves 25 of the seller SDK's 90 seconds for the checks before the send. That is a target, not a limit: reads and lookups run to their own limits once started. With every RPC slow, `/settle` has taken 83 to 96 seconds, and past 90 a stock seller gives up first. The hash is then in the facilitator's log (D-023).
 
 ### Why the facilitator never holds funds
 
@@ -193,21 +223,23 @@ These pay a live seller through a live facilitator, so they work only after the 
 
 The buyer prints the settlement tx hash and its explorer link. [`buyer/README.md`](buyer/README.md) lists every option.
 
-**Bitcoin L1 (phase 2).** `npm run pay -w buyer -- --asset btc-l1 --network btc-testnet3` pays a real Bitcoin transaction from `BUYER_BTC_WIF` or `BUYER_BTC_MNEMONIC` to the address derived from the seller's xpub and the 402's paymentId. It then re-sends the same payment every `--poll` seconds until the seller serves it. Expect 30 minutes or more on mainnet: hVM must see about 3 confirmations. Don't use `wrapFetchWithPayment` for this scheme, because it would pay again on the next 402. `ExactBtcClientScheme` journals every payment by paymentId and never pays one twice. The journal is in `.scratch/buyer-btc/journal.jsonl`, and `--resume <paymentId>` continues after a restart. `ALLOW_MAINNET=yes` is required for `btc-mainnet`. Before a live payment, `npm run preflight-btc -w buyer` checks the seller xpub, the buyer wallet's balance and the fee without sending anything. If mempool.space is unreachable, set `BUYER_BTC_ESPLORA` to another Esplora base. See [`buyer/README.md`](buyer/README.md).
+**Bitcoin L1 (phase 2).** `npm run pay -w buyer -- --asset btc-l1 --network btc-testnet3` pays a real Bitcoin transaction from `BUYER_BTC_WIF` or `BUYER_BTC_MNEMONIC` to the address derived from the seller's xpub and the 402's paymentId. It then re-sends the same payment every `--poll` seconds until the seller serves it. Expect about 30 minutes on mainnet, roughly three Bitcoin confirmations (28 minutes in the first live payment, D-040). Don't use `wrapFetchWithPayment` for this scheme, because it would pay again on the next 402. `ExactBtcClientScheme` journals every payment by paymentId and never pays one twice. The journal is in `.scratch/buyer-btc/journal.jsonl`, and `--resume <paymentId>` continues after a restart. `ALLOW_MAINNET=yes` is required for `btc-mainnet`. Before a live payment, `npm run preflight-btc -w buyer` checks the seller xpub, the buyer wallet's balance and the fee without sending anything. If mempool.space is unreachable, set `BUYER_BTC_ESPLORA` to another Esplora base. See [`buyer/README.md`](buyer/README.md).
 
 ## Testnet run
 
-Both assets have settled live. On 2026-10-29 the contracts were deployed and a USDC.e payment settled through hemi.8, in [tx `0x0bca64a7…b6c5`](https://testnet.explorer.hemi.xyz/tx/0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5). On 2026-11-01 an hBTC payment settled through hemi.9, in [tx `0x5f511cb0…fb0d`](https://testnet.explorer.hemi.xyz/tx/0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d). On 2026-11-02 (UTC) both assets settled through hemi.14, the current image, in [`0x4e1991ac…b77c`](https://testnet.explorer.hemi.xyz/tx/0x4e1991ac8eac568dcef6d0e7fce3959ddf928b970fe96d904c877651d6dcb77c) and [`0xc4507507…0cc4`](https://testnet.explorer.hemi.xyz/tx/0xc45075075efcf7fbdcc463b4e0d01c37ccaca441c115c4acd71a318729810cc4), after earlier runs on hemi.10 to hemi.13. [docs/testnet-run.md](docs/testnet-run.md) has each receipt, the seller's verify-then-settle log and the buyer's output. With no flag, the script only checks balances and prints what to fund; it sends nothing:
+Both assets have settled live. On 2026-10-29 the contracts were deployed and a USDC.e payment settled through hemi.8, in [tx `0x0bca64a7…b6c5`](https://testnet.explorer.hemi.xyz/tx/0x0bca64a7f81d3472697852739ab6cb005ff5b08de82c727c997f7e137e3fb6c5). On 2026-11-01 an hBTC payment settled through hemi.9, in [tx `0x5f511cb0…fb0d`](https://testnet.explorer.hemi.xyz/tx/0x5f511cb01e0bae8d8f07707cb6056e2423a1cf4b533e343630bda57d505dfb0d). On 2026-11-02 (UTC) both assets settled through hemi.14, the last image before phase 2, in [`0x4e1991ac…b77c`](https://testnet.explorer.hemi.xyz/tx/0x4e1991ac8eac568dcef6d0e7fce3959ddf928b970fe96d904c877651d6dcb77c) and [`0xc4507507…0cc4`](https://testnet.explorer.hemi.xyz/tx/0xc45075075efcf7fbdcc463b4e0d01c37ccaca441c115c4acd71a318729810cc4), after earlier runs on hemi.10 to hemi.13. The current image, hemi.15, adds phase 2 and has not had a testnet run of its own. [docs/testnet-run.md](docs/testnet-run.md) has each receipt, the seller's verify-then-settle log and the buyer's output. With no flag, the script only checks balances and prints what to fund; it sends nothing:
 
 ```bash
 scripts/testnet-run.sh
 ```
 
+It reads `FACILITATOR_TESTNET_PRIVATE_KEY`, `BUYER_PRIVATE_KEY` and `SELLER_PAY_TO` from `.env`. For fresh testnet keys, `scripts/new-key.sh FACILITATOR_TESTNET_PRIVATE_KEY` and `scripts/new-key.sh BUYER_PRIVATE_KEY` write one each into `.env` and print only the address to fund.
+
 The run uses its own Compose project, so it cannot replace or stop a facilitator started with plain `docker compose`. With `--go`, it stops before sending anything if its facilitator or seller port is in use. It also stops before paying if the seller's `payTo`, network or facilitator differ from the run's.
 
 It needs two funded wallets:
 
-- **Facilitator/deployer:** about 0.001 testnet ETH. It deploys the three contracts (about 0.0000048 ETH in the `contracts/deploy.sh testnet` simulation) and pays settlement gas.
+- **Facilitator/deployer:** about 0.001 testnet ETH. It pays settlement gas. The three contracts are already on testnet, so `deploy.sh` skips them; deploying them cost about 0.0000048 ETH in the `contracts/deploy.sh testnet` simulation.
 - **Buyer:** about 0.0001 ETH for its two one-time approvals, at least 0.001 USDC.e and at least 1 sat of hBTC.
 
 Where the funds come from (D-017):
@@ -245,7 +277,7 @@ scripts/testnet-run.sh --go
 
 In order, it:
 
-1. deploys the three contracts on testnet and attempts explorer verification;
+1. deploys any of the three contracts that testnet lacks (none since 2026-10-29) and attempts explorer verification;
 2. starts the facilitator with the testnet config and the seller;
 3. pays once in USDC.e and once in hBTC;
 4. writes the settlement tx hashes, linked on testnet.explorer.hemi.xyz, plus the seller's verify-then-settle log, to `docs/testnet-run.md`.
@@ -254,9 +286,9 @@ The script stops if either payment does not come back settled. dRPC testnet's st
 
 ## Mainnet deployment
 
-The mainnet facilitator needs two contracts that Hemi mainnet lacked: the x402 exact proxy and the EIP-6492 validator. Permit2 was already there. Steps 1 and 2 deployed them on 2026-11-04, for 0.0000041 ETH in total (D-029). The steps stay here for reference; `deploy.sh` skips contracts that already exist.
+The mainnet facilitator needs two contracts that Hemi mainnet lacked: the x402 exact proxy and the EIP-6492 validator. Permit2 was already there. Steps 1 and 2 deployed them on 2026-11-04, for 0.0000041 ETH in total (D-029). Steps 1 to 3 stay here for reference; `deploy.sh` skips contracts that already exist. **To run your own mainnet facilitator today, start at step 4.**
 
-1. The brief requires token addresses checked on the explorer before use. That is done: both match `shared/hemi.json` (D-027). To repeat it, look each token up by address, in a browser if `curl` can't reach the explorer. Searching for `USDC.e` does not return the token:
+1. Check the token addresses on the explorer before use. That is done: both match `shared/hemi.json` (D-027). To repeat it, look each token up by address, in a browser if `curl` can't reach the explorer. Searching for `USDC.e` does not return the token:
    ```bash
    curl -sS 'https://explorer.hemi.xyz/api/v2/tokens/0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA'
    curl -sS 'https://explorer.hemi.xyz/api/v2/tokens/0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28'
@@ -287,6 +319,7 @@ The mainnet facilitator needs two contracts that Hemi mainnet lacked: the x402 e
    ```bash
    npx tsx tests/live/verify-failures.ts --networks eip155:43111 --signer eip155:43111=<signer address>
    ```
+   The signer address is the one `scripts/new-key.sh` printed. It is also in the running facilitator's answer: `curl -sS localhost:8080/supported | jq '.signers'`.
 5. Start a seller that offers mainnet. It reads `SELLER_PAY_TO` from `.env`:
    ```bash
    SELLER_NETWORKS=eip155:43111 npm run start -w seller
@@ -308,17 +341,20 @@ Step 4's read-only checks passed on both chains and sent nothing (D-030). Phase 
 - 0.001 USDC.e by EIP-3009: [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d). Facilitator gas 0.0000013 ETH (D-031).
 - 1 sat of hemiBTC by Permit2: [`0xaa3d89f4…3b27`](https://explorer.hemi.xyz/tx/0xaa3d89f453e5a2862bbb5689f52ddb3e18e9bb9851e855937baf2c5d47fa3b27), after the buyer's one-time `approve(Permit2, max)` in [`0x2798788a…6a56`](https://explorer.hemi.xyz/tx/0x2798788aa8454916a17f1b332603a7aa2cf3e297374cd519cbdaed1985cc6a56). Facilitator gas 0.0000010 ETH, buyer's approval 0.0000004 ETH (D-032).
 
-**Bitcoin L1 payment (phase 2)**, on 2026-11-10: 1000 sats on Bitcoin mainnet in [`43cb9bdc…cea4`](https://mempool.space/tx/43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4) (output 0, miner fee 141 sats), from buyer `bc1qyz86…swkh` to `bc1qv6v3…ntsa`, the address derived from the seller's xpub and the 402's paymentId. The facilitator verified it through hBK and recorded it on Hemi in [`0xcaea6da8…ef3b`](https://explorer.hemi.xyz/tx/0xcaea6da85cda3bb9d6135f57b65128a47d9c18af82a900c79cf91cea5b7fef3b), a `settle` call on `X402BtcSettler`. Facilitator gas 0.00000033 ETH. The buyer was served 28 minutes after broadcasting, at the payment's third confirmation, and a second use of the same payment got a 402 with `invalid_transaction_state` (D-040, [log](docs/spike/mainnet-btc-l1-payment-2026-11-10.log)).
+**Bitcoin L1 payment (phase 2)**, on 2026-11-10 (UTC): 1000 sats on Bitcoin mainnet in [`43cb9bdc…cea4`](https://mempool.space/tx/43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4) (output 0, miner fee 141 sats), from buyer `bc1qyz86…swkh` to `bc1qv6v3…ntsa`, the address derived from the seller's xpub and the 402's paymentId. The facilitator verified it through hBK and recorded it on Hemi in [`0xcaea6da8…ef3b`](https://explorer.hemi.xyz/tx/0xcaea6da85cda3bb9d6135f57b65128a47d9c18af82a900c79cf91cea5b7fef3b), a `settle` call on `X402BtcSettler`. Facilitator gas 0.00000033 ETH. The buyer was served 28 minutes after broadcasting, at the payment's third confirmation, and a second use of the same payment got a 402 with `invalid_transaction_state` (D-040, [log](docs/spike/mainnet-btc-l1-payment-2026-11-10.log)).
 
 Explorer verification (step 3) needed no submission: Blockscout's bytecode database verified the validator and the proxy once they were looked up. Permit2, which was already on mainnet, shows as unverified (D-034).
 
 ## Tests
 
 ```bash
-npm test -w tests              # end-to-end on local forks, with dead primary RPCs
+npm run typecheck              # tsc over every workspace
+npm test                       # = npm run test:unit = npm test -w btc: derivation vectors, SDK engine, journal, wallet (no network)
+npm run test:e2e               # = npm test -w tests: end-to-end on local forks, with dead primary RPCs
 (cd contracts && forge test)   # deployment, codehash and settle-path tests on forks
-npm test -w btc                # @hemi-x402/btc unit tests: derivation vectors, SDK engine, journal, wallet (no network)
 ```
+
+The end-to-end suite takes 7 to 10 minutes once the image is built and Foundry's RPC cache is warm, and up to 13 on a first run. The forks read their pinned-block state from the public Hemi RPCs, which sometimes stall for longer than a test waits. On a first run that has shown up as a timeout in `11-btc-l1`; a second run reads from the cache, and warm runs have passed in full. The forks listen on all interfaces without authentication (`anvil --host 0.0.0.0`, so the container can reach them) and hold only forked state and anvil's test keys; `scripts/fork.sh down` stops them.
 
 On Colima, the Lima agent that publishes a container's port sometimes fails its own `ssh -O forward` or `-O cancel` (exit 255), so the facilitator is unreachable although it runs, or a stale forward trips the suite's port guard. The e2e setup and `buyer/demo-fork.sh` then add or cancel the forward by hand through Colima's ssh mux, and say so in their log; `E2E_NO_COLIMA_FIX=1` / `DEMO_NO_COLIMA_FIX=1` turn that off (D-036).
 
@@ -347,11 +383,11 @@ The end-to-end suite starts both forks and the facilitator image from this repo.
 - that a fast RPC with no receipt, or frozen at an old block, hides a mined payment neither from the first settle nor from a retry
 - native BTC on Bitcoin L1 (`11-btc-l1`, phase 2): payments are fabricated in the mock hBK that `scripts/fork.sh` places at the real hBK address, and settled through `X402BtcSettler` on the fork. The file covers `/supported`; verify and settle with the Bitcoin txid, `settledBy`, the `Settled` event and replay; a confirmations boundary, then success with the same payload; unknown txid, missing output, wrong address (another paymentId, a decoy output), one sat short, overpayment, p2tr; the other network's key, an out-of-policy `minConfirmations`, malformed payloads; and the stock seller engine with `ExactBtcServerScheme` paid by `ExactBtcClientScheme`: 402 while unconfirmed, served once after, 402 on reuse
 
-Latest results, from 2026-11-09 on hemi.15 with the phase 2 streams merged (D-036); the 2026-11-02 run of hemi.14 had 13 files, 116 tests and 17 forge tests:
+Latest results, from 2026-11-09 on hemi.15 with phase 2 merged (D-036); the 2026-11-02 run of hemi.14 had 13 files, 116 tests and 17 forge tests:
 
 | Suite | Result |
 |------|------|
-| `npm test -w tests` | 14 files, 147 tests passed, 0 failed (565 s): the 116 existing tests plus the 31 of `11-btc-l1` |
+| `npm test -w tests` | 14 files, 147 tests passed, 0 failed (565 s; 437 s and 616 s in later warm runs): the 116 existing tests plus the 31 of `11-btc-l1` |
 | `forge test` | 85 passed, 0 failed (17 existing, 49 for `X402BtcSettler`, its adapter, mock and deployment, 19 ported from the pre-deployment security review, D-038) |
 | `npm test -w btc` | 90 passed, 0 failed |
 | `buyer/demo-fork.sh` | all five payments settled, the fifth being 1000 sats of fabricated BTC on the mainnet fork through the mock hBK and `X402BtcSettler`; payTo received exactly the price each time. Before patch 0022, hemi.9 settled all four in 20 of 20 runs |
@@ -373,8 +409,8 @@ Latest results, from 2026-11-09 on hemi.15 with the phase 2 streams merged (D-03
 ## Limits and open items
 
 - **Mainnet USDC.e and EIP-3009:** the testnet has no EIP-3009 token, so the e2e suite tests that path on a local fork of mainnet. It has also settled live once, in [`0xa9b7c8c5…a53d`](https://explorer.hemi.xyz/tx/0xa9b7c8c5b605cc0269a9ac55a3053e4d90fd2d5c69d0aeec4092e08b90a9a53d) (D-031).
-- **Explorer verification:** on testnet all three contracts show as partial matches. On mainnet the validator and the proxy are verified; Permit2, for which Blockscout has no creation transaction, is not (D-034). A full match isn't possible for the proxy, because its original build embedded metadata (`contracts/README.md`).
-- **Mainnet explorer:** the spike machine's ISP filters `explorer.hemi.xyz`. Plain HTTP goes to the ISP's warning page and ordinary HTTPS fails, while `testnet.explorer.hemi.xyz` on the same IPs works (D-002, D-034). A browser mostly gets through, so the token addresses and the verification status were read in one (D-027, D-034). `contracts/verify.sh mainnet` uses `curl`, so on that connection it stops at its reachability check.
+- **Explorer verification:** on testnet all three contracts show as partial matches. On mainnet the validator and the proxy are verified; Permit2, for which Blockscout has no creation transaction, is not (D-034). A full match isn't possible for the proxy, because its original build embedded metadata (`contracts/README.md`). The phase 2 settler on mainnet has not been submitted for verification: the explorer could not be reached when it was deployed (D-039). `contracts/verify.sh mainnet` submits it, and a full match is possible.
+- **Mainnet explorer:** `curl` could not reach `explorer.hemi.xyz` from the network this was built on, because the ISP there filters it. Plain HTTP goes to the ISP's warning page and ordinary HTTPS fails, while `testnet.explorer.hemi.xyz` on the same IPs works (D-002, D-034). A browser mostly gets through, so the token addresses and the verification status were read in one (D-027, D-034). `contracts/verify.sh mainnet` uses `curl`, so on that connection it stops at its reachability check.
 - **Combined failures:** when one payload fails several checks, the code reported follows the TS reference facilitator, not the order written in `scheme_exact_evm.md`. Checks that need no RPC (recipient, validity window, exact amount, token, Permit2 spender) run before the allowance and balance reads. So an expired payment from an unfunded payer gets `…_valid_before`, not `insufficient_funds`. Single-failure cases, which the Definition of done covers, return the spec's code. `tests/e2e/04b-payload-checks.test.ts` ("combined failures") pins the behaviour. [`facilitator/x402-rs/README.md`](facilitator/x402-rs/README.md) ("Check order") cites the reference line by line and lists the two places this facilitator differs from it.
 - **Nonce gap after a timeout:** after `settlement_pending`, the facilitator keeps that tx's nonce, so a tx that may still mine is never replaced. If the tx is later dropped from every mempool, retries keep answering `settlement_pending` with the dead hash, because nothing rebroadcasts it, and later settles on that chain queue behind the gap. Settlement on that chain stops until a restart, which re-reads the nonce from the chain. After a restart, one settlement can still fail with "nonce too low" for each queued tx that mines. Each such failure takes about 27 seconds, because the transaction is searched for first, and it costs nothing. The next settlement succeeds.
 - **Nonce gap during a search:** while a failed send is searched for, its nonce stays taken, for about 25 seconds. Settlements that arrive then use later nonces. If the search finds nothing, they stay queued until a later settlement fills the gap. They answer `settlement_pending`, and a stock seller refuses them, so the buyer can be charged later and not served. It takes every RPC losing a send, plus traffic in that window.
@@ -400,10 +436,11 @@ Latest results, from 2026-11-09 on hemi.15 with the phase 2 streams merged (D-03
 - **Bitcoin L1 reorganisations:** a payment accepted at 1 confirmation can be reorganised out of Bitcoin. The consumption record can be reorganised out of Hemi before PoP finality. `minConfirmations` and idempotent handlers per paymentId are the levers.
 - **Bitcoin L1 settle hash:** the success response carries the Bitcoin txid. The Hemi settle transaction is in the facilitator log and the settler's `Settled` event, not yet in the response.
 - **Bitcoin L1 on mainnet:** one live payment has run, 1000 sats at `minConfirmations` 1 (D-040). Deeper confirmation settings, p2tr addresses, a facilitator restart between payment and settle, and Bitcoin testnet3 have run only on forks or not at all. The testnet settler is not deployed.
+- **The deployed Bitcoin L1 settler serves one signer.** `settle` reverts for any caller but the signer set at deployment, so another operator needs their own settler (see [The facilitator](#the-facilitator)). Rotating the facilitator's key also means a new settler at a new address.
 - **Bitcoin L1 settler, reviewed before deployment (D-038):** an internal, AI-assisted security review, not an independent audit, found nothing above low. Known and accepted: a settle's gas grows with the Bitcoin transaction's size (about 134k gas for 2 outputs, 909k for 948, under a cent on Hemi), chosen by the buyer; a compromised `SETTLER` key could mark outputs consumed with a bogus reference, a griefing that puts no funds at risk and needs a redeploy; payments at output index 32 or later, or with a script over 64 bytes, cannot be verified through hBK. Two facilitator-side limits remain for a later patch: after a facilitator restart a settle that succeeded on chain but whose answer was lost is reported as a replay although the contract's `settledBy` would identify it, and a settle that reverts in the block because the builder's hBK count lagged the `eth_call` node's is final for the buyer although a retry would pass.
 
 ## Licence and security
 
-Apache-2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE). The Solidity sources under `contracts/` keep the MIT headers they were deployed and verified with ([contracts/LICENSE-MIT](contracts/LICENSE-MIT)); `contracts/src/x402` and `contracts/lib` are third-party code under the licenses in those directories. The facilitator image is built from [x402-rs](https://github.com/x402-rs/x402-rs) (Apache-2.0), fetched at a pinned commit at build time and not copied into this repository.
+Apache-2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE). The Solidity sources under `contracts/` keep the MIT headers they were deployed and verified with ([contracts/LICENSE-MIT](contracts/LICENSE-MIT)); `contracts/src/x402` and `contracts/lib` are third-party code under the licences in those directories. The facilitator image is built from [x402-rs](https://github.com/x402-rs/x402-rs) (Apache-2.0), fetched at a pinned commit at build time and not copied into this repository.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).

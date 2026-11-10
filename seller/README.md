@@ -2,7 +2,7 @@
 
 A minimal x402 v2 seller for Hemi. One paid route, `GET /echo` ($0.001), which returns the query string and a timestamp, plus an unpaid `GET /health`. It uses the x402 TypeScript server SDK (`@x402/express` and `ExactEvmScheme` from `@x402/evm/exact/server`) and sends every `/verify` and `/settle` to the facilitator at `FACILITATOR_URL`. The seller never signs or sends a transaction.
 
-It can also take native BTC on Bitcoin L1 (`exact` on `bip122:*`, see [the scheme spec](../docs/specs/scheme_exact_bip122.md) and "Bitcoin L1" below). That needs a facilitator whose `/supported` lists the bip122 kinds.
+It can also take native BTC on Bitcoin L1 (`exact` on `bip122:*`, see [the scheme spec](../docs/specs/scheme_exact_bip122.md) and "Bitcoin L1" below). That needs a facilitator whose `/supported` lists the bip122 kinds. This repo's facilitator lists them once `X402_BTC_SETTLER_MAINNET` (or `X402_BTC_SETTLER_TESTNET`) is set: see "The facilitator" in the [root README](../README.md#the-facilitator).
 
 ```sh
 SELLER_PAY_TO=0xYourAddress npm run start -w seller

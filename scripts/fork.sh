@@ -17,6 +17,10 @@
 #                           $FORK_STATE_DIR/btc-settlers.env as X402_BTC_SETTLER_{TESTNET,MAINNET}=0x… for compose.
 #   FORK_STATE_DIR (.scratch/fork)
 #
+# The forks listen on all interfaces (--host 0.0.0.0) so the facilitator container can reach them, and
+# anvil has no authentication: while they run, anyone on the local network can call them. They hold
+# only forked state and test funds.
+#
 # If the upstream refuses at startup (the public RPC rate-limits at ~300 req/min), the script
 # retries once against dRPC. On testnet it does so only with a pinned block: dRPC testnet's
 # eth_blockNumber lags by over a million blocks (DECISIONS.md D-015), so an unpinned fork would start there.
@@ -47,7 +51,9 @@ log() { printf '[fork] %s\n' "$*" >&2; }
 is_our_anvil() { # pidfile
   [ -f "$1" ] || return 1
   local pid; pid=$(cat "$1")
-  ps -p "$pid" -o comm= 2>/dev/null | grep -q anvil
+  # The full command line, not the process name: behind a version manager's shim (asdf, mise, nix) the
+  # process name is the shim's interpreter, at least until it execs anvil.
+  ps -p "$pid" -o command= 2>/dev/null | grep -q anvil
 }
 
 launch() { # name port upstream block -> 0 if the fork answers
@@ -58,7 +64,10 @@ launch() { # name port upstream block -> 0 if the fork answers
   echo $! > "$STATE/$name.pid"
   for _ in $(seq 1 60); do
     cast chain-id --rpc-url "http://127.0.0.1:$port" >/dev/null 2>&1 && return 0
-    is_our_anvil "$STATE/$name.pid" || return 1   # anvil exited (e.g. upstream 429 at startup)
+    if ! is_our_anvil "$STATE/$name.pid"; then   # anvil exited (e.g. upstream 429 at startup)
+      kill "$(cat "$STATE/$name.pid")" 2>/dev/null || true   # in case it is still there: a retry needs the port
+      return 1
+    fi
     sleep 1
   done
   kill "$(cat "$STATE/$name.pid")" 2>/dev/null || true

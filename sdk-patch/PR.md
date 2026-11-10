@@ -1,6 +1,6 @@
 # Draft upstream PR
 
-Target: `x402-foundation/x402`, base `main` (patch built on `e4a086819f419e9395acbbdc1679fe6627029ff7`). Not opened. Opening it needs Dimitry's go-ahead.
+Target: `x402-foundation/x402`, base `main` (patch built on `e4a086819f419e9395acbbdc1679fe6627029ff7`). Not opened yet.
 
 ## Title
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Ported from the security audit of 2026-11-09 (DECISIONS.md D-038): edge cases of the hand-rolled hBK
+// Ported from the internal security review of 2026-11-09 (DECISIONS.md D-038): edge cases of the hand-rolled hBK
 // decoding, hBK becoming an EOA, the 64-byte script boundary, value and confirmation boundaries, and that
 // SETTLER cannot overwrite a record. RawHbk answers with arbitrary bytes so the decoder sees every shape.
 pragma solidity 0.8.28;
@@ -13,8 +13,18 @@ import {MockBitcoinKit} from "./mocks/MockBitcoinKit.sol";
 contract RawHbk {
     bytes public outAnswer;
     bytes public confAnswer;
-    function set(bytes calldata o, bytes calldata c) external { outAnswer = o; confAnswer = c; }
-    fallback(bytes calldata data) external returns (bytes memory) {
+
+    function set(
+        bytes calldata o,
+        bytes calldata c
+    ) external {
+        outAnswer = o;
+        confAnswer = c;
+    }
+
+    fallback(
+        bytes calldata data
+    ) external returns (bytes memory) {
         bytes4 sel = bytes4(data[:4]);
         if (sel == IHbkReader.getSpecificTxOutput.selector) return outAnswer;
         if (sel == IHbkReader.getTxConfirmations.selector) return confAnswer;
@@ -41,7 +51,9 @@ contract AuditTest is Test {
         return abi.encode(IHbkReader.Output(SATS, SCRIPT, "", false, "", true, 34, true));
     }
 
-    function _v(uint32 minConf) internal view returns (X402BtcSettler.Check memory) {
+    function _v(
+        uint32 minConf
+    ) internal view returns (X402BtcSettler.Check memory) {
         return s.verify(TXID, 1, SCRIPT, SATS, minConf);
     }
 
@@ -57,10 +69,12 @@ contract AuditTest is Test {
         assertEq(uint8(c.verdict), uint8(X402BtcSettler.Verdict.HbkError));
         assertEq(c.sats, SATS);
     }
+
     function test_confShortAnswer() public {
         raw.set(_goodOut(), hex"0000000005");
         assertEq(uint8(_v(1).verdict), uint8(X402BtcSettler.Verdict.HbkError));
     }
+
     function test_confWiderThanUint32() public {
         raw.set(_goodOut(), abi.encode(uint256(type(uint32).max) + 1));
         assertEq(uint8(_v(1).verdict), uint8(X402BtcSettler.Verdict.HbkError));
@@ -69,12 +83,14 @@ contract AuditTest is Test {
         assertEq(uint8(c.verdict), uint8(X402BtcSettler.Verdict.Ok));
         assertEq(c.confirmations, type(uint32).max);
     }
+
     function test_confLongerAnswerReadsFirstWord() public {
         raw.set(_goodOut(), abi.encode(uint32(7), uint32(99)));
         X402BtcSettler.Check memory c = _v(7);
         assertEq(uint8(c.verdict), uint8(X402BtcSettler.Verdict.Ok));
         assertEq(c.hbkConfirmations, 7);
     }
+
     function test_confZeroWithOffset() public {
         X402BtcSettler s3 = new X402BtcSettler(address(raw), facilitator, 3);
         raw.set(_goodOut(), abi.encode(uint32(3)));
@@ -89,11 +105,13 @@ contract AuditTest is Test {
         raw.set("", abi.encode(uint32(5)));
         assertEq(uint8(_v(1).verdict), uint8(X402BtcSettler.Verdict.HbkError));
     }
+
     /// Ok-with-empty-data also happens for an EOA (hBK selfdestructed / wrong address).
     function test_hbkBecomesEoa() public {
         vm.etch(address(raw), "");
         assertEq(uint8(_v(1).verdict), uint8(X402BtcSettler.Verdict.HbkError));
     }
+
     /// Unaligned script offset pointing into the head: must not revert; verdict must not be Ok
     /// unless bytes genuinely match.
     function test_scriptOffsetIntoHead() public {
@@ -103,18 +121,25 @@ contract AuditTest is Test {
         X402BtcSettler.Check memory c = _v(1);
         assertTrue(c.verdict != X402BtcSettler.Verdict.Ok);
     }
+
     /// A 64-byte script with containsFullScript true is accepted (boundary of hBK's cut).
     function test_64ByteScriptOk() public {
         bytes memory sc = new bytes(64);
-        for (uint256 i; i < 64; i++) sc[i] = bytes1(uint8(i + 1));
+        for (uint256 i; i < 64; i++) {
+            sc[i] = bytes1(uint8(i + 1));
+        }
         raw.set(abi.encode(IHbkReader.Output(SATS, sc, "", false, "", false, 64, true)), abi.encode(uint32(5)));
         assertEq(uint8(s.verify(TXID, 1, sc, SATS, 1).verdict), uint8(X402BtcSettler.Verdict.Ok));
     }
+
     /// A 65-byte script cut to 64 with containsFullScript false: mismatch even if caller passes the cut.
     function test_65ByteScriptCut() public {
         bytes memory full = new bytes(65);
         bytes memory cut = new bytes(64);
-        for (uint256 i; i < 65; i++) { full[i] = bytes1(uint8(i + 1)); if (i < 64) cut[i] = full[i]; }
+        for (uint256 i; i < 65; i++) {
+            full[i] = bytes1(uint8(i + 1));
+            if (i < 64) cut[i] = full[i];
+        }
         raw.set(abi.encode(IHbkReader.Output(SATS, cut, "", false, "", false, 65, false)), abi.encode(uint32(5)));
         assertEq(uint8(s.verify(TXID, 1, full, SATS, 1).verdict), uint8(X402BtcSettler.Verdict.ScriptMismatch));
         assertEq(uint8(s.verify(TXID, 1, cut, SATS, 1).verdict), uint8(X402BtcSettler.Verdict.ScriptMismatch));
@@ -122,37 +147,49 @@ contract AuditTest is Test {
         raw.set(abi.encode(IHbkReader.Output(SATS, cut, "", false, "", false, 65, true)), abi.encode(uint32(5)));
         assertEq(uint8(s.verify(TXID, 1, cut, SATS, 1).verdict), uint8(X402BtcSettler.Verdict.ScriptMismatch));
     }
+
     /// OP_RETURN detected only from the first byte; a single-byte 0x6a script is OpReturn.
     function test_opReturnSingleByte() public {
         raw.set(abi.encode(IHbkReader.Output(0, hex"6a", "", false, "", false, 1, true)), abi.encode(uint32(5)));
         assertEq(uint8(s.verify(TXID, 1, hex"6a", 0, 1).verdict), uint8(X402BtcSettler.Verdict.OpReturn));
     }
+
     /// Value exactly uint64 max is Ok; +1 is HbkError (checked path).
     function test_valueBoundary() public {
-        raw.set(abi.encode(IHbkReader.Output(type(uint64).max, SCRIPT, "", false, "", false, 34, true)), abi.encode(uint32(5)));
+        raw.set(
+            abi.encode(IHbkReader.Output(type(uint64).max, SCRIPT, "", false, "", false, 34, true)),
+            abi.encode(uint32(5))
+        );
         X402BtcSettler.Check memory c = s.verify(TXID, 1, SCRIPT, type(uint64).max, 1);
         assertEq(uint8(c.verdict), uint8(X402BtcSettler.Verdict.Ok));
         assertEq(c.sats, type(uint64).max);
     }
+
     /// settle emits sats from the re-check, and cannot be overwritten even by SETTLER.
     function test_settleNoOverwrite() public {
         raw.set(_goodOut(), abi.encode(uint32(5)));
         vm.startPrank(facilitator);
         s.settle(TXID, 1, SCRIPT, SATS, 1, REF);
-        vm.expectRevert(abi.encodeWithSelector(X402BtcSettler.NotPayable.selector, X402BtcSettler.Verdict.AlreadyConsumed));
+        vm.expectRevert(
+            abi.encodeWithSelector(X402BtcSettler.NotPayable.selector, X402BtcSettler.Verdict.AlreadyConsumed)
+        );
         s.settle(TXID, 1, SCRIPT, SATS, 1, keccak256("other"));
         vm.stopPrank();
         assertEq(s.settledBy(TXID, 1), REF);
         // other vout of same txid unaffected
         assertEq(s.settledBy(TXID, 0), bytes32(0));
     }
+
     /// A revert payload that is Error("Bitcoin transaction not found") with trailing bytes is HbkError, not TxNotFound.
     function test_revertClassificationIsExact() public {
         MockBitcoinKit m = new MockBitcoinKit();
         X402BtcSettler sm = new X402BtcSettler(address(m), facilitator, 0);
-        m.setFailData(abi.encodePacked(abi.encodeWithSignature("Error(string)", "Bitcoin transaction not found"), hex"00"));
+        m.setFailData(
+            abi.encodePacked(abi.encodeWithSignature("Error(string)", "Bitcoin transaction not found"), hex"00")
+        );
         assertEq(uint8(sm.verify(TXID, 1, SCRIPT, SATS, 1).verdict), uint8(X402BtcSettler.Verdict.HbkError));
     }
+
     /// Gas of verify when hBK's returned struct is as large as hBK can make it (64-byte script).
     function test_gasVerify() public {
         raw.set(_goodOut(), abi.encode(uint32(5)));

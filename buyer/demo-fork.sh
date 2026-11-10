@@ -104,7 +104,13 @@ log "starting facilitator ($PROJECT) on :$FACILITATOR_PORT"
 compose up -d
 if ! wait_for "http://localhost:$FACILITATOR_PORT/supported" 20; then
   colima_forward forward "$FACILITATOR_PORT" && ADDED_FORWARD=1
-  wait_for "http://localhost:$FACILITATOR_PORT/supported" 60 || { compose logs --tail 50; exit 1; }
+  if ! wait_for "http://localhost:$FACILITATOR_PORT/supported" 60; then
+    compose logs --tail 50
+    if compose logs 2>&1 | grep -q 'config.json: Is a directory'; then
+      log "the container cannot see facilitator/config.json: Docker does not share this folder. With Colima, keep the clone under \$HOME."
+    fi
+    exit 1
+  fi
 fi
 curl -sS "http://localhost:$FACILITATOR_PORT/supported" | jq -c '[.kinds[] | {network, scheme}]'
 # The seller exits at startup if it is configured for a network the facilitator does not serve.

@@ -1,5 +1,7 @@
-# Hemi x402 facilitator: x402-rs plus a small patch set for the x402 v2 spec's error shapes,
-# configured for Hemi. The image is built locally from facilitator/Dockerfile (first build: 2 to 4 minutes).
+# Hemi x402 facilitator: x402-rs at a pinned commit plus this repo's patches (x402 v2 error shapes,
+# settlement under RPC failures) and its bip122 crate (Bitcoin L1 payments), configured for Hemi.
+# The image is built locally from facilitator/Dockerfile; the first build downloads the Rust image and
+# the crates, then compiles for several minutes.
 #
 # x402-rs refuses to start if any configured chain lacks Permit2, the x402 exact proxy or the
 # EIP-6492 validator, so pick the config that matches what is deployed (README "Run it"):
@@ -41,7 +43,7 @@ services:
       HEMI_TESTNET_RPC_FALLBACK: ${HEMI_TESTNET_RPC_FALLBACK:-https://testnet.rpc.hemi.network/rpc}
       HEMI_MAINNET_RPC_PRIMARY: ${HEMI_MAINNET_RPC_PRIMARY:-https://hemi.drpc.org}
       HEMI_MAINNET_RPC_FALLBACK: ${HEMI_MAINNET_RPC_FALLBACK:-https://rpc.hemi.network/rpc}
-      # X402BtcSettler per Hemi chain (shared/hemi.json once deployed). Empty: the facilitator skips that
+      # X402BtcSettler per Hemi chain (shared/hemi.json; README "The facilitator"). Empty: the facilitator skips that
       # Bitcoin network with a warning and serves the EVM chains as before (docs/phase2/facilitator.md).
       X402_BTC_SETTLER_MAINNET: ${X402_BTC_SETTLER_MAINNET:-}
       X402_BTC_SETTLER_TESTNET: ${X402_BTC_SETTLER_TESTNET:-}

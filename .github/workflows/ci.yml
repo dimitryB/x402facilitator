@@ -1,0 +1,50 @@
+# Checks that need no Docker and no keys: TypeScript typecheck and unit tests, and the Foundry tests.
+# The fork tests read pinned blocks from the public Hemi RPCs; nothing is sent to a live network.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typescript:
+    name: TypeScript (typecheck, unit tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:unit
+
+  contracts:
+    name: Contracts (fmt, build, tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
+        with:
+          version: v1.8.6
+      - run: forge fmt --check
+      - run: forge build
+      - name: Unit tests
+        run: forge test --no-match-path 'test/*.fork.t.sol'
+      - name: Fork tests (pinned blocks on the public Hemi RPCs)
+        run: forge test --match-path 'test/*.fork.t.sol'

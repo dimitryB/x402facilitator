@@ -1,5 +1,7 @@
 # Phase 2, stream B: the facilitator scheme in x402-rs
 
+> **Working notes, kept for the record.** Written on 2026-11-09 while phase 2 was built in three parallel work streams (A: contracts, B: facilitator, C: TypeScript). They describe the state at that time, so some statuses, file names and next steps in them are out of date, and a few refer to scratch files that were never committed. The current state is in the [README](../../README.md) and [DECISIONS.md](../../DECISIONS.md) (D-036 to D-040).
+
 Stream B of [`DESIGN.md`](DESIGN.md) ("Stream B: the facilitator scheme in x402-rs"): the `exact` scheme on
 `bip122` in the facilitator image, `hemi-x402-facilitator:e75adda-hemi.15`. Written by the stream B session
 on 2026-11-09; the integration session merges it with streams A and C and records the D-entries.

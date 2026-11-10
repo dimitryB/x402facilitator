@@ -20,6 +20,15 @@ import {
 import { FORK_RPC } from "./env";
 
 const POLL_MS = 200;
+/**
+ * A fork fetches state it has not seen yet from the upstream RPC (scripts/fork.sh gives anvil 45 s per
+ * upstream request), so on a cold Foundry RPC cache a local call can take far longer than viem's default
+ * 10 s timeout. Every client that talks to a fork uses this transport.
+ */
+export const FORK_TIMEOUT_MS = 60_000;
+function forkTransport(network: HemiNetwork) {
+  return http(FORK_RPC[network], { timeout: FORK_TIMEOUT_MS });
+}
 const publicClients = new Map<HemiNetwork, PublicClient>();
 
 export function publicClient(network: HemiNetwork): PublicClient {
@@ -27,7 +36,7 @@ export function publicClient(network: HemiNetwork): PublicClient {
   if (!client) {
     client = createPublicClient({
       chain: NETWORKS[network].chain,
-      transport: http(FORK_RPC[network]),
+      transport: forkTransport(network),
       pollingInterval: POLL_MS,
     });
     publicClients.set(network, client);
@@ -36,11 +45,11 @@ export function publicClient(network: HemiNetwork): PublicClient {
 }
 
 export function testClient(network: HemiNetwork) {
-  return createTestClient({ mode: "anvil", chain: NETWORKS[network].chain, transport: http(FORK_RPC[network]) });
+  return createTestClient({ mode: "anvil", chain: NETWORKS[network].chain, transport: forkTransport(network) });
 }
 
 export function walletClient(network: HemiNetwork, account: Account) {
-  return createWalletClient({ account, chain: NETWORKS[network].chain, transport: http(FORK_RPC[network]) });
+  return createWalletClient({ account, chain: NETWORKS[network].chain, transport: forkTransport(network) });
 }
 
 export function tokenBalance(network: HemiNetwork, asset: HemiAsset, owner: Address): Promise<bigint> {
@@ -117,7 +126,7 @@ export async function makeContractWallet(
     await test.impersonateAccount({ address });
     try {
       const tx = createPermit2ApprovalTx(asset.address);
-      const wallet = createWalletClient({ account: address, chain: NETWORKS[network].chain, transport: http(FORK_RPC[network]) });
+      const wallet = createWalletClient({ account: address, chain: NETWORKS[network].chain, transport: forkTransport(network) });
       const hash = await wallet.sendTransaction({ to: tx.to, data: tx.data, chain: NETWORKS[network].chain });
       const receipt = await publicClient(network).waitForTransactionReceipt({ hash, pollingInterval: POLL_MS });
       if (receipt.status !== "success") throw new Error(`approve(Permit2) from ${address} reverted`);

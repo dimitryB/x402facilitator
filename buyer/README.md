@@ -1,6 +1,6 @@
 # buyer
 
-A script that pays the demo seller's `GET /echo` with `@x402/fetch` (`wrapFetchWithPayment`, `x402Client` and `ExactEvmScheme` from `@x402/evm/exact/client`), in one asset on one Hemi network, and prints the settlement transaction.
+A script that pays the demo seller's `GET /echo` with `@x402/fetch` (`wrapFetchWithPayment`, `x402Client` and `ExactEvmScheme` from `@x402/evm/exact/client`), in one asset on one Hemi network, and prints the settlement transaction. With `--asset btc-l1` it pays native BTC on Bitcoin L1 instead (see "Paying in BTC on Bitcoin L1" below).
 
 ```sh
 npm run pay -w buyer -- --asset usdc --network testnet
@@ -13,8 +13,8 @@ npm run pay -w buyer -- --asset btc-l1 --network btc-testnet3        # native BT
 
 | Option / variable | Default | Meaning |
 |------|------|------|
-| `--asset` | `usdc` | `usdc` (USDC.e) or `btc` (hemiBTC on mainnet, hBTC on testnet) |
-| `--network` | `testnet` | `testnet` (`eip155:743111`) or `mainnet` (`eip155:43111`) |
+| `--asset` | `usdc` | `usdc` (USDC.e), `btc` (hemiBTC on mainnet, hBTC on testnet) or `btc-l1` (native BTC on Bitcoin L1) |
+| `--network` | `testnet` | `testnet` (`eip155:743111`) or `mainnet` (`eip155:43111`); with `btc-l1`, `btc-mainnet` or `btc-testnet3` |
 | `--url` / `SELLER_URL` | `http://localhost:4021/echo?hello=hemi` | The paid resource |
 | `--max` | `10000` for usdc, `10` for btc | Largest payment the buyer will sign, in base units (about $0.01) |
 | `BUYER_PRIVATE_KEY` | required | The paying wallet |
@@ -51,7 +51,7 @@ The settlement receipt comes back base64-encoded in the `PAYMENT-RESPONSE` heade
 
 ## End-to-end demo on local forks
 
-`buyer/demo-fork.sh` sends nothing to a live network. It starts anvil forks of both chains (`scripts/fork.sh`), the facilitator (`docker compose`) pointed at them, and the seller on both networks; then it makes the four payments (testnet and mainnet fork, USDC.e and BTC asset), prints payTo's balances on each fork, and tears everything down. It uses public anvil dev keys only.
+`buyer/demo-fork.sh` sends nothing to a live network. It starts anvil forks of both chains (`scripts/fork.sh`), the facilitator (`docker compose`) pointed at them, and the seller on both networks; then it makes five payments (USDC.e and the BTC asset on each fork, then native BTC on Bitcoin L1, fabricated in the mock hBK on the mainnet fork), prints payTo's balances on each fork, and tears everything down. It uses public anvil dev keys only.
 
 ```sh
 buyer/demo-fork.sh
@@ -94,7 +94,7 @@ npm run preflight-btc -w buyer -- btc-testnet3
 
 The wallet spends confirmed UTXOs of its one address, largest first, and sends change back to the same address. It reads UTXOs and fee estimates from mempool.space and broadcasts there; that broadcast is the only thing it ever sends.
 
-The flow is driven by hand rather than with `wrapFetchWithPayment`. That wrapper builds a new payment for every 402, and a Bitcoin payment is accepted only after it confirms and hVM has seen its block: 10 to 30 minutes on mainnet, possibly hours on testnet3, where hVM lags. So the script:
+The flow is driven by hand rather than with `wrapFetchWithPayment`. That wrapper builds a new payment for every 402, and a Bitcoin payment is accepted only after it confirms and hVM has seen its block: about 30 minutes on mainnet (roughly three Bitcoin confirmations), possibly hours on testnet3, where hVM lags. So the script:
 
 1. sends one `GET`, decodes the 402, keeps the `bip122` accept for `--network` (`registerPolicy`) and allow-lists `BTC` with the `--max` cap (`setSpendControls`);
 2. calls `createPaymentPayload` once. `ExactBtcClientScheme` derives the address, writes the payment to `.scratch/buyer-btc/journal.jsonl` as `paying`, broadcasts, and records it as `paid` with the txid. A payment journaled as `paying` but never `paid` is never retried automatically: check the wallet first;
