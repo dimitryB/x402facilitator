@@ -21,6 +21,9 @@
 # anvil has no authentication: while they run, anyone on the local network can call them. They hold
 # only forked state and test funds.
 #
+# The forks run without the code of two system contracts, the beacon roots contract (EIP-4788) and the
+# block-hash history contract (EIP-2935): see clear_system_contracts below. Nothing in this project reads them.
+#
 # If the upstream refuses at startup (the public RPC rate-limits at ~300 req/min), the script
 # retries once against dRPC. On testnet it does so only with a pinned block: dRPC testnet's
 # eth_blockNumber lags by over a million blocks (DECISIONS.md D-015), so an unpinned fork would start there.
@@ -74,6 +77,29 @@ launch() { # name port upstream block -> 0 if the fork answers
   return 1
 }
 
+# Under Prague every block starts with a call into each of two system contracts: beacon roots (EIP-4788)
+# and block-hash history (EIP-2935). Both have code on Hemi, and each call writes storage slots keyed by
+# the new block's timestamp or number, which a fork must first read from the upstream: three reads per
+# block that no cache can ever hold. A gas estimate makes the same reads, because anvil estimates on a
+# pending block. If one of them fails while a block is mined, anvil leaves the transaction in its pool,
+# logs nothing and does not try again until another transaction arrives, so the sender waits for a receipt
+# that does not come (DECISIONS.md D-043). With the code removed the two calls do nothing, and mining a
+# block asks the upstream for nothing.
+SYSTEM_CONTRACTS="0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02 0x0000F90827F1C53a10cb7A02335B175320002935"
+clear_system_contracts() { # name rpc
+  local name=$1 rpc=$2 addr
+  for addr in $SYSTEM_CONTRACTS; do
+    # anvil fetches the account from the upstream before it replaces the code, so this is itself an
+    # upstream read and gets three attempts.
+    for _ in 1 2 3; do
+      cast rpc anvil_setCode "$addr" 0x --rpc-url "$rpc" >/dev/null 2>&1 &&
+        [ "$(cast code "$addr" --rpc-url "$rpc" 2>/dev/null)" = 0x ] && continue 2
+      sleep 1
+    done
+    log "$name fork: could not remove the system contract code at $addr"; exit 1
+  done
+}
+
 start_one() { # name port upstream alt-upstream block expected-chain-id
   local name=$1 port=$2 up=$3 alt=$4 block=${5:-} want=$6
   local cid
@@ -91,6 +117,7 @@ start_one() { # name port upstream alt-upstream block expected-chain-id
   fi
   cid=$(cast chain-id --rpc-url "http://127.0.0.1:$port")
   [ "$cid" = "$want" ] || { log "$name fork reports chain $cid, expected $want"; exit 1; }
+  clear_system_contracts "$name" "http://127.0.0.1:$port"   # before the first block is mined
   if [ -n "$block" ]; then
     # A pinned fork starts at that block's timestamp; move the clock to now so
     # validAfter/validBefore windows behave as on the live chain.
