@@ -441,6 +441,8 @@ Latest results, from 2026-11-09 on hemi.15 with phase 2 merged (D-036); the 2026
 
 ## Licence and security
 
+Copyright 2026 Dimitry B and Neva Technologies Inc.
+
 Apache-2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE). The Solidity sources under `contracts/` keep the MIT headers they were deployed and verified with ([contracts/LICENSE-MIT](contracts/LICENSE-MIT)); `contracts/src/x402` and `contracts/lib` are third-party code under the licences in those directories. The facilitator image is built from [x402-rs](https://github.com/x402-rs/x402-rs) (Apache-2.0), fetched at a pinned commit at build time and not copied into this repository.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
