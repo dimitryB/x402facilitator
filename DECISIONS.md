@@ -1534,6 +1534,51 @@ The facilitator then started live with `config.mainnet.json` and `X402_BTC_SETTL
 
 Explorer verification of the settler has not run (the ISP filter, D-034); the default build has no metadata, so a full match is possible when it does. No Bitcoin payment has run; that needs a buyer wallet with real BTC, a seller xpub, and a separate go.
 
+## D-040. First live Bitcoin L1 payment: 1000 sats, verified through hBK, recorded on Hemi mainnet
+
+On Dimitry's go ("Go, pay BTC"), on 2026-11-10 between 01:53Z and 02:25Z (the evening of 2026-11-09 local). One Bitcoin transaction and one Hemi mainnet transaction were sent; nothing else. Full output in `docs/spike/mainnet-btc-l1-payment-2026-11-10.log`.
+
+**Setup.** Dimitry put a fresh seller account xpub (`xpub6CoqSXen…M5EjXH`) and a buyer WIF in `.env`; neither secret was read or printed. The buyer wallet `bc1qyz862zzkswtfxlh7qzxt4ectfl52rtj9tyswkh` held 3000 sats in two UTXOs. The facilitator ran image `hemi.15` with `config.mainnet.json`; the seller advertised 1000 sats on `bip122:000000000019d6689c085ae165831e93`, `minConfirmations` 1, `maxTimeoutSeconds` 7200 (`SELLER_BTC_MAX_TIMEOUT_SECONDS`; the 3600 default leaves little room over the 30 minutes hVM needs).
+
+```
+$ ALLOW_MAINNET=yes npm run pay -w buyer -- --asset btc-l1 --network btc-mainnet --poll 60
+[buyer] paying 1000 sats on Bitcoin mainnet to bc1qv6v32p9kw0az6lv6mz62famwf5acajp3wyntsa (paymentId 674294bb435d4208deccabbcdfc1243a, xpub6CoqSXen…/0/389963158/2013573210/756408873)
+[buyer] sending 1000 sats …: 1 input(s), fee 141 sats (141 vB), change 859 sats, txid 43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4
+[buyer] attempt 1 … attempt 28: not yet: invalid_exact_bip122_payload_transaction_not_found
+[buyer] response: {"echo":{"live":"btc-l1","network":"btc-mainnet"},"timestamp":"2026-11-10T02:22:39.820Z"}
+[buyer] settled on bip122:000000000019d6689c085ae165831e93: bitcoin tx 43cb9bdc…cea4
+[seller] settled 1000 of BTC on bip122:… from n/a: bitcoin tx 43cb9bdc…cea4; paymentId 674294bb… -> bc1qv6v3…ntsa at xpub6CoqSXen…/0/389963158/2013573210/756408873
+facilitator: Bitcoin payment recorded on Hemi network=bip122:… txid=43cb9bdc…cea4 vout=0 hemi_tx=0xcaea6da8…ef3b payment_ref=0xb43e2ee7…ab71
+$ cast receipt 0xcaea6da85cda3bb9d6135f57b65128a47d9c18af82a900c79cf91cea5b7fef3b      # public RPC; dRPC agrees on status and block
+status 0x1  block 5700887 (02:22:35Z)  from 0x1155…0875  to 0x9Df0…ab9f  gasUsed 166753  l1Fee 161408938348  fee 328203960104 wei
+Settled: txid 0x43cb9bdc…cea4  scriptPubKeyHash 0x805b1e6b…791e  paymentRef 0xb43e2ee7…ab71  vout 0  sats 1000  settler 0x1155…0875
+$ cast call settler 'settledBy(bytes32,uint32)(bytes32)' 0x43cb9bdc…cea4 0
+0xb43e2ee7516a1cd7827cb6c59548ca97aaf08e964ae04b353cc0a7726e17ab71      # = sha256(bytes16(paymentId))
+$ cast call settler 'verify(…)' 0x43cb9bdc…cea4 0 0x001466991504b673fa2d7d9ad8b4a4f76e4d3b8ec831 1000 1
+verdict 1 (AlreadyConsumed)
+$ … pay … --resume 674294bb435d4208deccabbcdfc1243a      # the same payment a second time
+[buyer] seller answered 402 (invalid_transaction_state): Payment authorization was already used on chain
+```
+
+**What the read-back shows.**
+
+- Bitcoin: [`43cb9bdc…cea4`](https://mempool.space/tx/43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4) spends one 2000-sat input into 1000 sats to the derived address (vout 0) and 859 sats change, fee 141 sats at 1 sat/vB, in block 975240.
+- Hemi: [`0xcaea6da8…ef3b`](https://explorer.hemi.xyz/tx/0xcaea6da85cda3bb9d6135f57b65128a47d9c18af82a900c79cf91cea5b7fef3b) is the facilitator signer calling `settle` on `X402BtcSettler`. `scriptPubKeyHash` is the keccak of the derived script, and `paymentRef` and `settledBy` both equal `sha256(bytes16(paymentId))` computed here. The signer's balance fell by exactly the fee, 0.00000033 ETH; nonce 5 to 6.
+- The facilitator and the seller never held or moved BTC: the 1000 sats sit unspent on the seller's derived address.
+- Replay: the second use got a 402 with `invalid_transaction_state`. The facilitator answered in 288 ms without sending a transaction; the signer's nonce and balance did not move.
+
+**Timing.** Paid 01:54:18Z. Mined 02:00:22Z (block 975240). 28 polls a minute apart answered `…_transaction_not_found`. The settle was broadcast at 02:22:25Z, 42 seconds after block 975242 (02:21:43Z), the payment's third confirmation, and the buyer was served at 02:22:39Z. So 28 minutes from broadcast and 22 from the first confirmation, as the two-block hVM lag predicts (A-2); `minConfirmations` 1 was never the binding condition. hBK then reported 3 confirmations at Bitcoin tip 975242, which confirms `CONFIRMATION_OFFSET` 0 on the live contract. Each early attempt was a failed `eth_call` only (D-037), so the 28 polls cost no gas.
+
+**Costs.** Buyer: 1000 sats plus a 141-sat miner fee. Facilitator: 328203960104 wei of Hemi gas, 0.00000033 ETH, well under a cent, half of it L1 data fee. Seller: nothing.
+
+**Things that came up on the way.**
+
+- *The seller needs an account xpub, not an address.* The first `.env` had a `bc1q…` address in `SELLER_BTC_XPUB`, and UniSat cannot export an xpub. Dimitry made a fresh wallet that can. A new read-only script, `npm run preflight-btc -w buyer`, reports this before any money moves: it checks that the xpub parses for the network, derives a sample address, shows the buyer wallet's address and balance, the fee rate, and whether the funds cover price plus fee. It prints public data only and sends nothing.
+- *mempool.space was unreachable for a while.* The ISP filter of D-027 and D-034 reset TLS connections to mempool.space and blockstream.info. `BUYER_BTC_ESPLORA` now points the buyer and the preflight at any other Esplora base (`https://mempool.ninja/api` worked; `mempool.emzy.de` rate-limits after a few calls). The block lifted before the payment, which went through mempool.space.
+- *Colima's port forward* for 8080 was missing again after `compose up` (D-036); it was added by hand through the mux socket and cancelled at teardown.
+
+**Still open.** The success response carries the Bitcoin txid but not the Hemi settle hash (it is in the facilitator log and the `Settled` event). Audit items L-2 (reconcile from `settledBy` after a restart) and L-3 (treat an in-block `TooFewConfirmations` revert as retryable) are unpatched; neither came up in this run. The seller's 1000 sats are at `m/0/389963158/2013573210/756408873`, a path no standard wallet scans; there is no sweep tool yet, so the paymentId in the seller log and in this entry is what makes them spendable. Explorer verification of the settler has not run.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

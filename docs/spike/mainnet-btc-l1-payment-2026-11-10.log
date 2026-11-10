@@ -1,0 +1,94 @@
+# First Bitcoin L1 payment: 1000 sats on Bitcoin mainnet, verified through hBK and recorded on Hemi mainnet
+# by X402BtcSettler, through hemi.15. 2026-11-10 UTC (the evening of 2026-11-09 local). DECISIONS.md D-040.
+# Times are UTC. The seller xpub is shortened; no private key, WIF or mnemonic was printed at any point.
+
+# Before
+settler 0x9Df0B4752D00dF65Fb4f7FfdFe0545543f08ab9f  HBK 0x7007dd1C09527B92AEcd8Ae6570B73d09E0B8F12  SETTLER 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875  CONFIRMATION_OFFSET 0
+signer  0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875  ETH 193589316758856 wei  nonce 5
+$ npm run preflight-btc -w buyer        # read-only, prints public data only
+seller xpub: xpub…M5EjXH parses as a xpub on Bitcoin mainnet;  seller price: 1000 sats
+buyer wallet: bc1qyz862zzkswtfxlh7qzxt4ectfl52rtj9tyswkh (p2wpkh, from WIF)  balance: 3000 sats confirmed, 0 unconfirmed (two UTXOs, 1000 and 2000)
+fee rate (3-block estimate): 1 sat/vB -> about 141 sats;  preflight: ok (nothing was sent)
+
+$ FACILITATOR_CONFIG=config.mainnet.json docker compose up -d      # started 01:53:29Z, image hemi-x402-facilitator:e75adda-hemi.15
+# The published port 8080 did not answer after 25 s (Colima, D-036); the forward was added by hand:
+$ ssh -S ~/.colima/_lima/colima/ssh.sock -O forward -L 127.0.0.1:8080:127.0.0.1:8080 lima-colima
+# /supported listed exact on eip155:43111 and on bip122:000000000019d6689c085ae165831e93 (settler 0x9Df0…ab9f, hemiNetwork eip155:43111)
+
+$ SELLER_NETWORKS=eip155:43111 SELLER_BTC_MAX_TIMEOUT_SECONDS=7200 npm run start -w seller   # SELLER_BTC_NETWORKS, the xpub and the price from .env; log in .scratch/live-btc/seller.log
+[seller] listening on http://localhost:4021  facilitator http://localhost:8080  payTo 0x647C8d7129c0E995B36eF8AAA98f610D5E8f866f
+[seller]   eip155:43111  1000 of 0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA  {"assetTransferMethod":"eip3009","name":"Bridged USDC (Stargate)","version":"2"}
+[seller]   eip155:43111  1 of 0xAA40c0c7644e0b2B224509571e10ad20d9C4ef28  {"assetTransferMethod":"permit2"}
+[seller]   bip122:000000000019d6689c085ae165831e93  1000 sats of BTC on Bitcoin mainnet to xpub6CoqSXen…  p2wpkh, 1 confirmation(s), maxTimeoutSeconds 7200
+
+$ ALLOW_MAINNET=yes SELLER_URL='http://localhost:4021/echo?live=btc-l1&network=btc-mainnet' npm run pay -w buyer -- --asset btc-l1 --network btc-mainnet --poll 60
+[buyer] wallet bc1qyz862zzkswtfxlh7qzxt4ectfl52rtj9tyswkh (p2wpkh) holds 3000 sats confirmed, 0 unconfirmed
+[buyer] fee rate: 1 (3-block estimate from https://mempool.space/api) sat/vB
+[buyer] GET http://localhost:4021/echo?live=btc-l1&network=btc-mainnet
+[buyer] paying 1000 sats on Bitcoin mainnet to bc1qv6v32p9kw0az6lv6mz62famwf5acajp3wyntsa (paymentId 674294bb435d4208deccabbcdfc1243a, xpub6CoqSXen…/0/389963158/2013573210/756408873)
+[buyer]   needs 1 confirmation(s); seller waits up to 7200s
+[buyer] sending 1000 sats to bc1qv6v32p9kw0az6lv6mz62famwf5acajp3wyntsa from bc1qyz862zzkswtfxlh7qzxt4ectfl52rtj9tyswkh: 1 input(s), fee 141 sats (141 vB), change 859 sats, txid 43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4
+[buyer] bitcoin tx: 43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4 vout 0
+[buyer]   https://mempool.space/tx/43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4
+[buyer] journal: .scratch/buyer-btc/journal.jsonl (resume with --resume 674294bb435d4208deccabbcdfc1243a)      # journal entry created 01:54:18Z
+[buyer] attempt 1: not yet: invalid_exact_bip122_payload_transaction_not_found
+  … attempts 2 to 27, one a minute, the same answer …
+[buyer] attempt 28: not yet: invalid_exact_bip122_payload_transaction_not_found
+[buyer] response: {"echo":{"live":"btc-l1","network":"btc-mainnet"},"timestamp":"2026-11-10T02:22:39.820Z"}
+[buyer] settled on bip122:000000000019d6689c085ae165831e93: bitcoin tx 43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4
+[buyer] hemi settle tx: not in the response (the facilitator logs it; see the settler's Settled event)
+buyer exit: 0
+
+# Seller, for each of the 28 early attempts and then the settle:
+[seller] settle failed (bip122:… BTC) [invalid_exact_bip122_payload_transaction_not_found]: … Transaction 43cb9bdc…cea4 is not known to hBK on eip155:43111: not mined yet, in a block Hemi's view of Bitcoin has not reached yet, or not a transaction
+[seller] settled 1000 of BTC on bip122:000000000019d6689c085ae165831e93 from n/a: bitcoin tx 43cb9bdc…cea4; paymentId 674294bb435d4208deccabbcdfc1243a -> bc1qv6v32p9kw0az6lv6mz62famwf5acajp3wyntsa at xpub6CoqSXen…/0/389963158/2013573210/756408873
+
+# Facilitator
+02:22:25.379Z  POST /settle  x402_chain_eip155::chain::provider: Transaction broadcast tx=0xcaea6da85cda3bb9d6135f57b65128a47d9c18af82a900c79cf91cea5b7fef3b from=0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+02:22:39.889Z  POST /settle  x402_chain_bip122::v2_bip122_exact::facilitator: Bitcoin payment recorded on Hemi network=bip122:000000000019d6689c085ae165831e93 txid=43cb9bdc…cea4 vout=0 hemi_tx=0xcaea6da8…ef3b payment_ref=0xb43e2ee7…ab71
+02:22:39.889Z  status=200 elapsed=15660ms
+
+# Bitcoin side, from https://mempool.space/api
+tx 43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4: size 223, weight 562 (141 vB), fee 141 sats
+  in   2b86cc9e80288b55c311ab6e2ac54ac699262a5691034c4d49815b28bad29d60:0   2000 sats
+  out0 bc1qv6v32p9kw0az6lv6mz62famwf5acajp3wyntsa   1000 sats   script 0x001466991504b673fa2d7d9ad8b4a4f76e4d3b8ec831   (the payment)
+  out1 bc1qyz862zzkswtfxlh7qzxt4ectfl52rtj9tyswkh    859 sats   (change)
+block 975240  0000000000000000000018519290f9cf249f55a898e30c7c8285eb110f4b2036  02:00:22Z   <- the payment's block
+block 975241  00000000000000000001174d76581579ea30807d6c732876e5fc90c7e53a9a67  02:09:05Z
+block 975242  00000000000000000000fe721a55158bbeb40ecf10f7cd0a20176609ccd4b884  02:21:43Z   <- 3rd confirmation; the settle broadcast followed 42 s later
+block 975243  00000000000000000000c23f02e0801bb8d398688a3a82011e763bfe6448b519  02:24:51Z
+# Timeline: paid 01:54:18Z, mined 02:00:22Z, accepted 02:22:25Z (28 min after broadcast, 22 min after the first confirmation), served 02:22:39Z.
+
+# Hemi side, read back from https://rpc.hemi.network/rpc; the receipt also from https://hemi.drpc.org (status 0x1, block 0x56fd17)
+$ cast receipt 0xcaea6da85cda3bb9d6135f57b65128a47d9c18af82a900c79cf91cea5b7fef3b
+status 0x1  block 5700887 (02:22:35Z)  from 0x1155…0875  to 0x9Df0…ab9f  gasUsed 166753  effectiveGasPrice 1000252  l1Fee 161408938348  fee 328203960104 wei
+log 0  Settled (topic0 0xc996e47e48ed85bd34415ed6a66156e51e6256282c822c179a1b21efb98871c2)
+  txid             0x43cb9bdcba36fc4c222b311ac176189081d644c64fef328d12982d1edb92cea4
+  scriptPubKeyHash 0x805b1e6b4410cab90f524f41bbbebd2302fc9628a3b56a344b6d16a994c2791e
+  paymentRef       0xb43e2ee7516a1cd7827cb6c59548ca97aaf08e964ae04b353cc0a7726e17ab71
+  data             vout 0, sats 1000, settler 0x1155C33c3Ef5d0dEE61C98d21f2e22c053a60875
+$ cast keccak 0x001466991504b673fa2d7d9ad8b4a4f76e4d3b8ec831
+0x805b1e6b4410cab90f524f41bbbebd2302fc9628a3b56a344b6d16a994c2791e          # = scriptPubKeyHash
+$ sha256(bytes16(674294bb435d4208deccabbcdfc1243a))
+0xb43e2ee7516a1cd7827cb6c59548ca97aaf08e964ae04b353cc0a7726e17ab71          # = paymentRef
+$ cast call 0x9Df0…ab9f 'settledBy(bytes32,uint32)(bytes32)' 0x43cb9bdc…cea4 0
+0xb43e2ee7516a1cd7827cb6c59548ca97aaf08e964ae04b353cc0a7726e17ab71
+$ cast call 0x9Df0…ab9f 'verify(bytes32,uint32,bytes,uint64,uint32)' 0x43cb9bdc…cea4 0 0x0014…c831 1000 1
+verdict 1 (AlreadyConsumed), settledBy 0xb43e2ee7…ab71
+$ cast call 0x7007…8F12 'getTxConfirmations(bytes32)(uint32)' 0x43cb9bdc…cea4      # at Bitcoin tip 975242
+3
+signer  ETH 193261112798752 wei (fell by exactly the fee), nonce 6
+
+# Replay: the same payment again, 02:24:46Z
+$ ALLOW_MAINNET=yes npm run pay -w buyer -- --asset btc-l1 --network btc-mainnet --resume 674294bb435d4208deccabbcdfc1243a --poll 60
+[buyer] resuming paymentId 674294bb435d4208deccabbcdfc1243a: tx 43cb9bdc…cea4 vout 0
+[buyer] seller answered 402 (invalid_transaction_state): Payment authorization was already used on chain
+exit 1
+[seller] settle failed (bip122:… BTC) [invalid_transaction_state]: invalid_transaction_state: Payment authorization was already used on chain
+facilitator: Settlement failed error=Settlement(PaymentVerification(AuthorizationAlreadyUsed), …)  status=200 elapsed=288ms
+signer  nonce 6, ETH 193261112798752 wei: the replay sent nothing and cost nothing
+
+# After
+buyer  bc1qyz862zzkswtfxlh7qzxt4ectfl52rtj9tyswkh   two UTXOs, 1000 and 859 sats, both confirmed
+seller bc1qv6v32p9kw0az6lv6mz62famwf5acajp3wyntsa   1000 sats received, unspent; spendable at m/0/389963158/2013573210/756408873 of the seller's account
+# Teardown: seller killed; docker compose down; the hand-made forward cancelled; ports 8080 and 4021 free.

@@ -82,7 +82,15 @@ npm run pay -w buyer -- --asset btc-l1 --network btc-mainnet --resume 12299bf164
 | `--fee-rate` | mempool.space 3-block estimate | Miner fee in sat/vB; the wallet refuses estimates above 200 |
 | `BUYER_BTC_WIF` / `BUYER_BTC_MNEMONIC` | one required | The paying wallet: a WIF of the network, or a BIP39 mnemonic (first receive address, `m/84'/coin'/0'/0/0`, or `m/86'/…` for p2tr) |
 | `BUYER_BTC_ADDRESS_TYPE` | `p2wpkh` | The wallet's own address type: `p2wpkh` or `p2tr` |
+| `BUYER_BTC_ESPLORA` | `https://mempool.space/api` (per network) | Another Esplora REST base for UTXOs, fee estimates and the broadcast, for when mempool.space is unreachable, e.g. `https://mempool.emzy.de/api`. Printed links still point at mempool.space |
 | `ALLOW_MAINNET` | unset | Must be `yes` for `--network btc-mainnet` |
+
+Before a live payment, run the read-only preflight. It checks that `SELLER_BTC_XPUB` parses for the network and derives a sample address from it, then prints the buyer wallet's address, its balance, the fee rate, and whether the funds cover `SELLER_BTC_AMOUNT_SATS` plus the fee. It reads `.env`, prints public data only, and sends nothing:
+
+```sh
+npm run preflight-btc -w buyer                  # btc-mainnet
+npm run preflight-btc -w buyer -- btc-testnet3
+```
 
 The wallet spends confirmed UTXOs of its one address, largest first, and sends change back to the same address. It reads UTXOs and fee estimates from mempool.space and broadcasts there; that broadcast is the only thing it ever sends.
 
