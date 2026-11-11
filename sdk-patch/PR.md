@@ -1,6 +1,6 @@
 # Upstream PR
 
-Opened on 2026-11-10 as a draft: [x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213), from `dimitryB/x402` branch `hemi-default-stablecoins` into `main`. Below are the title and description as posted.
+Opened on 2026-11-10 as a draft: [x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213), from `dimitryB/x402` branch `hemi-default-stablecoins` into `main`. Below are the title and the description, revised on 2026-11-11 for the review (TypeScript, Go and Python; patch release; no value test). The revision was posted with the review commit `a580c10` the same day; the first version is in git history.
 
 ## Title
 
@@ -10,7 +10,7 @@ feat(evm): add Hemi default stablecoins
 
 ### Description
 
-Adds Hemi mainnet (`eip155:43111`) and Hemi Testnet (`eip155:743111`) to the TypeScript EVM default asset table, so `price: "$0.01"` resolves to USDC.e on both, and registers the v1 network names `hemi` and `hemi-testnet`. USDC.e is the USD stablecoin that Hemi's official token list ([`hemilabs/token-list@7a326ac`](https://github.com/hemilabs/token-list/blob/7a326ac4bf501e9205e0580625c9932fa8955f63/src/hemi.tokenlist.json)) gives for both chain IDs.
+Adds Hemi mainnet (`eip155:43111`) and Hemi Testnet (`eip155:743111`) to the EVM default asset tables of the TypeScript, Go and Python SDKs, so `price: "$0.01"` resolves to USDC.e on both, and registers the v1 network names `hemi` and `hemi-testnet` in all three. USDC.e is the USD stablecoin that Hemi's official token list ([`hemilabs/token-list@7a326ac`](https://github.com/hemilabs/token-list/blob/7a326ac4bf501e9205e0580625c9932fa8955f63/src/hemi.tokenlist.json)) gives for both chain IDs.
 
 | Network | Asset | EIP-712 name / version | Decimals | Transfer method |
 |---|---|---|---|---|
@@ -18,11 +18,13 @@ Adds Hemi mainnet (`eip155:43111`) and Hemi Testnet (`eip155:743111`) to the Typ
 | Hemi Testnet | `0xD47971C7F5B1067d25cd45d30b2c9eb60de96443` | none on chain; `USDC.e` / `1` placeholders, as for Igra | 6 | Permit2, no EIP-2612 |
 
 Changes:
-- `DEFAULT_ASSETS` entries in `typescript/packages/mechanisms/evm/src/defaultAssets.ts`; v1 names in `constants.ts`
-- Unit tests: `parsePrice("$0.001")` on both networks (the testnet result carries only `assetTransferMethod`, not the placeholder domain) and v1-name resolution
-- Two rows in `docs/core-concepts/network-and-token-support.mdx`; `@x402/evm` minor changeset
+- TypeScript: `DEFAULT_ASSETS` in `typescript/packages/mechanisms/evm/src/defaultAssets.ts`, v1 names in `constants.ts`, `@x402/evm` patch changeset
+- Go: `DefaultAssets` and the legacy name map in `go/mechanisms/evm/default_assets.go`, v1 names in `go/mechanisms/evm/v1/network.go`, changie fragment
+- Python: `DEFAULT_ASSETS` in `python/x402/mechanisms/evm/default_assets.py`, v1 names in `python/x402/mechanisms/evm/v1/constants.py`, Towncrier fragment `4213.feature.md`
+- Unit tests: `parsePrice("$0.001")` on both networks in `server.test.ts` (the testnet result carries only `assetTransferMethod`, not the placeholder domain)
+- Two rows in `docs/core-concepts/network-and-token-support.mdx`
 
-Decimals are 6, so no paywall regeneration is needed. This PR is TypeScript only; Go and Python can follow here or separately, whichever you prefer.
+Decimals are 6, so no paywall regeneration is needed.
 
 ### On-chain verification (public RPCs)
 
@@ -35,10 +37,11 @@ Most of this PR, including the on-chain checks, was prepared with an AI coding a
 
 ### Tests
 
-From `typescript/packages/mechanisms/evm`, after `pnpm install --frozen-lockfile` and `pnpm turbo run build --filter=@x402/evm`:
+On `main` at `327ff3cb` with this change (the branch also merges `404d91c3`, which only touches `go/http/gin` and a changelog fragment):
 
-- `pnpm test`: 64 files, 2103 tests passed; coverage thresholds met
-- `pnpm lint:check` and `pnpm format:check`: clean; Prettier also clean on the changeset
+- TypeScript, from `typescript/packages/mechanisms/evm` after `pnpm install --frozen-lockfile` and `pnpm turbo run build --filter=@x402/evm`: `pnpm test` 64 files, 2102 tests passed; eslint and Prettier clean, Prettier also on the changeset
+- Go, from `go/`: `gofmt -l mechanisms/evm` clean; `go test ./...` all packages pass
+- Python, from `python/x402` with uv 0.13.4: `uv run pytest tests/unit` 3472 passed; `ruff check` and `ruff format --check` clean
 
 ### Checklist
 

@@ -1,26 +1,38 @@
-From 78ba854c4098889c8164edc9f191ed4f12e784eb Mon Sep 17 00:00:00 2001
+From 2f1b873d43fa1da225315b175e8a540624955e03 Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
 Date: Tue, 10 Nov 2026 19:15:49 -0500
 Subject: [PATCH] feat(evm): add Hemi default stablecoins
 
-Without a default asset, "$0.01" pricing throws on Hemi mainnet and
-testnet, and client spend controls reject Hemi USDC.e. Mainnet USDC.e
-supports EIP-3009; the testnet token has neither EIP-3009 nor EIP-2612,
-so it uses Permit2, as Igra's entry does.
+Add Hemi mainnet (eip155:43111) and Hemi Testnet (eip155:743111) to the
+EVM default asset tables of the TypeScript, Go and Python SDKs, with
+USDC.e as the default stablecoin, and the v1 network names hemi and
+hemi-testnet. Without a default asset, "$0.01" pricing throws on Hemi and
+client spend controls reject Hemi USDC.e.
+
+Mainnet USDC.e supports EIP-3009 (EIP-712 domain "Bridged USDC
+(Stargate)", version "2"). The testnet token has neither EIP-3009 nor
+EIP-2612, so it uses Permit2, as Igra's entry does.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../network-and-token-support.mdx             |  2 ++
+ .../unreleased/added-20261111-hemi-usdce.yaml |  3 +++
+ go/mechanisms/evm/default_assets.go           |  8 +++++++
+ go/mechanisms/evm/v1/network.go               |  2 ++
+ python/x402/changelog.d/4213.feature.md       |  1 +
+ python/x402/mechanisms/evm/default_assets.py  | 19 +++++++++++++++
+ python/x402/mechanisms/evm/v1/constants.py    |  4 ++++
  .../.changeset/add-hemi-default-stablecoin.md |  5 ++++
  .../packages/mechanisms/evm/src/constants.ts  |  2 ++
  .../mechanisms/evm/src/defaultAssets.ts       | 19 +++++++++++++++
- .../evm/test/unit/defaultAssets.test.ts       |  8 +++++++
  .../mechanisms/evm/test/unit/server.test.ts   | 23 +++++++++++++++++++
- 6 files changed, 59 insertions(+)
+ 11 files changed, 88 insertions(+)
+ create mode 100644 go/.changes/unreleased/added-20261111-hemi-usdce.yaml
+ create mode 100644 python/x402/changelog.d/4213.feature.md
  create mode 100644 typescript/.changeset/add-hemi-default-stablecoin.md
 
 diff --git a/docs/core-concepts/network-and-token-support.mdx b/docs/core-concepts/network-and-token-support.mdx
-index 4bac80c..8ebd1ba 100644
+index 89a5055c..9ca5b960 100644
 --- a/docs/core-concepts/network-and-token-support.mdx
 +++ b/docs/core-concepts/network-and-token-support.mdx
 @@ -147,6 +147,8 @@ When you use `"$0.01"` syntax, x402 needs to know which stablecoin to use. The f
@@ -32,19 +44,124 @@ index 4bac80c..8ebd1ba 100644
  
  
  
+diff --git a/go/.changes/unreleased/added-20261111-hemi-usdce.yaml b/go/.changes/unreleased/added-20261111-hemi-usdce.yaml
+new file mode 100644
+index 00000000..bdc06f0b
+--- /dev/null
++++ b/go/.changes/unreleased/added-20261111-hemi-usdce.yaml
+@@ -0,0 +1,3 @@
++kind: added
++body: 'Add Hemi mainnet (chain ID 43111) and Hemi Testnet (chain ID 743111) with USDC.e as the default stablecoin, and the v1 network names hemi and hemi-testnet'
++time: 2026-11-11T00:00:00.000000+00:00
+diff --git a/go/mechanisms/evm/default_assets.go b/go/mechanisms/evm/default_assets.go
+index a05c3c77..9c62f05e 100644
+--- a/go/mechanisms/evm/default_assets.go
++++ b/go/mechanisms/evm/default_assets.go
+@@ -118,6 +118,12 @@ var DefaultAssets = map[string][]DefaultAssetInfo{
+ 	"eip155:4663": {
+ 		{Asset: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", Name: "Global Dollar", Version: "1", Decimals: 6, Symbol: "USDG"},
+ 	},
++	"eip155:43111": {
++		{Asset: "0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA", Name: "Bridged USDC (Stargate)", Version: "2", Decimals: 6, Symbol: "USDC.e"},
++	},
++	"eip155:743111": {
++		{Asset: "0xD47971C7F5B1067d25cd45d30b2c9eb60de96443", Name: "USDC.e", Version: "1", Decimals: 6, Symbol: "USDC.e", AssetTransferMethod: AssetTransferMethodPermit2},
++	},
+ }
+ 
+ // legacyNetworkChainIDs maps v1 network names to chain IDs (mirrors v1.NetworkChainIDs).
+@@ -146,6 +152,8 @@ var legacyNetworkChainIDs = map[string]int64{
+ 	"stable-testnet":     2201,
+ 	"celo":               42220,
+ 	"flare":              14,
++	"hemi":               43111,
++	"hemi-testnet":       743111,
+ }
+ 
+ func resolveNetworkKey(network string) string {
+diff --git a/go/mechanisms/evm/v1/network.go b/go/mechanisms/evm/v1/network.go
+index 7c08df72..b2dc8906 100644
+--- a/go/mechanisms/evm/v1/network.go
++++ b/go/mechanisms/evm/v1/network.go
+@@ -30,6 +30,8 @@ var NetworkChainIDs = map[string]*big.Int{
+ 	"stable-testnet":     big.NewInt(2201),
+ 	"celo":               big.NewInt(42220),
+ 	"flare":              big.NewInt(14),
++	"hemi":               big.NewInt(43111),
++	"hemi-testnet":       big.NewInt(743111),
+ }
+ 
+ // Networks is the list of all v1 network names.
+diff --git a/python/x402/changelog.d/4213.feature.md b/python/x402/changelog.d/4213.feature.md
+new file mode 100644
+index 00000000..f310ca9e
+--- /dev/null
++++ b/python/x402/changelog.d/4213.feature.md
+@@ -0,0 +1 @@
++Add Hemi mainnet (chain ID 43111) and Hemi Testnet (chain ID 743111) with USDC.e as the default stablecoin, and the v1 network names `hemi` and `hemi-testnet`.
+diff --git a/python/x402/mechanisms/evm/default_assets.py b/python/x402/mechanisms/evm/default_assets.py
+index 09aeabf6..28a95266 100644
+--- a/python/x402/mechanisms/evm/default_assets.py
++++ b/python/x402/mechanisms/evm/default_assets.py
+@@ -322,6 +322,25 @@ DEFAULT_ASSETS: dict[str, list[ExactDefaultAssetInfo]] = {
+             "symbol": "USDG",
+         },
+     ],  # Robinhood Chain mainnet USDG (EIP-3009 supported)
++    "eip155:43111": [
++        {
++            "asset": "0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA",
++            "name": "Bridged USDC (Stargate)",
++            "version": "2",
++            "decimals": 6,
++            "symbol": "USDC.e",
++        },
++    ],  # Hemi mainnet USDC.e (EIP-3009 supported)
++    "eip155:743111": [
++        {
++            "asset": "0xD47971C7F5B1067d25cd45d30b2c9eb60de96443",
++            "name": "USDC.e",
++            "version": "1",
++            "decimals": 6,
++            "symbol": "USDC.e",
++            "asset_transfer_method": "permit2",
++        },
++    ],  # Hemi testnet USDC.e (no EIP-3009, no EIP-2612)
+ }
+ 
+ 
+diff --git a/python/x402/mechanisms/evm/v1/constants.py b/python/x402/mechanisms/evm/v1/constants.py
+index accbeb34..d8715d69 100644
+--- a/python/x402/mechanisms/evm/v1/constants.py
++++ b/python/x402/mechanisms/evm/v1/constants.py
+@@ -25,6 +25,8 @@ V1_NETWORKS = [
+     "celo",
+     "ethereum",
+     "flare",
++    "hemi",
++    "hemi-testnet",
+ ]
+ 
+ # V1 network name to chain ID mapping
+@@ -52,4 +54,6 @@ V1_NETWORK_CHAIN_IDS: dict[str, int] = {
+     "stable-testnet": 2201,
+     "celo": 42220,
+     "flare": 14,
++    "hemi": 43111,
++    "hemi-testnet": 743111,
+ }
 diff --git a/typescript/.changeset/add-hemi-default-stablecoin.md b/typescript/.changeset/add-hemi-default-stablecoin.md
 new file mode 100644
-index 0000000..08e052c
+index 00000000..e89fa308
 --- /dev/null
 +++ b/typescript/.changeset/add-hemi-default-stablecoin.md
 @@ -0,0 +1,5 @@
 +---
-+'@x402/evm': minor
++'@x402/evm': patch
 +---
 +
 +Add Hemi mainnet (chain ID 43111) and Hemi Testnet (chain ID 743111) with USDC.e as the default stablecoin, and the v1 network names `hemi` and `hemi-testnet`.
 diff --git a/typescript/packages/mechanisms/evm/src/constants.ts b/typescript/packages/mechanisms/evm/src/constants.ts
-index ab7db42..a0a0db9 100644
+index ab7db42c..a0a0db92 100644
 --- a/typescript/packages/mechanisms/evm/src/constants.ts
 +++ b/typescript/packages/mechanisms/evm/src/constants.ts
 @@ -24,6 +24,8 @@ export const EVM_NETWORK_CHAIN_ID_MAP = {
@@ -57,7 +174,7 @@ index ab7db42..a0a0db9 100644
  
  export type EvmNetworkV1 = keyof typeof EVM_NETWORK_CHAIN_ID_MAP;
 diff --git a/typescript/packages/mechanisms/evm/src/defaultAssets.ts b/typescript/packages/mechanisms/evm/src/defaultAssets.ts
-index 0a11f26..6d89276 100644
+index 0a11f269..6d892769 100644
 --- a/typescript/packages/mechanisms/evm/src/defaultAssets.ts
 +++ b/typescript/packages/mechanisms/evm/src/defaultAssets.ts
 @@ -333,6 +333,25 @@ export const DEFAULT_ASSETS: DefaultAssetTable<ExactDefaultAssetInfo> = {
@@ -86,27 +203,8 @@ index 0a11f26..6d89276 100644
  };
  
  /**
-diff --git a/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts b/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts
-index a9facc9..245172e 100644
---- a/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts
-+++ b/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts
-@@ -20,6 +20,14 @@ describe("defaultAssets (EVM)", () => {
-       expect(findDefaultAsset(BASE_USDC.asset, "base")).toEqual(BASE_USDC);
-     });
- 
-+    it("resolves v1 legacy network names hemi and hemi-testnet", () => {
-+      const hemiUsdce = DEFAULT_ASSETS["eip155:43111"]![0]!;
-+      const hemiTestnetUsdce = DEFAULT_ASSETS["eip155:743111"]![0]!;
-+
-+      expect(findDefaultAsset(hemiUsdce.asset, "hemi")).toEqual(hemiUsdce);
-+      expect(findDefaultAsset(hemiTestnetUsdce.asset, "hemi-testnet")).toEqual(hemiTestnetUsdce);
-+    });
-+
-     it("finds 18-decimal mUSD on Mezo testnet", () => {
-       expect(findDefaultAsset(MEZO_TESTNET_MUSD.asset, "eip155:31611")).toEqual(MEZO_TESTNET_MUSD);
-       expect(MEZO_TESTNET_MUSD.decimals).toBe(18);
 diff --git a/typescript/packages/mechanisms/evm/test/unit/server.test.ts b/typescript/packages/mechanisms/evm/test/unit/server.test.ts
-index 1119eae..e0c8c59 100644
+index 1119eaed..e0c8c59b 100644
 --- a/typescript/packages/mechanisms/evm/test/unit/server.test.ts
 +++ b/typescript/packages/mechanisms/evm/test/unit/server.test.ts
 @@ -80,6 +80,29 @@ describe("ExactEvmScheme (Server)", () => {
