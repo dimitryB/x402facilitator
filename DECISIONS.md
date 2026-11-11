@@ -2044,6 +2044,23 @@ npm run test:e2e              Test Files 15 passed (15), Tests 151 passed (151),
                               test on both Bitcoin networks)
 ```
 
+## D-052. `quinn-proto` 0.11.15 in the lock, to clear a Dependabot alert for a package that is not built
+
+Pushing PR #12 showed one open Dependabot alert on `main`: `quinn-proto` 0.11.14 in `facilitator/x402-rs/build/Cargo.lock`, GHSA-4w2j-m93h-cj5j (high: remote memory exhaustion through unbounded out-of-order stream reassembly), fixed in 0.11.15. D-047 left it alone because it is not in this binary's dependency graph, and it still is not. Only reqwest's optional `http3` feature names `quinn`, and nothing in this build enables it. `cargo tree --workspace --all-features --target all -e all -i quinn-proto` in the builder prints nothing. The lock lists it anyway, and the alert makes the public repository look unpatched, so it is upgraded like `block-buffer` in D-050.
+
+- `cargo update -p quinn-proto@0.11.14 --precise 0.11.15` in the pinned builder changed only that package: version and checksum `4fcb935c…763e`, which crates.io lists for 0.11.15 (published 2026-06-22, not yanked). Its dependencies did not change.
+- `lock-upgrades.txt` lists it (40 entries), and its header gives the advisory and why it is not built. `facilitator/x402-rs/README.md`'s summary of that file now also names `block-buffer` (D-050), which it had missed.
+- The image tag stays `e75adda-hemi.19`. The binary compiled with the new lock is byte-identical to hemi.19's (SHA-256 `59b715ee…42ea`), and no `quinn` crate was compiled, so nothing that runs changed.
+
+**Verification**, 2026-11-11:
+
+```
+docker build (builder and image)   exit 0; "Cargo.lock: 476 packages as upstream locked them (of 1200); 50 others,
+                                   all listed" (477 and 49 before); no compiler warnings; no quinn fingerprint
+binary, builder stage vs hemi.19    sha256 59b715eea65b2154ef4e28e9fca7255ac83877da39db2b7c7bccc7f75aa042ea for both
+Rust tests (CI's commands, --network none)   182 passed, 0 failed, 27 ignored
+```
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

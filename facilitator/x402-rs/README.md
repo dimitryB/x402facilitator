@@ -95,9 +95,9 @@ two files, both in Cargo.lock format:
 - [`build/lock-additions.txt`](build/lock-additions.txt): `bitcoin` and the eight packages it brings that
   upstream's lock lacks.
 - [`build/lock-upgrades.txt`](build/lock-upgrades.txt): upgrades of packages upstream pinned at versions
-  with security advisories (`rustls`, `rustls-webpki`, `h2`, `tokio`, `anyhow`, `ruint`, `serde_with`, and
-  alloy 2.5 for `lru`), and what they brought with them, 38 entries (DECISIONS.md D-047, D-049). Its header
-  says which advisories are left and why.
+  with security advisories (`rustls`, `rustls-webpki`, `h2`, `tokio`, `anyhow`, `ruint`, `serde_with`,
+  `block-buffer`, `quinn-proto`, and alloy 2.5 for `lru`), and what they brought with them, 40 entries
+  (DECISIONS.md D-047, D-049, D-050, D-052). Its header says which advisories are left and why.
 
 ## Related upstream pull requests
 
