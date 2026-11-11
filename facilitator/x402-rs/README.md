@@ -95,9 +95,9 @@ two files, both in Cargo.lock format:
 - [`build/lock-additions.txt`](build/lock-additions.txt): `bitcoin` and the eight packages it brings that
   upstream's lock lacks.
 - [`build/lock-upgrades.txt`](build/lock-upgrades.txt): upgrades of packages upstream pinned at versions
-  with security advisories (`rustls`, `rustls-webpki`, `h2`, `tokio`, `anyhow`, `ruint`, `serde_with`),
-  and what they brought with them, 17 entries (DECISIONS.md D-047). Its header says which advisories are
-  left and why.
+  with security advisories (`rustls`, `rustls-webpki`, `h2`, `tokio`, `anyhow`, `ruint`, `serde_with`, and
+  alloy 2.5 for `lru`), and what they brought with them, 38 entries (DECISIONS.md D-047, D-049). Its header
+  says which advisories are left and why.
 
 ## Related upstream pull requests
 
@@ -317,7 +317,7 @@ payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an a
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.16` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.17` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -338,7 +338,7 @@ silicon), with the base images already pulled:
   (57.8 s, 11.9 s); 115 s for hemi.6 (57.4 s, 12.0 s); 113 s for hemi.7 (57.8 s, 12.0 s); 119 s for hemi.8; 118 s and 143 s for hemi.9; 118 s for hemi.10; 247 s for hemi.11; 287 s for hemi.12; 194 s for hemi.13; 124 s for hemi.14; 141 s for hemi.15, with no layer cached (58.9 s dependencies, 4.2 s `bitcoin`, 14.8 s after the patches and the crate).
 - Rebuild after changing only patches: about 15 s, because the dependency layer is cached.
 
-Base images are pinned by digest: `rust:1.93-trixie` for the build, `debian:trixie-slim` for the runtime.
+Base images are pinned by digest: `rust:1.94.1-trixie` for the build (alloy 2.5 needs Rust 1.94.1, D-049), `debian:trixie-slim` for the runtime.
 
 ## Changing a patch
 
