@@ -1,7 +1,8 @@
 /**
  * The audit's R03: before the wallet broadcasts, a first claim must have flushed not only its files but
  * the directory entries that name them, including directories it created; otherwise a power loss can drop
- * the record and a restart pays again. node:fs is wrapped to record each fsync by path and to fail one.
+ * the record and a restart pays again. node:fs is wrapped to record each fsync by path and to fail one,
+ * and to cut a write short as a full disk does (R06).
  */
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,7 +15,12 @@ import { newPaymentId } from "../src/derive.js";
 import { FilePaymentJournal } from "../src/journal.js";
 import { BTC_MAINNET } from "../src/networks.js";
 
-const fsState = vi.hoisted(() => ({ fsynced: [] as string[], paths: new Map<number, string>(), failing: undefined as string | undefined }));
+const fsState = vi.hoisted(() => ({
+  fsynced: [] as string[],
+  paths: new Map<number, string>(),
+  failing: undefined as string | undefined,
+  short: undefined as string | undefined,
+}));
 
 vi.mock("node:fs", async importOriginal => {
   const real = await importOriginal<typeof import("node:fs")>();
@@ -31,6 +37,12 @@ vi.mock("node:fs", async importOriginal => {
       real.fsyncSync(fd);
       fsState.fsynced.push(path);
     },
+    writeSync: ((fd: number, data: Uint8Array, ...rest: never[]) => {
+      if (fsState.paths.get(fd) !== fsState.short || !(data instanceof Uint8Array) || data.length < 2) {
+        return (real.writeSync as (...a: unknown[]) => number)(fd, data, ...rest);
+      }
+      return real.writeSync(fd, data, 0, Math.floor(data.length / 2));
+    }) as typeof real.writeSync,
   };
 });
 
@@ -39,6 +51,7 @@ afterAll(() => rmSync(base, { recursive: true, force: true }));
 beforeEach(() => {
   fsState.fsynced.length = 0;
   fsState.failing = undefined;
+  fsState.short = undefined;
 });
 
 function requirements(): PaymentRequirements {
@@ -103,6 +116,24 @@ describe("FilePaymentJournal durability before a broadcast", () => {
       fsState.failing = failing(file);
       const { flushedBeforePaying, pay } = wallet();
       await expect(new ExactBtcClientScheme(pay, { journal: new FilePaymentJournal(file) }).createPaymentPayload(2, requirements())).rejects.toThrow(/EIO/);
+      expect(flushedBeforePaying).toEqual([]);
+    });
+  }
+
+  for (const [what, short] of [
+    ["the claim file", (file: string, paymentId: string) => `${file}.claims/${paymentId}`],
+    ["the journal line", (file: string) => file],
+  ] as const) {
+    it(`a short write of ${what} (a full disk) stops the payment, and the paymentId stays claimed`, async () => {
+      const file = join(base, `short-${newPaymentId()}.jsonl`);
+      const req = requirements();
+      fsState.short = short(file, req.extra.paymentId as string);
+      const { flushedBeforePaying, pay } = wallet();
+      const journal = new FilePaymentJournal(file);
+      await expect(new ExactBtcClientScheme(pay, { journal }).createPaymentPayload(2, req)).rejects.toThrow(/short write/);
+      expect(flushedBeforePaying).toEqual([]);
+      fsState.short = undefined;
+      await expect(new ExactBtcClientScheme(pay, { journal }).createPaymentPayload(2, req)).rejects.toThrow(/not recorded as paid/);
       expect(flushedBeforePaying).toEqual([]);
     });
   }

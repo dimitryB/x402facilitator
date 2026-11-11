@@ -145,7 +145,8 @@ pub struct ExactBip122Requirements {
 pub struct ExactBip122Request {
     pub requirements: ExactBip122Requirements,
     pub payload: ExactBip122Payload,
-    /// `paymentPayload.accepted` as sent: with `payload`, it identifies a retry of the same payment.
+    /// `paymentPayload.accepted`, its numbers as JavaScript reads them: with `payload`, it identifies a
+    /// retry of the same payment.
     pub accepted: serde_json::Value,
 }
 
@@ -154,15 +155,33 @@ pub struct ExactBip122Request {
 type WireRequest =
     v2::VerifyRequest<v2::PaymentPayload<serde_json::Value, serde_json::Value>, serde_json::Value>;
 
-/// `extra.minConfirmations` as a buyer's JSON parser reads it: a whole number from 1 to 2^32 - 1, also when
-/// written with a zero fraction (`1.0`), which JavaScript cannot tell from `1`.
+/// `value` as JavaScript reads it: each number becomes the double a JavaScript parser holds, written without
+/// a fraction when it is whole. The buyer's SDK sends the seller's `1.0` back as `1`, and both SDKs compare
+/// terms that way, so `1.0`, `1` and `1e0` are one number here, while `1` and `2`, or `1` and `"1"`, stay
+/// different.
+fn as_javascript_reads(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Number(n) => match n.as_f64() {
+            Some(f) if f.fract() == 0.0 && f >= 0.0 && f < u64::MAX as f64 => Value::from(f as u64),
+            Some(f) if f.fract() == 0.0 && f < 0.0 && f >= i64::MIN as f64 => Value::from(f as i64),
+            Some(f) => Value::from(f),
+            None => value.clone(),
+        },
+        Value::Array(items) => Value::Array(items.iter().map(as_javascript_reads).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), as_javascript_reads(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+/// `extra.minConfirmations`: a whole number from 1 to 2^32 - 1, as JavaScript reads it (`1.0` is 1).
 fn confirmations(value: &serde_json::Value) -> Option<u32> {
-    let n = value.as_u64().or_else(|| {
-        value
-            .as_f64()
-            .filter(|f| f.fract() == 0.0 && *f >= 0.0 && *f <= f64::from(u32::MAX))
-            .map(|f| f as u64)
-    })?;
+    let n = value.as_u64()?;
     u32::try_from(n).ok().filter(|n| *n >= 1)
 }
 
@@ -170,10 +189,11 @@ fn invalid_requirements(message: impl Into<String>) -> PaymentVerificationError 
     PaymentVerificationError::InvalidPaymentRequirements(message.into())
 }
 
-/// `requirements` without its dynamic `extra.paymentId`: the seller's SDK makes a new one for every 402,
-/// so the requirements it sends alongside may carry another one than the payload accepted.
-fn without_payment_id(requirements: &serde_json::Value) -> serde_json::Value {
-    let mut requirements = requirements.clone();
+/// The terms of `requirements`, for comparing the payload's `accepted` with the seller's copy: its numbers
+/// as JavaScript reads them, and without the dynamic `extra.paymentId`, which the seller's SDK makes anew
+/// for every 402, so the requirements it sends alongside may carry another one than the payload accepted.
+fn terms(requirements: &serde_json::Value) -> serde_json::Value {
+    let mut requirements = as_javascript_reads(requirements);
     if let Some(extra) = requirements
         .get_mut("extra")
         .and_then(serde_json::Value::as_object_mut)
@@ -183,13 +203,14 @@ fn without_payment_id(requirements: &serde_json::Value) -> serde_json::Value {
     requirements
 }
 
-/// Reads `accepted` (the requirements the payload accepted) for `network`.
+/// Reads `accepted` (the requirements the payload accepted) for `network`, its numbers as JavaScript reads
+/// them.
 pub fn parse_requirements(
     accepted: &serde_json::Value,
     network: Bip122Network,
 ) -> Result<ExactBip122Requirements, PaymentVerificationError> {
     let base: v2::PaymentRequirements<String, String, String, Option<serde_json::Value>> =
-        serde_json::from_value(accepted.clone())
+        serde_json::from_value(as_javascript_reads(accepted))
             .map_err(|e| invalid_requirements(format!("accepted requirements: {e}")))?;
     if base.scheme != EXACT {
         return Err(PaymentVerificationError::UnsupportedScheme);
@@ -265,7 +286,8 @@ pub fn parse_requirements(
 /// Parses a verify or settle request for `network`, in the order the scheme checks it:
 ///
 /// 1. the request and the payload's shape (`invalid_payload`);
-/// 2. `accepted` equals the seller's requirements, except `extra.paymentId` (`invalid_payment_requirements`);
+/// 2. `accepted` equals the seller's requirements, except `extra.paymentId`, with numbers compared by value
+///    as JavaScript reads them (`invalid_payment_requirements`);
 /// 3. the accepted requirements: network (`invalid_network`), asset, amount, transfer method, flow,
 ///    payment id, address type (`invalid_payment_requirements`).
 pub fn parse_request(
@@ -279,8 +301,8 @@ pub fn parse_request(
                 "payload must be {{\"txid\": <64 hex>, \"vout\": <output index>}}: {e}"
             ))
         })?;
-    let accepted = wire.payment_payload.accepted;
-    if without_payment_id(&accepted) != without_payment_id(&wire.payment_requirements) {
+    let accepted = as_javascript_reads(&wire.payment_payload.accepted);
+    if terms(&accepted) != terms(&wire.payment_requirements) {
         return Err(PaymentVerificationError::AcceptedRequirementsMismatch);
     }
     let requirements = parse_requirements(&accepted, network)?;
@@ -427,6 +449,65 @@ pub(crate) mod tests {
         }
     }
 
+    /// The audit's R07: a seller that writes `1.0` gets `1` back from a JavaScript buyer, who has paid by
+    /// then. The two copies are the same terms.
+    #[test]
+    fn numbers_compare_by_value_as_javascript_reads_them() {
+        let payload = json!({ "txid": TXID, "vout": 1 });
+        let mut seller = requirements();
+        seller["maxTimeoutSeconds"] = json!(7200.0);
+        seller["extra"]["minConfirmations"] = json!(1.0);
+        seller["extra"]["note"] = json!({ "weights": [2.0, 0.5, -3.0] });
+        let mut buyer = requirements();
+        buyer["extra"]["note"] = json!({ "weights": [2, 0.5, -3] });
+        let exponent: serde_json::Value = serde_json::from_str(
+            &buyer
+                .to_string()
+                .replace("\"minConfirmations\":1", "\"minConfirmations\":1e0"),
+        )
+        .unwrap();
+        assert_eq!(exponent["extra"]["minConfirmations"], json!(1.0));
+        // A JavaScript buyer's integers against the seller's fractions; a buyer that keeps the fractions; an
+        // exponent.
+        let pairs = [
+            (buyer.clone(), seller.clone()),
+            (seller.clone(), buyer.clone()),
+            (exponent, buyer.clone()),
+        ];
+        let mut keys = Vec::new();
+        for (accepted, seller) in pairs {
+            let parsed = parse(&request_json(
+                accepted.clone(),
+                payload.clone(),
+                seller.clone(),
+            ))
+            .unwrap_or_else(|e| panic!("{accepted} against {seller}: {e:?}"));
+            assert_eq!(parsed.requirements.max_timeout_seconds, 7200);
+            assert_eq!(parsed.requirements.min_confirmations, Some(1));
+            keys.push(parsed.accepted);
+        }
+        // A retry that writes its numbers another way is still the same payment.
+        assert!(keys.iter().all(|key| *key == keys[0]), "{keys:?}");
+
+        // Different values stay different, also between a number and a string.
+        let differences = [
+            ("minConfirmations", json!(2.0)),
+            ("minConfirmations", json!(1.5)),
+            ("minConfirmations", json!("1")),
+            ("note", json!({ "weights": [2.5, 0.5, -3] })),
+        ];
+        for (key, value) in differences {
+            let mut seller = seller.clone();
+            seller["extra"][key] = value;
+            let request = request_json(buyer.clone(), payload.clone(), seller.clone());
+            assert_eq!(
+                parse(&request).unwrap_err(),
+                ErrorReason::InvalidPaymentRequirements,
+                "{seller}"
+            );
+        }
+    }
+
     #[test]
     fn malformed_payloads_are_invalid_payload() {
         let payloads = [
@@ -553,17 +634,33 @@ pub(crate) mod tests {
             serde_json::from_str(include_str!("../../requirements-cases.json")).unwrap();
         let cases = file["cases"].as_array().unwrap();
         assert!(cases.len() >= 20);
-        for case in cases {
-            let name = case["name"].as_str().unwrap();
-            let mut accepted = file["base"].clone();
-            let extra = accepted["extra"].as_object_mut().unwrap();
-            for (key, value) in case["set"].as_object().into_iter().flatten() {
+        let changed = |changes: &serde_json::Value, case: &serde_json::Value| {
+            let mut requirements = file["base"].clone();
+            let extra = requirements["extra"].as_object_mut().unwrap();
+            for (key, value) in changes.as_object().into_iter().flatten() {
                 extra.insert(key.clone(), value.clone());
             }
             for key in case["remove"].as_array().into_iter().flatten() {
                 extra.remove(key.as_str().unwrap());
             }
-            let parsed = parse_requirements(&accepted, Bip122Network::Mainnet);
+            requirements
+        };
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            // The seller's requirements as written, with the fresh paymentId of its rebuilt 402, and the
+            // payload's accepted as a JavaScript buyer sends them back: `sent` where it writes a value
+            // differently (the btc test checks that it does), the seller's values otherwise.
+            let mut seller = changed(&case["set"], case);
+            seller["extra"]["paymentId"] = json!("ffeeddccbbaa99887766554433221100");
+            let sent = if case["sent"].is_null() {
+                &case["set"]
+            } else {
+                &case["sent"]
+            };
+            let accepted = changed(sent, case);
+            let request = request_json(accepted, json!({ "txid": TXID, "vout": 1 }), seller);
+            let parsed =
+                parse_request(&request, Bip122Network::Mainnet).map(|parsed| parsed.requirements);
             if case["accept"] == json!(true) {
                 let parsed = parsed.unwrap_or_else(|e| panic!("{name}: {e}"));
                 let address_type = serde_json::to_value(parsed.address_type).unwrap();

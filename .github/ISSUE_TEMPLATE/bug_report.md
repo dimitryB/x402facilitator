@@ -18,7 +18,7 @@ labels: bug
 
 **Where**
 
-- Commit or image tag (for example `hemi-x402-facilitator:e75adda-hemi.18`):
+- Commit or image tag (for example `hemi-x402-facilitator:e75adda-hemi.19`):
 - Network: Hemi mainnet / Hemi testnet / Bitcoin mainnet / local fork
 - Component: facilitator image / contracts / seller / buyer / btc package / tests / docs
 - OS, Docker runtime, Node and Foundry versions:
