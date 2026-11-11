@@ -1,6 +1,6 @@
 # sdk-patch
 
-This patch registers Hemi in the upstream x402 SDKs ([x402-foundation/x402](https://github.com/x402-foundation/x402)) for TypeScript, Go and Python, so dollar-string pricing such as `price: "$0.001"` works on Hemi without extra configuration. It is item 5 of the architecture in [docs/BRIEF.md](../docs/BRIEF.md). It was submitted on 2026-11-10 as [x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213). The PR stays a draft until the owner has reviewed it, as upstream's rules for AI-assisted contributions require (DECISIONS.md D-045).
+This patch registers Hemi in the upstream x402 SDKs ([x402-foundation/x402](https://github.com/x402-foundation/x402)) for TypeScript, Go and Python, so dollar-string pricing such as `price: "$0.001"` works on Hemi without extra configuration. It is item 5 of the architecture in [docs/BRIEF.md](../docs/BRIEF.md). It was submitted on 2026-11-10 as [x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213) and merged on 2026-11-11 as upstream commit `4f674517`, which makes the same change as `0001-hemi-networks.patch`. No SDK release includes it yet: the newest are `@x402/evm` 2.30.0, Go `go/v2.30.0` and PyPI `x402` 2.27.0, all from 2026-11-04 or earlier (DECISIONS.md D-053).
 
 | File | What it is |
 |------|------------|
@@ -17,7 +17,8 @@ The PR branch is `hemi-default-stablecoins` on the fork [`dimitryB/x402`](https:
   2. drop the unit test in `defaultAssets.test.ts` that asserted the Hemi values (the `parsePrice` tests in `server.test.ts` stay);
   3. add Hemi to the Go and Python default asset tables too, each with a changelog fragment.
 - **`fe85cfb`, 2026-11-11:** GitHub's "Update branch", merging upstream `main` at `404d91c3` into the PR branch. Upstream requires signed commits, and this machine has no signing key, so commits are made through GitHub (GraphQL `createCommitOnBranch`, which GitHub signs), and that API can only add a commit on top of the branch. Upstream had meanwhile added `ethereum` and `flare` to Python's v1 network list (#4212), where Hemi's names go, so a commit on the old base would have conflicted.
-- **`a580c10`, 2026-11-11:** the review commit, `address review: release as patch, drop the Hemi value test, add Go and Python`, verified. The branch's tree (`b562833`) is identical to this patch on `404d91c3`; the tests below ran on `327ff3cb`, and `404d91c3` only adds a Go Gin fix. The PR description was replaced with `PR.md` at the same time. Upstream squashes PRs when it merges them.
+- **`a580c10`, 2026-11-11:** the review commit, `address review: release as patch, drop the Hemi value test, add Go and Python`, verified. The branch's tree (`b562833`) is identical to this patch on `404d91c3`; the tests below ran on `327ff3cb`, and `404d91c3` only adds a Go Gin fix. The PR description was replaced with `PR.md` at the same time.
+- **`4f674517`, 2026-11-11:** the merge. The maintainer `phdargen` marked the PR ready for review at 20:18 UTC, approved it at 21:05 and squash-merged it at 21:05:42 as `feat(evm): add Hemi default stablecoins (#4213)`, on parent `d69ee2f7`. Its diff touches the same 11 files with the same added lines as `0001-hemi-networks.patch` (+88, nothing removed).
 
 The patch follows the conventions of the earlier default-asset PRs:
 

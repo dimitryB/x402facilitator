@@ -2061,6 +2061,15 @@ binary, builder stage vs hemi.19    sha256 59b715eea65b2154ef4e28e9fca7255ac8387
 Rust tests (CI's commands, --network none)   182 passed, 0 failed, 27 ignored
 ```
 
+## D-053. The SDK patch is merged upstream, not yet released
+
+[x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213), the SDK patch (D-045 and the review of 2026-11-11 in `sdk-patch/README.md`), is merged. The repository's docs called it a draft until now.
+
+- **What happened.** The maintainer `phdargen` marked the PR ready for review at 20:18 UTC on 2026-11-11, approved it at 21:05:19 and merged it at 21:05:42. Upstream squashed it into `4f674517` (`feat(evm): add Hemi default stablecoins (#4213)`, parent `d69ee2f7`), authored as Dimitry B. The PR description is the one in `sdk-patch/PR.md`, including its line that the PR would stay a draft until the owner had reviewed it; the maintainer, not the owner, took it out of draft.
+- **It is our patch.** `git diff 4f674517^ 4f674517` touches the same 11 files as `sdk-patch/0001-hemi-networks.patch`, with the same added and removed lines in each (88 added, none removed). Compared file by file in `.scratch/sdk-pr`, after fetching upstream `main`, whose head was still `4f674517`.
+- **Not released.** The newest releases predate the merge: `@x402/evm` 2.30.0 on npm (2026-11-04), `x402` 2.27.0 on PyPI (2026-11-04), and the Go tag `go/v2.30.0`. Until a release includes it, sellers still price Hemi with an explicit asset, as the README says; after it, `price: "$0.001"` resolves to USDC.e on both Hemi chains with that release's `@x402/evm`.
+- **Docs changed.** The README's file table and pricing note, `NOTICE`, `sdk-patch/README.md` (a bullet for the merge commit) and the header of `sdk-patch/PR.md`. `docs/BRIEF.md` still says "kept as a draft upstream PR": it is the original brief and stays as written.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

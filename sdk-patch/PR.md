@@ -1,6 +1,6 @@
 # Upstream PR
 
-Opened on 2026-11-10 as a draft: [x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213), from `dimitryB/x402` branch `hemi-default-stablecoins` into `main`. Below are the title and the description, revised on 2026-11-11 for the review (TypeScript, Go and Python; patch release; no value test). The revision was posted with the review commit `a580c10` the same day; the first version is in git history.
+Opened on 2026-11-10 as a draft: [x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213), from `dimitryB/x402` branch `hemi-default-stablecoins` into `main`. Below are the title and the description, revised on 2026-11-11 for the review (TypeScript, Go and Python; patch release; no value test). The revision was posted with the review commit `a580c10` the same day; the first version is in git history. The maintainer `phdargen` marked the PR ready for review, approved it and merged it on 2026-11-11 (upstream commit `4f674517`), with this description unchanged; its line about staying a draft is as posted.
 
 ## Title
 

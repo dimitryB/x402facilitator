@@ -18,8 +18,8 @@ This project builds on third-party work:
   x402-rs at a pinned commit. The patches in facilitator/x402-rs/patches and
   facilitator/x402-rs/build modify it, and the crate in
   facilitator/x402-rs/crates/x402-chain-bip122 is built inside its workspace.
-- x402 (https://github.com/x402-foundation/x402), Apache-2.0. sdk-patch is a draft
-  change to its TypeScript SDK.
+- x402 (https://github.com/x402-foundation/x402), Apache-2.0. sdk-patch is a change
+  to its TypeScript, Go and Python SDKs, merged upstream as x402-foundation/x402#4213.
 - hemilabs/bitcoin-tunnel-contracts (https://github.com/hemilabs/bitcoin-tunnel-contracts),
   MIT, Copyright (c) 2025 Hemi Labs, Inc. The interface in
   contracts/src/btc/IHbkReader.sol is taken from its IBitcoinKit.sol and
