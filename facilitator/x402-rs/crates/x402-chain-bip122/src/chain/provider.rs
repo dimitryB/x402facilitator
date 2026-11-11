@@ -67,10 +67,12 @@ impl Bip122ChainProvider {
                 chain = %provider.network, hemi = %hemi_chain, settler = %settler, error = %e,
                 "bip122 settler unusable; this network is not listed in /supported and its verify and settle are refused"
             ),
-            Err(crate::v2_bip122_exact::settler::DeploymentError::Unreachable(e)) => tracing::warn!(
-                chain = %provider.network, hemi = %hemi_chain, settler = %settler, error = %e,
-                "bip122 settler check could not run; this network is listed once a check passes"
-            ),
+            Err(crate::v2_bip122_exact::settler::DeploymentError::Unreachable(e)) => {
+                tracing::warn!(
+                    chain = %provider.network, hemi = %hemi_chain, settler = %settler, error = %e,
+                    "bip122 settler check could not run; this network is listed once a check passes"
+                )
+            }
         }
         let _ = check;
         Ok(provider)
@@ -100,7 +102,8 @@ impl Bip122ChainProvider {
 }
 
 impl ChainProviderOps for Bip122ChainProvider {
-    /// The Hemi signers: they send the settlements, and the settler accepts only its `SETTLER`.
+    /// The Hemi chain's signers. Settlements go only from the one the settler accepts, its `SETTLER`,
+    /// which is also the only signer the scheme lists in `/supported`.
     fn signer_addresses(&self) -> Vec<String> {
         ChainProviderOps::signer_addresses(&*self.hemi)
     }

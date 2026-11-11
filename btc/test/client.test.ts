@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -153,6 +153,54 @@ describe("clients that share a journal pay once", () => {
     expect(results.map(r => r.status).sort()).toEqual(["fulfilled", "rejected"]);
     const lines = readFileSync(file, "utf8").trim().split("\n").map(l => JSON.parse(l));
     expect(lines.map(l => l.status)).toEqual(["paying", "paid"]);
+  });
+
+  /** Two clients paying `req` at once through two journals; returns the wallet calls and the outcomes. */
+  async function payThrough(journals: FilePaymentJournal[], req = requirements()) {
+    const { calls, pay } = recorder(20);
+    const results = await Promise.allSettled(journals.map(journal => new ExactBtcClientScheme(pay, { journal }).createPaymentPayload(2, req)));
+    return { calls, statuses: results.map(r => r.status).sort() };
+  }
+
+  it("a journal opened by its path and by a symlink to it: one claim, one payment (the audit's R02)", async () => {
+    const file = join(dir, "aliased.jsonl");
+    writeFileSync(file, "");
+    const link = join(dir, "aliased-link.jsonl");
+    symlinkSync(file, link);
+    const { calls, statuses } = await payThrough([new FilePaymentJournal(file), new FilePaymentJournal(link)]);
+    expect(calls).toHaveLength(1);
+    expect(statuses).toEqual(["fulfilled", "rejected"]);
+    expect(new FilePaymentJournal(link).claims).toBe(new FilePaymentJournal(file).claims);
+  });
+
+  it("a journal reached through a symlinked directory, before the journal exists: one payment", async () => {
+    const real = join(dir, "real-dir");
+    mkdirSync(real);
+    symlinkSync(real, join(dir, "dir-link"));
+    const { calls } = await payThrough([new FilePaymentJournal(join(real, "j.jsonl")), new FilePaymentJournal(join(dir, "dir-link", "j.jsonl"))]);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a symlink to a journal that does not exist yet: one payment, and the journal is created at the target", async () => {
+    const target = join(dir, "dangling-target.jsonl");
+    const link = join(dir, "dangling.jsonl");
+    symlinkSync(target, link);
+    const { calls } = await payThrough([new FilePaymentJournal(link), new FilePaymentJournal(target)]);
+    expect(calls).toHaveLength(1);
+    expect(readFileSync(target, "utf8")).toContain('"status":"paid"');
+  });
+
+  it("a hard-linked journal is refused before paying: its links cannot be told apart", async () => {
+    const file = join(dir, "hard.jsonl");
+    writeFileSync(file, "");
+    linkSync(file, join(dir, "hard-link.jsonl"));
+    for (const path of [file, join(dir, "hard-link.jsonl")]) {
+      const { calls, pay } = recorder();
+      await expect(new ExactBtcClientScheme(pay, { journal: new FilePaymentJournal(path) }).createPaymentPayload(2, requirements())).rejects.toThrow(
+        /has 2 hard links/,
+      );
+      expect(calls).toEqual([]);
+    }
   });
 
   it("a client that stopped between its claim and its journal line still blocks the next", async () => {

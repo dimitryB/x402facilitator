@@ -92,8 +92,10 @@ export function checkBtcRequirements(requirements: PaymentRequirements): Checked
   const flow = extra?.paymentFlow;
   if (flow !== "upfront") throw new Error(`extra.paymentFlow must be "upfront", got ${JSON.stringify(flow)}`);
   if (!isPaymentId(extra?.paymentId)) throw new Error(`extra.paymentId must be 32 lowercase hex chars, got ${JSON.stringify(extra?.paymentId)}`);
-  const addressType = extra?.addressType ?? DEFAULT_ADDRESS_TYPE;
-  if (!isAddressType(addressType)) throw new Error(`extra.addressType ${JSON.stringify(addressType)} is not supported`);
+  // Optional fields default only when absent: the facilitator rejects an explicit null, so paying for one
+  // would pay for requirements it then refuses.
+  const addressType = extra?.addressType === undefined ? DEFAULT_ADDRESS_TYPE : extra.addressType;
+  if (!isAddressType(addressType)) throw new Error(`extra.addressType must be "p2wpkh" or "p2tr", got ${JSON.stringify(addressType)}`);
   const minConfirmations = extra?.minConfirmations;
   if (minConfirmations !== undefined && !(Number.isInteger(minConfirmations) && (minConfirmations as number) >= 1 && (minConfirmations as number) <= 0xffffffff)) {
     throw new Error(`extra.minConfirmations must be a whole number >= 1, got ${JSON.stringify(minConfirmations)}`);

@@ -136,7 +136,7 @@ Bitcoin L1 payments are off by default, which is why the fork commands above lis
 
 If a contract or key is missing, the container exits with the reason. A missing contract shows as `Contract at address … does not exist`. An empty `FACILITATOR_*_PRIVATE_KEY` shows as `Invalid evm private key: invalid string length`. If every RPC stalls at startup, it exits after about 10 seconds with `error sending request for url (…)`. `docker compose logs facilitator` shows it, and the restart policy gives up after 5 tries instead of looping silently, so after an RPC outage at startup, start it again by hand.
 
-The image, `hemi-x402-facilitator:e75adda-hemi.17`, is x402-rs at commit `e75adda` plus thirty small patches and one new crate (`x402-chain-bip122`), built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it. The build fetches x402-rs from GitHub, the crates from crates.io and the pinned `rust:1.94.1-trixie` image (about 2.2 GB), then compiles for 2 to 4 minutes on a 4-CPU machine. Add `--build` after changing a patch. Forks also need the Hemi public RPCs to be reachable. The service runs as an unprivileged user (uid 10001), and Compose gives the container no Linux capabilities, no privilege escalation and a read-only root filesystem (D-047).
+The image, `hemi-x402-facilitator:e75adda-hemi.18`, is x402-rs at commit `e75adda` plus thirty small patches and one new crate (`x402-chain-bip122`), built locally from [`facilitator/Dockerfile`](facilitator/Dockerfile). The first `up` builds it. The build fetches x402-rs from GitHub, the crates from crates.io and the pinned `rust:1.94.1-trixie` image (about 2.2 GB), then compiles for 2 to 4 minutes on a 4-CPU machine. Add `--build` after changing a patch. Forks also need the Hemi public RPCs to be reachable. The service runs as an unprivileged user (uid 10001), and Compose gives the container no Linux capabilities, no privilege escalation and a read-only root filesystem (D-047).
 
 Stock x402-rs does not return the x402 v2 spec's error shapes, and on a quiet Hemi it can send a settlement that is never mined. The patches fix both:
 
@@ -382,15 +382,16 @@ The end-to-end suite starts both forks and the facilitator image from this repo.
 - that a rejected send, and a send no RPC can find, free the nonce for the next settlement, and that a failed tip read sends nothing
 - that a fast RPC with no receipt, or frozen at an old block, hides a mined payment neither from the first settle nor from a retry
 - native BTC on Bitcoin L1 (`11-btc-l1`, phase 2): payments are fabricated in the mock hBK that `scripts/fork.sh` places at the real hBK address, and settled through `X402BtcSettler` on the fork. The file covers `/supported`; verify and settle with the Bitcoin txid, `settledBy`, the `Settled` event and replay; a confirmations boundary, then success with the same payload; unknown txid, missing output, wrong address (another paymentId, a decoy output), one sat short, overpayment, p2tr; the other network's key, an out-of-policy `minConfirmations`, malformed payloads; and the stock seller engine with `ExactBtcServerScheme` paid by `ExactBtcClientScheme`: 402 while unconfirmed, served once after, 402 on reuse
+- that with a second Hemi signer, one the settler does not accept, every Bitcoin settlement still goes from the settler's `SETTLER` while EVM settlements rotate between both, and `/supported` lists only the `SETTLER` for the Bitcoin network (`12-btc-settler-signer`, D-050)
 
-Latest results, from 2026-11-10 on hemi.17 (D-046, D-047, D-049); the first runs with phase 2 merged were on hemi.15 on 2026-11-09 (D-036), and the 2026-11-02 run of hemi.14 had 13 files, 116 tests and 17 forge tests:
+Latest results, from 2026-11-11 on hemi.18 (D-050); the first runs with phase 2 merged were on hemi.15 on 2026-11-09 (D-036), and the 2026-11-02 run of hemi.14 had 13 files, 116 tests and 17 forge tests:
 
 | Suite | Result |
 |------|------|
-| `npm test -w tests` | 14 files, 147 tests passed, 0 failed (375 s): the 116 tests of hemi.14 plus the 31 of `11-btc-l1` |
-| Rust tests on the patched tree (as CI runs them) | 179 passed, 27 ignored, 0 failed |
+| `npm test -w tests` | 15 files, 149 tests passed, 0 failed (411 s): the 116 tests of hemi.14, the 31 of `11-btc-l1` and the 2 of `12-btc-settler-signer` |
+| Rust tests on the patched tree (as CI runs them) | 181 passed, 27 ignored, 0 failed |
 | `forge test` (2026-11-09) | 85 passed, 0 failed (17 existing, 49 for `X402BtcSettler`, its adapter, mock and deployment, 19 ported from the pre-deployment security review, D-038) |
-| `npm test -w btc` | 103 passed, 0 failed |
+| `npm test -w btc` | 136 passed, 0 failed |
 | `buyer/demo-fork.sh` | all five payments settled, the fifth being 1000 sats of fabricated BTC on the mainnet fork through the mock hBK and `X402BtcSettler`; payTo received exactly the price each time. Before patch 0022, hemi.9 settled all four in 20 of 20 runs |
 
 ## Definition of done

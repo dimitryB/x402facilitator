@@ -23,9 +23,10 @@
 //! The network is listed in `/supported`, and verify and settle run, only once the settler check has
 //! passed: the contract answers `SETTLER()` and its `SETTLER` is one of the Hemi signers (D-047). A
 //! buyer pays before anyone settles, so advertising a settler that would revert lets a buyer pay for
-//! nothing.
+//! nothing. For the same reason every settlement is sent from that `SETTLER`, not from whichever signer
+//! the Hemi provider's rotation would pick next, and `/supported` lists only that signer (D-050).
 
-use alloy_primitives::{B256, Bytes, TxHash, keccak256};
+use alloy_primitives::{Address, B256, Bytes, TxHash, keccak256};
 use bitcoin::secp256k1::{Secp256k1, VerifyOnly};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -94,8 +95,9 @@ const RECHECK: Duration = Duration::from_secs(30);
 /// What the facilitator knows about its settler (see [`V2Bip122ExactFacilitator::ready`]).
 #[derive(Debug, Clone)]
 enum Deployment {
-    /// The check passed. Final: the contract's `SETTLER` and the signers cannot change.
-    Ready,
+    /// The check passed, with the contract's `SETTLER`: the signer every settlement is sent from. Final:
+    /// the contract's `SETTLER` and the signers cannot change.
+    Ready(Address),
     /// The check ran and failed. Final until restart.
     Invalid(String),
     /// Not checked yet (`checked: None`), or the last check could not reach Hemi.
@@ -136,21 +138,24 @@ impl<S: Settler> V2Bip122ExactFacilitator<S> {
     /// Whether the settler can record payments. Checked on first use and remembered: a passed or a
     /// failed check is final, and a check that could not reach Hemi is repeated at most every
     /// `recheck`. Until it passes, the network is not listed and verify and settle are refused.
-    async fn ready(&self) -> Result<(), DeploymentError> {
+    /// Returns the contract's `SETTLER`, the signer settlements must be sent from.
+    async fn ready(&self) -> Result<Address, DeploymentError> {
         let known = |state: &Deployment| match state {
-            Deployment::Ready => Some(Ok(())),
+            Deployment::Ready(settler) => Some(Ok(*settler)),
             Deployment::Invalid(reason) => Some(Err(DeploymentError::Invalid(reason.clone()))),
             Deployment::Unknown {
                 reason,
                 checked: Some(at),
-            } if at.elapsed() < self.recheck => Some(Err(DeploymentError::Unreachable(reason.clone()))),
+            } if at.elapsed() < self.recheck => {
+                Some(Err(DeploymentError::Unreachable(reason.clone())))
+            }
             Deployment::Unknown { .. } => None,
         };
         if let Some(known) = known(&self.lock_deployment()) {
             return known;
         }
         let next = match self.settler.check_deployment().await {
-            Ok(_) => Deployment::Ready,
+            Ok(settler) => Deployment::Ready(settler),
             Err(DeploymentError::Invalid(reason)) => Deployment::Invalid(reason),
             Err(DeploymentError::Unreachable(reason)) => Deployment::Unknown {
                 reason,
@@ -162,7 +167,10 @@ impl<S: Settler> V2Bip122ExactFacilitator<S> {
         if matches!(*state, Deployment::Unknown { .. }) {
             #[cfg(feature = "telemetry")]
             match &next {
-                Deployment::Ready => tracing::info!(chain = %self.network, "bip122 settler check passed"),
+                Deployment::Ready(settler) => tracing::info!(
+                    chain = %self.network, settler = %settler,
+                    "bip122 settler check passed; settlements are sent from its SETTLER"
+                ),
                 Deployment::Invalid(reason) => tracing::error!(
                     chain = %self.network, error = %reason,
                     "bip122 settler unusable; not listing this network"
@@ -181,7 +189,9 @@ impl<S: Settler> V2Bip122ExactFacilitator<S> {
     }
 
     fn lock_deployment(&self) -> std::sync::MutexGuard<'_, Deployment> {
-        self.deployment.lock().unwrap_or_else(PoisonError::into_inner)
+        self.deployment
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Reads the request and checks everything that needs neither the chain nor the derivation.
@@ -295,6 +305,7 @@ impl<S: Settler> V2Bip122ExactFacilitator<S> {
     async fn settle_prepared(
         &self,
         prepared: &Prepared,
+        from: Address,
         in_flight: &InFlight<'_>,
         caller: &SettleCaller,
     ) -> Result<proto::SettleResponse, X402SchemeFacilitatorError> {
@@ -303,7 +314,7 @@ impl<S: Settler> V2Bip122ExactFacilitator<S> {
         let payment_ref = B256::from(payment_ref(&prepared.request.requirements.payment_id));
         let outcome = self
             .settler
-            .settle(&prepared.query, payment_ref)
+            .settle(&prepared.query, payment_ref, from)
             .await
             .map_err(|e| X402SchemeFacilitatorError::OnchainFailure(e.to_string()))?;
         match outcome {
@@ -393,9 +404,9 @@ fn verdict_error(check: &Check, prepared: &Prepared, hemi: &ChainId) -> X402Sche
 fn not_ready(error: DeploymentError) -> X402SchemeFacilitatorError {
     match error {
         DeploymentError::Invalid(_) => PaymentVerificationError::UnsupportedChain.into(),
-        DeploymentError::Unreachable(reason) => X402SchemeFacilitatorError::OnchainFailure(format!(
-            "the settler could not be checked: {reason}"
-        )),
+        DeploymentError::Unreachable(reason) => X402SchemeFacilitatorError::OnchainFailure(
+            format!("the settler could not be checked: {reason}"),
+        ),
     }
 }
 
@@ -471,7 +482,7 @@ impl<S: Settler> X402SchemeFacilitator for V2Bip122ExactFacilitator<S> {
         // request that fails its checks, such as one with a forged paymentId, must never hold the record,
         // or a watcher could block a payment's settlement for the length of an eth_call, again and again
         // (D-037). Two requests that both pass still race at `begin`, and one of them wins.
-        self.ready().await.map_err(not_ready)?;
+        let from = self.ready().await.map_err(not_ready)?;
         let prepared = self.prepare(request, min_confirmations)?;
         self.check(&prepared).await?;
         let in_flight_guard = match self.pending.begin(id, key) {
@@ -487,19 +498,19 @@ impl<S: Settler> X402SchemeFacilitator for V2Bip122ExactFacilitator<S> {
             }
             Err(record) => return Err(in_flight(record).into()),
         };
-        self.settle_prepared(&prepared, &in_flight_guard, &caller)
+        self.settle_prepared(&prepared, from, &in_flight_guard, &caller)
             .await
     }
 
     async fn supported(&self) -> Result<proto::SupportedResponse, X402SchemeFacilitatorError> {
         let chain_id = self.network.chain_id();
-        if self.ready().await.is_err() {
+        let Ok(settler) = self.ready().await else {
             return Ok(proto::SupportedResponse {
                 kinds: vec![],
                 extensions: vec![],
                 signers: HashMap::new(),
             });
-        }
+        };
         let extra = V2Bip122ExactSupportedExtra {
             asset: BTC,
             asset_transfer_method: UTXO,
@@ -515,7 +526,8 @@ impl<S: Settler> X402SchemeFacilitator for V2Bip122ExactFacilitator<S> {
             network: chain_id.to_string(),
             extra: serde_json::to_value(extra).ok(),
         }];
-        let signers = HashMap::from([(chain_id, self.settler.signer_addresses())]);
+        // The one Hemi signer that records these payments, whatever other signers the Hemi chain has.
+        let signers = HashMap::from([(chain_id, vec![settler.to_string()])]);
         Ok(proto::SupportedResponse {
             kinds,
             extensions: vec![],
@@ -558,6 +570,10 @@ mod tests {
         receipts: HashMap<TxHash, bool>,
         /// Sent settles: (query, paymentRef, hash).
         sent: Vec<(SettleQuery, B256, TxHash)>,
+        /// The sender of each sent settle.
+        senders: Vec<Address>,
+        /// The contract's `SETTLER`, as `check_deployment` returns it.
+        settler_signer: Address,
         verified: Vec<SettleQuery>,
         rpc_down: bool,
         /// What `check_deployment` answers: None passes.
@@ -579,6 +595,8 @@ mod tests {
                 next: Next::Mine,
                 receipts: HashMap::new(),
                 sent: vec![],
+                senders: vec![],
+                settler_signer: Address::repeat_byte(0x51),
                 verified: vec![],
                 rpc_down: false,
                 deployment: None,
@@ -613,14 +631,11 @@ mod tests {
         fn hemi_chain(&self) -> ChainId {
             ChainId::new("eip155", "43111")
         }
-        fn signer_addresses(&self) -> Vec<String> {
-            vec![Address::repeat_byte(0x51).to_string()]
-        }
         async fn check_deployment(&self) -> Result<Address, DeploymentError> {
             let mut state = self.state();
             state.deployment_checks += 1;
             match &state.deployment {
-                None => Ok(Address::repeat_byte(0x51)),
+                None => Ok(state.settler_signer),
                 Some(error) => Err(error.clone()),
             }
         }
@@ -655,8 +670,10 @@ mod tests {
             &self,
             query: &SettleQuery,
             payment_ref: B256,
+            from: Address,
         ) -> Result<SettleOutcome, crate::v2_bip122_exact::settler::SettlerError> {
             let mut state = self.state();
+            state.senders.push(from);
             let transaction = TxHash::repeat_byte(0xa0 + state.sent.len() as u8);
             match state.next {
                 Next::Fail => {
@@ -1078,6 +1095,30 @@ mod tests {
         assert_eq!(json["extensions"], json!([]));
     }
 
+    /// The audit's R01: with several Hemi signers, only the contract's SETTLER may send settle(). The
+    /// provider rotates signers for every transaction without a sender, so each settlement names it.
+    #[tokio::test]
+    async fn settlements_are_sent_from_the_settler_s_signer_only() {
+        let (facilitator, settler) = facilitator();
+        settler.state().settler_signer = Address::repeat_byte(0x52);
+        for vout in 0..4u32 {
+            let mut accepted = requirements();
+            accepted["extra"]["paymentId"] = json!(format!("{:032x}", vout + 1));
+            let request = request_json(
+                accepted.clone(),
+                json!({ "txid": TXID, "vout": vout }),
+                accepted,
+            );
+            facilitator.settle(&request).await.unwrap();
+        }
+        assert_eq!(settler.state().senders, vec![Address::repeat_byte(0x52); 4]);
+        let supported = serde_json::to_value(facilitator.supported().await.unwrap()).unwrap();
+        assert_eq!(
+            supported["signers"],
+            json!({ "bip122:000000000019d6689c085ae165831e93": [Address::repeat_byte(0x52).to_string()] })
+        );
+    }
+
     #[tokio::test]
     async fn the_settler_is_checked_once_when_it_passes() {
         let (facilitator, settler) = facilitator();
@@ -1115,7 +1156,8 @@ mod tests {
     #[tokio::test]
     async fn a_check_that_cannot_reach_hemi_is_repeated_and_the_network_is_listed_once_it_passes() {
         let (mut facilitator, settler) = facilitator();
-        settler.state().deployment = Some(DeploymentError::Unreachable("connection refused".into()));
+        settler.state().deployment =
+            Some(DeploymentError::Unreachable("connection refused".into()));
         let supported = serde_json::to_value(facilitator.supported().await.unwrap()).unwrap();
         assert_eq!(supported["kinds"], json!([]));
         assert!(matches!(
@@ -1129,7 +1171,10 @@ mod tests {
         settler.state().deployment = None;
         facilitator.recheck = Duration::ZERO;
         let supported = serde_json::to_value(facilitator.supported().await.unwrap()).unwrap();
-        assert_eq!(supported["kinds"][0]["network"], json!("bip122:000000000019d6689c085ae165831e93"));
+        assert_eq!(
+            supported["kinds"][0]["network"],
+            json!("bip122:000000000019d6689c085ae165831e93")
+        );
         assert_eq!(settler.state().deployment_checks, 2);
         facilitator.settle(&request()).await.unwrap();
         assert_eq!(settler.sent(), 1);

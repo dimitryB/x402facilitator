@@ -1961,6 +1961,52 @@ npm run test:e2e              Test Files 14 passed (14), Tests 147 passed (147),
 buyer/demo-fork.sh            exit 0: all five payments settled
 ```
 
+## D-050. Audit follow-up: Bitcoin settlements from the `SETTLER`, one journal claim per file, nulls refused, `block-buffer` 0.12.1
+
+The audit's follow-up review of 2026-11-11 (`docs/OPEN_SOURCE_AUDIT_2026-11-10.md`, at `5e7e49a`) found five P2 gaps in the earlier fixes. Each was checked against the code before it was fixed; all five held.
+
+**R01: a Bitcoin settlement could go from a signer the settler refuses.**
+- `check_deployment` accepted the settler when its `SETTLER` was any of the Hemi chain's signers, but `settle()` built its `MetaTransaction` without a sender, so the shared Hemi provider took the next signer in its rotation. With two signers, every other Bitcoin settlement reverted `NotSettler` after the buyer had paid on Bitcoin (the audit saw 500, 200, 500, 200).
+- Now `Deployment::Ready` keeps the `SETTLER` the check read, `Settler::settle` takes it as `from`, and the Hemi settler sends with `MetaTransaction::with_from`. `send_transaction` uses a given sender as is and does not advance the rotation, so EVM settlements keep rotating among all signers. `/supported` lists only the `SETTLER` under the Bitcoin network; the Hemi chain still lists every signer.
+- The other fix the audit offered, refusing several signers for this scheme, was not taken: a facilitator may well want several signers for its EVM settlements.
+- Tests: a unit test (four settlements, the mock's `SETTLER` the second of two signers, every sender recorded), and `tests/e2e/12-btc-settler-signer.test.ts`, which recreates the facilitator with anvil #4 as a second mainnet signer ahead of the usual one and alternates EVM and Bitcoin settlements. Each round is one EVM settlement and then two Bitcoin ones back to back. Built without the sender (the hemi.17 behaviour), the file failed as the audit did: round 0's second Bitcoin settlement answered HTTP 500 `unexpected_settle_error`, its `settle()` reverting `NotSettler(0x15d3…6a65)`, anvil #4. A first version alternated one EVM and one Bitcoin settlement; on the old build that put every Bitcoin settlement on the `SETTLER`, and only the EVM senders showed the bug, hence the two in a row.
+
+**R02: a symlink to the journal had its own claims directory.**
+- Claims lived at `<path as given>.claims`, so a client that opened the journal through a symlink claimed beside the symlink, and both clients paid. The claims directory is now beside the journal's real path, with every symlink resolved, also before the journal exists (a dangling symlink is followed to its target, a missing directory resolved through its nearest existing parent).
+- Hard links cannot be resolved that way: two links are two equally real paths. `claim` refuses a journal file with more than one link, before paying, with a message that says to keep one path.
+- Tests: a symlink to the file, a symlinked directory above a journal that does not exist yet, a dangling symlink, and a hard link (refused through either link, no wallet call). The first, third and fourth failed on the old journal; the symlinked directory already worked, since the operating system resolves it.
+
+**R03: a first claim's directory entries were not flushed.**
+- `writeDurably` fsynced each file but no directory, so after a power loss the new journal, the new claims directory or the claim file could be missing although their contents had been flushed, and a restart would pay again. Before `claim` returns now: the journal file is created and flushed with its directory if it was missing; every directory `claim` creates has its parent flushed; and the claims directory and the journal's directory are flushed after each claim, whether or not they are new, so a claim made after another process created the directory and stopped is still durable. Directories that existed before are taken to be durable.
+- Limits, in the class's comment and the spec: a local filesystem (network filesystems may not honour `O_EXCL` or a directory fsync, and a failed one stops the payment); macOS's `fsync` does not flush the drive's write cache (Node has no `F_FULLFSYNC`); Windows cannot open a directory, so there only files are flushed.
+- Tests: `btc/test/journal-durability.test.ts` wraps `node:fs` to record each fsync by path. A first claim into two new directories has flushed the journal, the claim file, the claims directory and every directory up to the existing parent by the time the wallet is called; a later claim still flushes the claims directory and the journal's; a failed fsync of the claims directory, of the journal's new directory, or of the directory above a new one stops the payment with no wallet call. All five failed on the old journal. No power-loss experiment was run.
+
+**R04: `addressType: null` was paid as p2wpkh.**
+- The client defaulted with `??`, so `null` became `p2wpkh` and the wallet paid; the facilitator, which defaults only an absent field, then refused the requirements. The client now defaults only `undefined`.
+- Shared cases: `btc/requirements-cases.json` (23 cases over `addressType`, `minConfirmations`, `assetTransferMethod`, `paymentFlow` and `paymentId`: absent, `null`, out of range, wrong type) is run by the client's tests (`requirements-cases.test.ts`: it pays the derived address, or refuses naming the field and never calls the wallet) and by the crate (`the_shared_requirement_cases`, through `include_str!` of its byte-identical copy `crates/x402-chain-bip122/requirements-cases.json`; a btc test checks the two copies, and `test-vectors.json`, are identical).
+- Two more disagreements the cases exposed are fixed on the Rust side: `minConfirmations: 0` passed the parser and was refused only by the confirmation policy (now refused while parsing, as the client does), and `1.0` was refused although JavaScript cannot tell it from `1` (now read as 1, as the client does).
+- In passing: the spec said a bad `paymentId` or `addressType` is `invalid_payload`; the facilitator answers `invalid_payment_requirements`, which is what they are, so the spec now says that. The spec also says that an optional field defaults only when absent, and adds the alias and durability rules to the client's journal step.
+
+**R05: `block-buffer` 0.12.1 was available.**
+- D-047 listed `block-buffer` 0.12.0 (GHSA-qwgh-2vcv-g2f7) as having no fixed release; 0.12.1, released 2026-06-11, is the patched version, and `digest` 0.11 accepts it. `cargo update -p block-buffer@0.12.0 --precise 0.12.1` in the pinned builder changed only that package (checksum `d2f6c7db…60aa`, as crates.io lists it). It reaches the binary through `digest` 0.11.3 → `sha3` → `alloy-primitives`. `lock-upgrades.txt` lists it (39 entries) and no longer calls it unfixed.
+- The audit also suggests a Rust advisory scan in CI with reviewed exceptions, so an accepted risk cannot hide a fixable one. Not done here: it is a new CI job and, to bind, a new required check, which is a settings decision.
+
+**Image `e75adda-hemi.18`.** Compose, the READMEs and the issue template name it. The crate is now rustfmt-clean (edition 2024): on `main` it had eight differences, from D-047, and CI does not check Rust formatting.
+
+**Verification**, 2026-11-11:
+
+```
+docker compose build          exit 0; "Cargo.lock: 477 packages as upstream locked them (of 1200); 49 others, all listed";
+                              block-buffer 0.12.1 compiled; no compiler warnings
+Rust tests (CI's commands, --network none)   181 passed, 0 failed, 27 ignored (179 before, plus the R01 and R04 tests)
+npm test -w btc               136 passed, 0 failed (103 before, plus 24 shared cases, 4 alias and 5 durability tests)
+npm run typecheck --workspaces   exit 0
+npm run test:e2e              Test Files 15 passed (15), Tests 149 passed (149), 411 s; 12-btc-settler-signer's six
+                              Bitcoin settlements all HTTP 200, each Settled event from the SETTLER
+12-btc-settler-signer, built without the sender   1 failed: HTTP 500, NotSettler(anvil #4)
+buyer/demo-fork.sh            exit 0: all five payments settled, the fifth 1000 sats of fabricated BTC through the file journal
+```
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).
