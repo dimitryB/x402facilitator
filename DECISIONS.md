@@ -2007,6 +2007,8 @@ npm run test:e2e              Test Files 15 passed (15), Tests 149 passed (149),
 buyer/demo-fork.sh            exit 0: all five payments settled, the fifth 1000 sats of fabricated BTC through the file journal
 ```
 
+**Later the same day: a reader could catch a line half written.** CI on PR #11 failed once in the cross-process test: one of four processes crashed in `JSON.parse` on a journal line cut off at 33 characters, read while another process was appending it. `FilePaymentJournal.all()` parsed every line, the unfinished last one too. Each line is appended whole with its newline, so text after the last newline is a line still being written; `all()` now leaves it out. That cannot let a second client pay: the writer's claim file exists before its line. A unit test reads a journal ending in such a fragment (it failed on the old reader); the cross-process test then passed 15 of 15 runs locally.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

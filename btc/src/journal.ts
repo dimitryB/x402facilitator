@@ -152,7 +152,12 @@ export class FilePaymentJournal implements PaymentJournal {
   all(): Map<string, JournalEntry> {
     const out = new Map<string, JournalEntry>();
     if (!existsSync(this.file)) return out;
-    for (const line of readFileSync(this.file, "utf8").split("\n")) {
+    const lines = readFileSync(this.file, "utf8").split("\n");
+    // Each line is appended whole, with its newline. Text after the last newline is a line another client is
+    // still writing, which a read can catch half done: it is not an entry yet. That client's claim file
+    // already exists, so leaving the line out cannot let a second client pay.
+    lines.pop();
+    for (const line of lines) {
       if (!line.trim()) continue;
       const entry = JSON.parse(line) as JournalEntry;
       out.set(entry.paymentId, entry);

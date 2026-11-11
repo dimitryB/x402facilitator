@@ -203,6 +203,24 @@ describe("clients that share a journal pay once", () => {
     }
   });
 
+  it("a journal line another client is still appending is not read as an entry (CI flake of 2026-11-11)", async () => {
+    const file = join(dir, "torn.jsonl");
+    const req = requirements();
+    const paymentId = req.extra.paymentId as string;
+    const d = derivePaymentAddress(XPUB, BTC_MAINNET, paymentId);
+    const entry: JournalEntry = {
+      paymentId, status: "paying", network: BTC_MAINNET, payTo: XPUB, addressType: "p2wpkh", address: d.address, script: d.script,
+      amount: "1000", requirements: req, createdAt: "2026-11-11T00:00:00.000Z", updatedAt: "2026-11-11T00:00:00.000Z",
+    };
+    const other = newPaymentId();
+    // A whole line, then the first 33 characters of the next one, as a reader saw it in CI.
+    writeFileSync(file, JSON.stringify(entry) + "\n" + JSON.stringify({ ...entry, paymentId: other }).slice(0, 33));
+    const journal = new FilePaymentJournal(file);
+    expect(await journal.get(paymentId)).toEqual(entry);
+    expect(await journal.get(other)).toBeUndefined();
+    expect([...journal.all().keys()]).toEqual([paymentId]);
+  });
+
   it("a client that stopped between its claim and its journal line still blocks the next", async () => {
     const file = join(dir, "stopped.jsonl");
     const journal = new FilePaymentJournal(file);
