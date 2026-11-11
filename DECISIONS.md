@@ -1736,6 +1736,44 @@ commits with a new hash: 79 of 82 (the first three are unchanged)
 
 **Left as it is.** The local-only branches `claude/*` and `phase2/contracts` still hold the old commits, and so does the local object store. Neither is published.
 
+## D-045. The SDK patch goes upstream; the x402-rs patches stay a patch set
+
+On 2026-11-10 the owner chose what to do with the two patch sets that change upstream code.
+
+**Upstream state that day.**
+
+- `x402-rs/x402-rs`: still at `e75adda` (2026-07-13). Its last merge was on 2026-07-08 and its last release was v1.3.0 in February. About 15 pull requests are open without review, including zachsplat's #138, #140 and #142 (D-035) and a Bitcoin Cash chain.
+- `x402-foundation/x402`: active. It merged a default-asset PR for Robinhood Chain (#4207) the same day, and four more since August. Hemi is still not in its default assets.
+
+**Decision.**
+
+- The SDK patch was submitted, TypeScript only: [x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213).
+- The x402-rs patches stay a patch set in this repository, applied to the pinned commit. Nothing was submitted to x402-rs and nothing was posted on #136, #138 or #140. Submitting the series, posting on those PRs and forking x402-rs were the options not taken; they can be revisited if the maintainer becomes active again.
+
+**How the SDK PR was made.**
+
+1. Rebase. The patch was replayed on upstream `main` at `d3eb19d`. It conflicted only where Robinhood Chain had been added at the same place in `defaultAssets.ts` and in the docs table; both entries were kept.
+2. Upstream's rules. Upstream asks for concise commit messages that explain why. The commit message and changeset were shortened to match, and the PR description was cut down from the earlier draft to the shape of #4207.
+3. On-chain values, checked again with read-only calls:
+   - mainnet USDC.e: name "Bridged USDC (Stargate)", version "2", 6 decimals; `DOMAIN_SEPARATOR()` equals the recomputed domain (`0x6fe49ef2…8a11`); `authorizationState` is callable;
+   - testnet USDC.e: name "USDC.e", 6 decimals; `version()`, `DOMAIN_SEPARATOR()`, `nonces()` and `authorizationState()` revert;
+   - the exact Permit2 proxy has code hash `0xce6429c0…048b9` on Hemi mainnet, Hemi testnet and Base mainnet alike.
+4. Upstream's checks, run on the rebased tree with `pnpm` 11.1.1:
+
+   ```
+   install --frozen-lockfile, turbo build @x402/evm:  ok
+   pnpm test:          Test Files 64 passed (64), Tests 2103 passed (2103), coverage thresholds met
+   lint:check, format:check, prettier on the changeset:  clean
+   the three Hemi tests, run by name:  3 passed
+   ```
+
+5. Signing. Upstream requires signed commits, and this machine has no gpg or SSH signing key. The fork `dimitryB/x402` was created, branch `hemi-default-stablecoins` was set to `d3eb19d`, and the commit was made with GitHub's GraphQL `createCommitOnBranch`, which GitHub signs. The result is commit `78ba854`: verified, authored by `dimitryB`, with the same tree as the tested one (`dd7199f`).
+6. Draft and disclosure. Upstream's contributing guide says not to open a non-draft PR before a human has reviewed AI-generated code, and to disclose significant AI use. The PR was opened as a draft and says so.
+
+**State after opening.** The PR is a draft, mergeable, and open to edits by maintainers. Its CI workflows show `action_required`: this is a first contribution from a fork, so a maintainer must approve the runs. `sdk-patch/` now holds the submitted commit and the posted description.
+
+**Left for the owner.** Review the six changed files in #4213 and mark the PR ready for review. Go and Python parity is offered in the PR, not done.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

@@ -1,15 +1,19 @@
 # sdk-patch
 
-This patch registers Hemi in the upstream x402 TypeScript SDK ([x402-foundation/x402](https://github.com/x402-foundation/x402)), so dollar-string pricing such as `price: "$0.001"` works on Hemi without extra configuration. It is item 5 of the architecture in [docs/BRIEF.md](../docs/BRIEF.md). It is kept here as a draft upstream PR and has not been submitted.
+This patch registers Hemi in the upstream x402 TypeScript SDK ([x402-foundation/x402](https://github.com/x402-foundation/x402)), so dollar-string pricing such as `price: "$0.001"` works on Hemi without extra configuration. It is item 5 of the architecture in [docs/BRIEF.md](../docs/BRIEF.md). It was submitted on 2026-11-10 as [x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213). The PR stays a draft until the owner has reviewed it, as upstream's rules for AI-assisted contributions require (DECISIONS.md D-045).
 
 | File | What it is |
 |------|------------|
-| `0001-hemi-networks.patch` | One commit, `feat(evm): add Hemi default stablecoins`, produced with `git format-patch` |
-| `PR.md` | Draft PR title and description: evidence for each token and the Permit2 caveat |
+| `0001-hemi-networks.patch` | The PR's commit, `feat(evm): add Hemi default stablecoins`, produced with `git format-patch` |
+| `PR.md` | The PR's title and description as posted |
 
 ## Upstream commit
 
-The patch targets `e4a086819f419e9395acbbdc1679fe6627029ff7` ("chore: version typescript packages (#4036)", 2026-10-28). It follows the conventions of the most recent default-asset PRs:
+The patch is commit `78ba854` on the fork [`dimitryB/x402`](https://github.com/dimitryB/x402/tree/hemi-default-stablecoins), branch `hemi-default-stablecoins`, on top of upstream `main` at `d3eb19d018801c190be58acf4017e76f8bcf6d45` (2026-11-10). It was first written against `e4a0868` (2026-10-28). Replayed on `d3eb19d`, it conflicted only where upstream had just added Robinhood Chain (#4207) at the same place in `defaultAssets.ts` and in the docs table; both entries were kept.
+
+Upstream requires signed commits, and this machine has no signing key, so the commit was created through GitHub's GraphQL `createCommitOnBranch`, which GitHub signs. GitHub shows it as verified, authored by `dimitryB`.
+
+The patch follows the conventions of the earlier default-asset PRs:
 
 - `dd896985` feat(evm): add Arc default stablecoins (#3590): a mainnet and testnet pair, a docs table row, a `@x402/evm` minor changeset
 - `a9955ae5` feat(evm): add Monad testnet USDC default asset (#3570): a v1 network name in `constants.ts`
@@ -30,7 +34,7 @@ The facts behind these values are in [DECISIONS.md](../DECISIONS.md): D-001, D-0
 Two things to know before relying on the patch:
 
 - **Testnet payments go through Permit2.** The testnet default asset needs canonical Permit2 and the x402 exact Permit2 proxy. Both were deployed on Hemi Testnet on 2026-10-29, and a USDC.e payment has settled there ([docs/testnet-run.md](../docs/testnet-run.md)). The payer sends one on-chain `approve(Permit2)` first.
-- **TypeScript only.** Upstream usually updates the Go and Python SDKs in the same PR. `PR.md` lists the matching files in those SDKs.
+- **TypeScript only.** Upstream usually updates the Go and Python SDKs in the same PR. The PR offers to add them there or separately.
 
 ## Apply
 
@@ -39,11 +43,11 @@ Requirements: Node 22 or later, and pnpm 11.1.1, which is pinned in `typescript/
 ```sh
 git clone https://github.com/x402-foundation/x402
 cd x402
-git checkout -b hemi-networks e4a086819f419e9395acbbdc1679fe6627029ff7
+git checkout -b hemi-networks d3eb19d018801c190be58acf4017e76f8bcf6d45
 git am /path/to/x402facilitator/sdk-patch/0001-hemi-networks.patch
 ```
 
-To check the patch without committing, run `git apply --check 0001-hemi-networks.patch`. On top of `e4a0868` it applies cleanly and produces the same tree as the working branch.
+To check the patch without committing, run `git apply --check 0001-hemi-networks.patch`. On top of `d3eb19d` it applies cleanly and produces the tree of the PR's commit. The PR branch can also be fetched directly: `git fetch https://github.com/dimitryB/x402 hemi-default-stablecoins`.
 
 If your global npm config points at a private registry, force the public one for this clone only. Don't commit this file:
 
@@ -68,18 +72,18 @@ pnpm run format:check     # prettier
 pnpm exec vitest run test/unit/server.test.ts test/unit/defaultAssets.test.ts -t "emi"
 ```
 
-Results on 2026-10-29:
+Results on 2026-11-10, on `d3eb19d`:
 
 | Command | Result |
 |---------|--------|
-| `pnpm test` | `Test Files 57 passed (57)`, `Tests 1650 passed (1650)`, coverage thresholds met |
+| `pnpm test` | `Test Files 64 passed (64)`, `Tests 2103 passed (2103)`, coverage thresholds met |
 | `pnpm run lint:check` | exit 0 |
 | `pnpm run format:check` | `All matched files use Prettier code style!` |
 
 ## Regenerate the patch
 
-From the working clone, on branch `hemi-networks`:
+From a clone that has the PR branch:
 
 ```sh
-git format-patch e4a086819f419e9395acbbdc1679fe6627029ff7 --stdout > sdk-patch/0001-hemi-networks.patch
+git format-patch -1 <the PR's head commit> --stdout > sdk-patch/0001-hemi-networks.patch
 ```
