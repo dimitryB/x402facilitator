@@ -199,18 +199,20 @@ pub trait Settler: Send + Sync {
     fn address(&self) -> Address;
     /// The Hemi chain it is deployed on.
     fn hemi_chain(&self) -> ChainId;
-    /// The Hemi signers that send `settle`; the contract accepts only its `SETTLER`.
-    fn signer_addresses(&self) -> Vec<String>;
     /// Whether settlements can be sent to the contract: it answers `SETTLER()` like an
-    /// `X402BtcSettler`, and its `SETTLER` is one of the Hemi signers. Returns that `SETTLER`.
+    /// `X402BtcSettler`, and its `SETTLER` is one of the Hemi signers. Returns that `SETTLER`, the only
+    /// signer `settle` may be sent from.
     async fn check_deployment(&self) -> Result<Address, DeploymentError>;
     /// `verify`, as an `eth_call`. It never reverts on a payment; an error here is Hemi or hBK failing.
     async fn verify(&self, query: &SettleQuery) -> Result<Check, SettlerError>;
-    /// Sends `settle` and waits for its receipt.
+    /// Sends `settle` from `from`, the contract's `SETTLER` as `check_deployment` returned it, and
+    /// waits for its receipt. The Hemi provider rotates its signers for every other transaction, so a
+    /// settlement without a sender could go out from one the contract refuses (`NotSettler`).
     async fn settle(
         &self,
         query: &SettleQuery,
         payment_ref: B256,
+        from: Address,
     ) -> Result<SettleOutcome, SettlerError>;
     /// Whether a sent `settle` was mined: `Some(true)` succeeded, `Some(false)` reverted, `None` no RPC
     /// has its receipt.
@@ -251,7 +253,6 @@ mod hemi {
                 ))
             })
         }
-
     }
 
     #[async_trait::async_trait]
@@ -262,10 +263,6 @@ mod hemi {
 
         fn hemi_chain(&self) -> ChainId {
             self.hemi.chain_id()
-        }
-
-        fn signer_addresses(&self) -> Vec<String> {
-            ChainProviderOps::signer_addresses(&*self.hemi)
         }
 
         async fn check_deployment(&self) -> Result<Address, DeploymentError> {
@@ -306,8 +303,10 @@ mod hemi {
             &self,
             query: &SettleQuery,
             payment_ref: B256,
+            from: Address,
         ) -> Result<SettleOutcome, SettlerError> {
-            let tx = MetaTransaction::new(self.address, query.settle_calldata(payment_ref));
+            let tx = MetaTransaction::new(self.address, query.settle_calldata(payment_ref))
+                .with_from(from);
             match self.hemi.send_transaction(tx).await {
                 Ok(receipt) if receipt.status() => {
                     Ok(SettleOutcome::Mined(receipt.transaction_hash))

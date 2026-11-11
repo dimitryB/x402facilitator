@@ -154,6 +154,18 @@ pub struct ExactBip122Request {
 type WireRequest =
     v2::VerifyRequest<v2::PaymentPayload<serde_json::Value, serde_json::Value>, serde_json::Value>;
 
+/// `extra.minConfirmations` as a buyer's JSON parser reads it: a whole number from 1 to 2^32 - 1, also when
+/// written with a zero fraction (`1.0`), which JavaScript cannot tell from `1`.
+fn confirmations(value: &serde_json::Value) -> Option<u32> {
+    let n = value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|f| f.fract() == 0.0 && *f >= 0.0 && *f <= f64::from(u32::MAX))
+            .map(|f| f as u64)
+    })?;
+    u32::try_from(n).ok().filter(|n| *n >= 1)
+}
+
 fn invalid_requirements(message: impl Into<String>) -> PaymentVerificationError {
     PaymentVerificationError::InvalidPaymentRequirements(message.into())
 }
@@ -229,18 +241,15 @@ pub fn parse_requirements(
             ))
         })?,
     };
+    // Optional fields default only when absent: an explicit null is refused, as the TypeScript client
+    // refuses it before paying (requirements-cases.json).
     let min_confirmations = match extra.get("minConfirmations") {
         None => None,
-        Some(value) => Some(
-            value
-                .as_u64()
-                .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| {
-                    invalid_requirements(format!(
-                        "extra.minConfirmations must be a whole number, got {value}"
-                    ))
-                })?,
-        ),
+        Some(value) => Some(confirmations(value).ok_or_else(|| {
+            invalid_requirements(format!(
+                "extra.minConfirmations must be a whole number from 1 to 2^32 - 1, got {value}"
+            ))
+        })?),
     };
     Ok(ExactBip122Requirements {
         network,
@@ -535,5 +544,45 @@ pub(crate) mod tests {
             parse(&request_with(no_id)).unwrap_err(),
             ErrorReason::InvalidPaymentRequirements
         );
+    }
+    /// `requirements-cases.json`, shared with the TypeScript client (`btc/requirements-cases.json`, kept
+    /// identical by a btc test): what the client pays for, this parser accepts, and the other way round.
+    #[test]
+    fn the_shared_requirement_cases() {
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../../requirements-cases.json")).unwrap();
+        let cases = file["cases"].as_array().unwrap();
+        assert!(cases.len() >= 20);
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let mut accepted = file["base"].clone();
+            let extra = accepted["extra"].as_object_mut().unwrap();
+            for (key, value) in case["set"].as_object().into_iter().flatten() {
+                extra.insert(key.clone(), value.clone());
+            }
+            for key in case["remove"].as_array().into_iter().flatten() {
+                extra.remove(key.as_str().unwrap());
+            }
+            let parsed = parse_requirements(&accepted, Bip122Network::Mainnet);
+            if case["accept"] == json!(true) {
+                let parsed = parsed.unwrap_or_else(|e| panic!("{name}: {e}"));
+                let address_type = serde_json::to_value(parsed.address_type).unwrap();
+                assert_eq!(address_type, case["addressType"], "{name}");
+                assert_eq!(
+                    json!(parsed.min_confirmations),
+                    case["minConfirmations"],
+                    "{name}"
+                );
+            } else {
+                let error = parsed.err().unwrap_or_else(|| panic!("{name}: accepted"));
+                let field = format!("extra.{}", case["field"].as_str().unwrap());
+                assert!(error.to_string().contains(&field), "{name}: {error}");
+                assert_eq!(
+                    error.as_payment_problem().reason(),
+                    ErrorReason::InvalidPaymentRequirements,
+                    "{name}"
+                );
+            }
+        }
     }
 }

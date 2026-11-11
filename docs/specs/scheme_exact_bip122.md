@@ -82,9 +82,11 @@ SDKs MUST use an explicit atomic price, `{ "asset": "BTC", "amount": "1000" }`. 
 | `extra.paymentFlow` | Yes | `"upfront"`. |
 | `extra.paymentId` | Yes | 32 lowercase hex characters (16 bytes) from a CSPRNG, fresh for every challenge. **Dynamic**: implementations MUST declare it in `dynamicExtraFields`, so it is ignored when a paid retry's `accepted` is matched against the requirements rebuilt for that request. |
 | `extra.addressType` | No | `"p2wpkh"` (default) or `"p2tr"`. |
-| `extra.minConfirmations` | No | Bitcoin confirmations required before settlement: a whole number, at least 1; default 1. The resource server chooses it per price; the facilitator MAY refuse values outside its policy. |
+| `extra.minConfirmations` | No | Bitcoin confirmations required before settlement: a whole number from 1 to 2^32 − 1 (`1.0` is the number 1); default 1. The resource server chooses it per price; the facilitator MAY refuse values outside its policy. |
 
 Every core field and every `extra` field except `paymentId` MUST match between `accepted` and the requirements.
+
+An optional field takes its default only when it is absent. Present with `null`, or with any value outside its range, it is invalid: clients MUST refuse it before paying and facilitators MUST reject it. `btc/requirements-cases.json` in this repository lists the cases both implementations here run.
 
 ## Payment Address
 
@@ -139,9 +141,9 @@ Each payment lands on its own address. The path is effectively random, so wallet
 
 ## Client Payment Construction
 
-1. Validate the accept: `scheme`, network, `asset`, `amount`, transfer method, flow, a well-formed `paymentId`, a supported `addressType`, a `minConfirmations` that is a whole number of at least 1 if present, and `payTo` with the right version bytes for the network. Apply the client's own spend cap. The client pays before any facilitator sees the requirements, and the payment cannot be undone, so a client MUST NOT fill in a missing required field with its expected value: requirements a facilitator would reject must be rejected before paying.
+1. Validate the accept: `scheme`, network, `asset`, `amount`, transfer method, flow, a well-formed `paymentId`, an `addressType` that is absent or supported, a `minConfirmations` that is absent or a whole number from 1 to 2^32 − 1, and `payTo` with the right version bytes for the network. Apply the client's own spend cap. The client pays before any facilitator sees the requirements, and the payment cannot be undone, so a client MUST NOT fill in a missing required field with its expected value: requirements a facilitator would reject must be rejected before paying.
 2. Derive the address. Pay `amount` to it in one output of a standard transaction. Other outputs (change) are allowed.
-3. Record the payment by `paymentId` **before** broadcasting and again with the txid after. A client MUST NOT pay a `paymentId` it has already recorded; if a record has no txid, a broadcast may have happened and the client MUST NOT pay again automatically. Where several clients or processes share one record, recording before broadcasting MUST be an atomic claim, so that only one of them pays. Concurrent requests for one `paymentId` MAY share one payment only if they ask for the same network and address and no more than its amount.
+3. Record the payment by `paymentId` **before** broadcasting and again with the txid after. A client MUST NOT pay a `paymentId` it has already recorded; if a record has no txid, a broadcast may have happened and the client MUST NOT pay again automatically. Where several clients or processes share one record, recording before broadcasting MUST be an atomic claim, so that only one of them pays, and every client MUST reach the same claim by whatever name it opened the record (a file record resolves symlinks, and refuses hard links, which cannot be told apart). The claim MUST be on stable storage before the broadcast: for a file record that includes the directory entries that name it, in every directory the client created. Concurrent requests for one `paymentId` MAY share one payment only if they ask for the same network and address and no more than its amount.
 4. Send the payload and re-send the same payload while the answer is retryable. A client SHOULD NOT use a generic "pay on every 402" wrapper with this scheme: the first answers after paying are always "not yet", and paying again on them pays twice.
 
 ## Facilitator Validation
@@ -151,7 +153,7 @@ Each payment lands on its own address. The path is effectively random, so wallet
 1. The request parses; `x402Version` is 2. Otherwise `invalid_payload` / `invalid_x402_version`.
 2. `accepted` equals the requirements in `scheme`, `network`, `amount`, `asset`, `payTo`, `maxTimeoutSeconds` and every `extra` field except `paymentId`. Otherwise `invalid_payment_requirements`.
 3. The network is a bip122 network the facilitator serves (`invalid_network`); `scheme` is `exact` (`unsupported_scheme`); `asset` is `BTC`, `amount` a positive integer, the flow `upfront` and the transfer method `utxo` (`invalid_payment_requirements`); `minConfirmations` is inside the facilitator's policy (`invalid_payment_requirements`).
-4. `accepted.extra.paymentId` is 32 lowercase hex characters, `addressType` is supported, and `payload` is exactly `{ txid: 64 lowercase hex, vout: non-negative integer }`. Otherwise `invalid_payload`.
+4. `accepted.extra.paymentId` is 32 lowercase hex characters, and `addressType` is absent or supported (`invalid_payment_requirements`). `payload` is exactly `{ txid: 64 lowercase hex, vout: non-negative integer }` (`invalid_payload`).
 5. `payTo` parses as an extended public key of this network. Otherwise `invalid_exact_bip122_pay_to`.
 6. No settlement of `(network, txid, vout)` is in flight. Otherwise `invalid_transaction_state`.
 7. Derive the script from `payTo`, `accepted.extra.paymentId` and `addressType`. Through the settler contract (one `eth_call`, which reads hBK):
@@ -177,7 +179,7 @@ event Settled(bytes32 indexed txid, uint32 vout, bytes32 indexed scriptPubKeyHas
 
 `settle` re-runs the checks of step 7 on chain and reverts unless they pass, so a settlement cannot record an invalid payment. The consumption key is `(txid, vout)` on the settler of that network; `paymentRef = sha256(bytes16(paymentId))` names the payment without revealing the paymentId. A facilitator retry first reads `settledBy`: its own `paymentRef` there means already settled.
 
-Only the facilitator's signer may call `settle`. Otherwise anyone who saw the Bitcoin transaction could settle it first with a bogus `paymentRef` and block the real settlement.
+Only the facilitator's signer may call `settle`. Otherwise anyone who saw the Bitcoin transaction could settle it first with a bogus `paymentRef` and block the real settlement. A facilitator with several signers on that Hemi chain MUST send every `settle` from the settler's `SETTLER`, and SHOULD list only that signer for the Bitcoin network in `/supported`: any other sender reverts after the buyer has paid.
 
 Success:
 

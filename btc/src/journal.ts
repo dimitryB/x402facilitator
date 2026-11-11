@@ -9,8 +9,8 @@
  * successor means another client is still paying, or a broadcast may have happened without being
  * recorded; the client scheme refuses to pay that paymentId again until a person looks.
  */
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, statSync, writeSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { isPaymentId, type AddressType } from "./derive.js";
 import type { BtcNetwork } from "./networks.js";
@@ -77,16 +77,28 @@ export class MemoryPaymentJournal implements PaymentJournal {
  * Append-only JSON lines; the last line for a paymentId wins. Each line is flushed to disk (fsync) before
  * `put` or `claim` returns, so a `paying` line is durable before the wallet broadcasts.
  *
- * `claim` first creates `<file>.claims/<paymentId>` exclusively (O_CREAT | O_EXCL): the filesystem lets
+ * `claim` first creates `<journal>.claims/<paymentId>` exclusively (O_CREAT | O_EXCL): the filesystem lets
  * only one process create it, so only one client pays, whichever process or instance it runs in. The claim
  * file holds the claimed entry, so a client that stopped between the claim and the journal line still
- * blocks a second payment. Use a local filesystem: network filesystems may not honour O_EXCL.
+ * blocks a second payment.
+ *
+ * `<journal>` is the journal's real path, with every symlink resolved, so clients that open one journal
+ * by different paths (a symlink to it or to a directory above it) share one claims directory. Hard links
+ * cannot be told apart that way: `claim` refuses a journal file with more than one.
+ *
+ * Before `claim` returns, the claim file, the journal and the directory entries that name them, including
+ * any directory it created, are flushed to disk, so a power loss after the broadcast cannot lose the
+ * record and pay again on restart. Directories that already existed are taken to be durable. Use a local
+ * filesystem: network filesystems may not honour O_EXCL or a directory fsync. On macOS, fsync reaches the
+ * drive but not necessarily past its write cache; Windows cannot fsync a directory, so there only files
+ * are flushed.
  */
 export class FilePaymentJournal implements PaymentJournal {
   constructor(readonly file: string) {}
 
+  /** The claims directory, beside the journal's real path. */
   get claims(): string {
-    return `${this.file}.claims`;
+    return `${realPath(this.file)}.claims`;
   }
 
   async get(paymentId: string): Promise<JournalEntry | undefined> {
@@ -94,30 +106,46 @@ export class FilePaymentJournal implements PaymentJournal {
   }
 
   async put(entry: JournalEntry): Promise<void> {
-    mkdirSync(dirname(this.file), { recursive: true });
+    this.create();
     writeDurably(this.file, "a", JSON.stringify(entry) + "\n");
   }
 
   async claim(entry: JournalEntry): Promise<JournalEntry | undefined> {
     const existing = await this.get(entry.paymentId);
     if (existing) return existing;
-    mkdirSync(this.claims, { recursive: true, mode: 0o700 });
+    const journal = this.create();
+    const links = statSync(journal).nlink;
+    if (links > 1) {
+      throw new Error(
+        `the journal ${journal} has ${links} hard links: claims are kept beside one path, so two clients opening it by ` +
+          `different links could both pay. Open it by one path (a symlink is fine) and remove the other links`,
+      );
+    }
+    const claims = `${journal}.claims`;
+    mkdirDurably(claims, 0o700);
     try {
-      writeDurably(this.claimPath(entry.paymentId), "wx", JSON.stringify(entry) + "\n");
+      writeDurably(join(claims, checkedPaymentId(entry.paymentId)), "wx", JSON.stringify(entry) + "\n");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       // Another client claimed it first. Its claim file may still be empty while it writes: report the
       // paymentId as being paid, with this claim's terms, so the caller refuses to pay it.
       return (await this.get(entry.paymentId)) ?? { ...entry, status: "paying" };
     }
+    // The claim file's name, and the claims directory's own, must be on disk before the wallet broadcasts.
+    fsyncDir(claims);
+    fsyncDir(dirname(claims));
     await this.put(entry);
     return undefined;
   }
 
-  /** The paymentId names a file, so it must be a paymentId: 32 lowercase hex characters, nothing else. */
-  private claimPath(paymentId: string): string {
-    if (!isPaymentId(paymentId)) throw new Error(`not a paymentId: ${JSON.stringify(paymentId)}`);
-    return join(this.claims, paymentId);
+  /** Creates the journal file if it is missing, durably, and returns its real path. */
+  private create(): string {
+    if (!existsSync(this.file)) {
+      mkdirDurably(dirname(this.file));
+      writeDurably(this.file, "a", "");
+      fsyncDir(dirname(realpathSync(this.file)));
+    }
+    return realpathSync(this.file);
   }
 
   /** Latest entry per paymentId, in first-seen order. Claims without a journal line are not included. */
@@ -133,7 +161,7 @@ export class FilePaymentJournal implements PaymentJournal {
   }
 
   private claimed(paymentId: string): JournalEntry | undefined {
-    const path = this.claimPath(paymentId);
+    const path = join(this.claims, checkedPaymentId(paymentId));
     if (!existsSync(path)) return undefined;
     try {
       const entry = JSON.parse(readFileSync(path, "utf8")) as JournalEntry;
@@ -141,6 +169,48 @@ export class FilePaymentJournal implements PaymentJournal {
     } catch {
       return undefined; // being written; claim() treats the file's existence as the claim
     }
+  }
+}
+
+/** The paymentId names a file, so it must be a paymentId: 32 lowercase hex characters, nothing else. */
+function checkedPaymentId(paymentId: string): string {
+  if (!isPaymentId(paymentId)) throw new Error(`not a paymentId: ${JSON.stringify(paymentId)}`);
+  return paymentId;
+}
+
+/** The path `file` names with every symlink resolved, also while it, or a directory above it, does not exist. */
+function realPath(file: string, hops = 0): string {
+  try {
+    return realpathSync(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const path = resolve(file);
+  if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    if (hops >= 40) throw new Error(`too many levels of symbolic links: ${file}`);
+    return realPath(resolve(dirname(path), readlinkSync(path)), hops + 1);
+  }
+  const parent = dirname(path);
+  return parent === path ? path : join(realPath(parent, hops), basename(path));
+}
+
+/** Creates `dir` and its missing parents, and flushes the directory entry of each one it creates. */
+function mkdirDurably(dir: string, mode?: number): void {
+  const missing: string[] = [];
+  for (let d = resolve(dir); !existsSync(d); d = dirname(d)) missing.unshift(d);
+  if (missing.length === 0) return;
+  mkdirSync(dir, { recursive: true, mode });
+  for (const d of missing) fsyncDir(dirname(realpathSync(d)));
+}
+
+/** Flushes a directory's entries (names of files created in it) to disk. Windows cannot open a directory. */
+function fsyncDir(dir: string): void {
+  if (process.platform === "win32") return;
+  const fd = openSync(dir, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
   }
 }
 

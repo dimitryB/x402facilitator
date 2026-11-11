@@ -317,7 +317,7 @@ payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an a
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.17` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.18` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
@@ -1498,8 +1498,12 @@ warning at startup (`Ignoring keys a bip122 chain does not read`): the e2e suite
   `Settled` event. `settlement_pending` and a mined revert carry the Hemi hash, since that is the
   transaction the facilitator broadcast.
 - **Supported.** One kind per network, with `extra` `{asset, assetTransferMethod, paymentFlow,
-  addressTypes, minConfirmations, settler, hemiNetwork}`, and the Hemi signer under the `bip122` network in
-  `signers`.
+  addressTypes, minConfirmations, settler, hemiNetwork}`, and under the `bip122` network in `signers` only
+  the settler's `SETTLER`, the one Hemi signer that records these payments.
+- **Sender.** Every `settle()` is sent from the `SETTLER` the startup check read
+  (`MetaTransaction::with_from`). The Hemi provider rotates its signers for each transaction that names no
+  sender, so with two signers every other Bitcoin settlement used to revert `NotSettler` after the buyer had
+  paid (audit follow-up R01, D-050).
 
 **Tests.** 43 unit tests: the shared derivation vectors and rejections, P2TR, SLIP-132 and network mismatches, private and
 unsupported keys, every parse failure, each verdict to its code on verify and on settle, the settle
