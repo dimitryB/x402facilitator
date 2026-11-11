@@ -1,29 +1,12 @@
-From fac4d6f9412c4cffc0bb60bccbb53a317c18a55a Mon Sep 17 00:00:00 2001
+From 78ba854c4098889c8164edc9f191ed4f12e784eb Mon Sep 17 00:00:00 2001
 From: Dimitry B <dimitryB@users.noreply.github.com>
-Date: Wed, 28 Oct 2026 22:20:45 -0400
+Date: Tue, 10 Nov 2026 19:15:49 -0500
 Subject: [PATCH] feat(evm): add Hemi default stablecoins
 
-Enable dollar-string pricing on Hemi mainnet (chain ID 43111) and Hemi
-Testnet (chain ID 743111) in the TypeScript SDK.
-
-Hemi mainnet: USDC.e (Stargate bridged, Circle FiatToken v2.2) at
-0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA, 6 decimals. The token
-implements EIP-3009, so no transfer-method override is needed. Its
-EIP-712 domain is name "Bridged USDC (Stargate)", version "2"; the
-domain separator recomputed from these values matches
-DOMAIN_SEPARATOR() on chain.
-
-Hemi Testnet: USDC.e at 0xD47971C7F5B1067d25cd45d30b2c9eb60de96443,
-6 decimals. It is a plain ERC-20 with neither EIP-3009 nor EIP-2612, so
-the entry uses assetTransferMethod "permit2" and omits supportsEip2612,
-like Igra. The token has no version(); the name/version fields are not
-sent in extra for this entry and follow the Igra entry's convention.
-
-Also register v1 network names hemi and hemi-testnet, add the two
-networks to the default-asset docs table, and cover both entries with
-parsePrice and v1-name resolution tests. viem already ships hemi and
-hemiSepolia, so the paywall's chain lookup needs no change. Decimals
-stay 6, so the generated paywall decimals map is unchanged.
+Without a default asset, "$0.01" pricing throws on Hemi mainnet and
+testnet, and client spend controls reject Hemi USDC.e. Mainnet USDC.e
+supports EIP-3009; the testnet token has neither EIP-3009 nor EIP-2612,
+so it uses Permit2, as Igra's entry does.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
@@ -37,13 +20,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  create mode 100644 typescript/.changeset/add-hemi-default-stablecoin.md
 
 diff --git a/docs/core-concepts/network-and-token-support.mdx b/docs/core-concepts/network-and-token-support.mdx
-index c3929f63..2d15ac7d 100644
+index 4bac80c..8ebd1ba 100644
 --- a/docs/core-concepts/network-and-token-support.mdx
 +++ b/docs/core-concepts/network-and-token-support.mdx
-@@ -146,6 +146,8 @@ When you use `"$0.01"` syntax, x402 needs to know which stablecoin to use. The f
- | Sei Testnet | `eip155:1328` | `0x4fCF1784B31630811181f670Aea7A7bEF803eaED` | USDC | 6 | EIP-3009 |
+@@ -147,6 +147,8 @@ When you use `"$0.01"` syntax, x402 needs to know which stablecoin to use. The f
  | Arc | `eip155:5042` | `0x3600000000000000000000000000000000000000` | USDC | 6 | EIP-3009 |
  | Arc Testnet | `eip155:5042002` | `0x3600000000000000000000000000000000000000` | USDC | 6 | EIP-3009 |
+ | Robinhood Chain | `eip155:4663` | `0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168` | Global Dollar | 6 | EIP-3009 |
 +| Hemi | `eip155:43111` | `0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA` | Bridged USDC (Stargate) | 6 | EIP-3009 |
 +| Hemi Testnet | `eip155:743111` | `0xD47971C7F5B1067d25cd45d30b2c9eb60de96443` | USDC.e | 6 | Permit2 |
  
@@ -51,7 +34,7 @@ index c3929f63..2d15ac7d 100644
  
 diff --git a/typescript/.changeset/add-hemi-default-stablecoin.md b/typescript/.changeset/add-hemi-default-stablecoin.md
 new file mode 100644
-index 00000000..b6380d18
+index 0000000..08e052c
 --- /dev/null
 +++ b/typescript/.changeset/add-hemi-default-stablecoin.md
 @@ -0,0 +1,5 @@
@@ -59,9 +42,9 @@ index 00000000..b6380d18
 +'@x402/evm': minor
 +---
 +
-+Add Hemi mainnet (chain ID 43111) and Hemi Testnet (chain ID 743111) with USDC.e as the default stablecoin. Mainnet USDC.e uses EIP-3009; the testnet USDC.e has neither EIP-3009 nor EIP-2612 and uses Permit2. Register v1 network names `hemi` and `hemi-testnet`.
++Add Hemi mainnet (chain ID 43111) and Hemi Testnet (chain ID 743111) with USDC.e as the default stablecoin, and the v1 network names `hemi` and `hemi-testnet`.
 diff --git a/typescript/packages/mechanisms/evm/src/constants.ts b/typescript/packages/mechanisms/evm/src/constants.ts
-index ab7db42c..a0a0db92 100644
+index ab7db42..a0a0db9 100644
 --- a/typescript/packages/mechanisms/evm/src/constants.ts
 +++ b/typescript/packages/mechanisms/evm/src/constants.ts
 @@ -24,6 +24,8 @@ export const EVM_NETWORK_CHAIN_ID_MAP = {
@@ -74,13 +57,13 @@ index ab7db42c..a0a0db92 100644
  
  export type EvmNetworkV1 = keyof typeof EVM_NETWORK_CHAIN_ID_MAP;
 diff --git a/typescript/packages/mechanisms/evm/src/defaultAssets.ts b/typescript/packages/mechanisms/evm/src/defaultAssets.ts
-index 7248fa80..dd5093d8 100644
+index 0a11f26..6d89276 100644
 --- a/typescript/packages/mechanisms/evm/src/defaultAssets.ts
 +++ b/typescript/packages/mechanisms/evm/src/defaultAssets.ts
-@@ -324,6 +324,25 @@ export const DEFAULT_ASSETS: DefaultAssetTable<ExactDefaultAssetInfo> = {
-       symbol: "USDC",
+@@ -333,6 +333,25 @@ export const DEFAULT_ASSETS: DefaultAssetTable<ExactDefaultAssetInfo> = {
+       symbol: "USDG",
      },
-   ], // Arc Testnet USDC (EIP-3009 supported)
+   ], // Robinhood Chain mainnet USDG (EIP-3009 supported)
 +  "eip155:43111": [
 +    {
 +      asset: "0xad11a8BEb98bbf61dbb1aa0F6d6F2ECD87b35afA",
@@ -104,7 +87,7 @@ index 7248fa80..dd5093d8 100644
  
  /**
 diff --git a/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts b/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts
-index a9facc9a..245172e4 100644
+index a9facc9..245172e 100644
 --- a/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts
 +++ b/typescript/packages/mechanisms/evm/test/unit/defaultAssets.test.ts
 @@ -20,6 +20,14 @@ describe("defaultAssets (EVM)", () => {
@@ -123,7 +106,7 @@ index a9facc9a..245172e4 100644
        expect(findDefaultAsset(MEZO_TESTNET_MUSD.asset, "eip155:31611")).toEqual(MEZO_TESTNET_MUSD);
        expect(MEZO_TESTNET_MUSD.decimals).toBe(18);
 diff --git a/typescript/packages/mechanisms/evm/test/unit/server.test.ts b/typescript/packages/mechanisms/evm/test/unit/server.test.ts
-index 1119eaed..e0c8c59b 100644
+index 1119eae..e0c8c59 100644
 --- a/typescript/packages/mechanisms/evm/test/unit/server.test.ts
 +++ b/typescript/packages/mechanisms/evm/test/unit/server.test.ts
 @@ -80,6 +80,29 @@ describe("ExactEvmScheme (Server)", () => {
