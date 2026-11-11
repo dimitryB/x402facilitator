@@ -1820,6 +1820,87 @@ The two testnet scripts were not run against live networks: they send testnet tr
 
 **Left.** The image batch (F01, F04, the routine Rust bumps of F02, a non-root user and this repository in the image's source label; a new tag and a full e2e run), the `crypto-bigint` upgrade of F02, the GitHub settings of F07, and the audit's hardening notes on browser origins, seller recovery records and the buyer journal's location. The client still cannot check `minConfirmations` against a facilitator's policy before paying: it does not see `/supported`. The audit report is not in the repository.
 
+## D-047. Audit fixes, second batch: image hemi.16 without apt, an unprivileged container, security upgrades, and no Bitcoin network without a usable settler
+
+The audit findings that change the facilitator image (D-046 lists them all): F01, the upgradable part of F02, F04, and the container hardening from the audit's notes. The image tag is now `e75adda-hemi.16`.
+
+**F01: no apt in the image build.**
+
+- The runtime stage installed `ca-certificates` with `apt-get` over HTTP, using apt 3.0.3, which CVE-2026-109518 affects. It now runs no package manager. The CA bundle is copied from the builder image (`ca-certificates` 20250419, 150 certificates).
+- The runtime base moved to the `debian:trixie-slim` index of 2026-11-04, `sha256:a72b4433…b6b2`, whose apt is 3.0.4. The service never used apt; the bump is so the image no longer carries the flagged version.
+- The builder image is unchanged. It contains apt 3.0.3 as well, but the build runs no apt in it.
+
+**The container runs unprivileged.** The image creates user `facilitator` (uid 10001) and runs as it. `docker-compose.yml` adds `read_only: true`, `cap_drop: [ALL]` and `no-new-privileges`. The service listens on 8080 and only reads its config, and the e2e suite and the fork demo pass under these settings.
+
+The labels now name this repository as the image's source and Apache-2.0 as its licence; x402-rs and its commit are in `x402-rs.source` and `x402-rs.revision`.
+
+**F04: a Bitcoin network is listed only with a settler that can record its payments.**
+
+- `Settler::check_deployment` now says why a check failed:
+  - `Unreachable`: the `eth_call` failed.
+  - `Invalid`: nothing at the address answers `SETTLER()` like an `X402BtcSettler`, or its `SETTLER` is not one of the facilitator's Hemi signers.
+- The scheme facilitator keeps the outcome. Until a check passes, the network is missing from `/supported` and from `signers`, and verify and settle are refused before anything reaches Hemi:
+  - `Invalid` is final until restart, since the `SETTLER` and the signers cannot change. Verify and settle answer `invalid_network`, as for a network the facilitator does not serve.
+  - `Unreachable` is checked again, at most every 30 seconds, the next time the network is asked about. Until then the answer is `unexpected_*_error`, which the caller may retry.
+- A passed check is final. The startup log says which case applies, at error level for `Invalid`. The EVM chains are served either way.
+- Before this, a wrong signer showed as one warning in the log. The network stayed listed and verify passed, but settle failed at gas estimation. A seller would offer BTC, and its buyer would pay on Bitcoin for a request that was never served.
+
+The audit's reproduction, run by hand on forks with hemi.16: the settler accepts only anvil #2, and the facilitator was started with anvil #3 as its mainnet key.
+
+```
+startup log  ERROR bip122 settler unusable; this network is not listed in /supported and its verify and settle are refused
+             chain=bip122:000000000019d6689c085ae165831e93 … (testnet3's settler passed: "Using bip122 provider")
+/supported   kinds: eip155:43111, eip155:743111, bip122:000000000933ea01ad0ee984209779ba   (no bip122 mainnet, no signer for it)
+/verify      {"invalidReason":"invalid_network","isValid":false,…}                         HTTP 200
+/settle      {"errorReason":"invalid_network","success":false,"transaction":"",…}          HTTP 200
+right key    kinds include bip122:000000000019d6689c085ae165831e93; settle reaches the settler (hBK does not know the made-up txid)
+container    user=10001:10001 readonly=true capdrop=[ALL] secopt=[no-new-privileges:true]
+```
+
+**F02: security upgrades, pinned in a committed lock.**
+
+- The build used to append `lock-additions.txt` to upstream's `Cargo.lock` and let `cargo fetch` prune it. It now uses `facilitator/x402-rs/build/Cargo.lock`: that same pruned lock, with these upgrades made by `cargo update -p NAME@OLD --precise NEW` in the pinned builder image:
+
+  | Package | From | To | Advisories |
+  |------|------|------|------|
+  | `anyhow` | 1.0.102 | 1.0.103 | RUSTSEC-2026-0190 |
+  | `h2` | 0.4.14 | 0.4.16 | RUSTSEC-2026-0258 |
+  | `rustls-webpki` | 0.103.13 | 0.103.16 | RUSTSEC-2026-0382 |
+  | `rustls` | 0.23.40 | 0.23.46 | RUSTSEC-2026-0285, -0346, -0348, -0349 |
+  | `ruint` | 1.18.0 | 1.20.0 | RUSTSEC-2026-0220 |
+  | `serde_with` | 3.20.0 | 3.21.0 | GHSA-7gcf-g7xr-8hxj |
+  | `tokio` | 1.52.3 | 1.53.3 | RUSTSEC-2026-0386 |
+
+- Cargo chose some versions itself: `aws-lc-rs` 1.19.0 and `aws-lc-sys` 0.47.0 with a new `pkg-config` 0.3.34 for `rustls-webpki`, the `ark-ff` 0.6 family for `ruint`, and `serde_with_macros` 3.21.0. Resolving these again in every build would pick whatever is newest that day, so the whole lock is committed and fetched with `--locked`.
+- `check-lock-subset.sh` now takes any number of allow-lists. It refuses any package that is not in upstream's lock, `lock-additions.txt` or the new `lock-upgrades.txt` (17 entries, with the advisories in its header). Without the upgrades file, the committed lock fails the check.
+
+Not upgraded, because no compatible release fixes them:
+- `crypto-bigint` 0.5.5 (RUSTSEC-2026-0387): the fix is 0.7.6, and `elliptic-curve` 0.13 and `alloy-signer` 2.0.5 need 0.5. This is the timing advisory under the signer's key; it needs an alloy upgrade.
+- `lru` 0.16.4 (RUSTSEC-2026-0253): the fix is in 0.18.2, a breaking release, and `alloy-provider` 2.0.5 needs 0.16.
+- `block-buffer` 0.12.0: no fixed release is listed.
+- `paste` and `proc-macro-error2`: unmaintained, and used at compile time only.
+
+The audit's other flagged packages are not in this binary's dependency graph (`quinn-proto`, `rkyv`, `webpki-root-certs`, `derivative`, `pin-utils`).
+
+**Verification** on 2026-11-10:
+
+```
+docker compose build          exit 0; "Cargo.lock: 498 packages as upstream locked them (of 1200); 27 others, all listed in
+                              /hemi/build/lock-additions.txt /hemi/build/lock-upgrades.txt"; aws-lc-sys 0.47.0 compiled
+Rust tests (CI's commands, --network none)   179 passed, 27 ignored, 0 failed (176 before plus the 3 new F04 tests);
+                              no warnings from x402-chain-bip122
+npm run test:e2e              Test Files 14 passed (14), Tests 147 passed (147), 377 s
+buyer/demo-fork.sh            exit 0: all five payments settled
+image                         uid=10001(facilitator); apt 3.0.4; /var/lib/apt/lists empty; CA bundle present
+```
+
+**Left.**
+- The `crypto-bigint` and `lru` advisories, which need an alloy upgrade.
+- An OS package scan of the new image: none was run here.
+- Licence files inside the image, if it is ever published.
+- The browser-origin (CORS) setting that x402-rs ships.
+- The GitHub settings of F07.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

@@ -14,17 +14,22 @@
 # Secrets come from .env (copy .env.example). RPC defaults: dRPC primary, Hemi public RPC fallback.
 services:
   facilitator:
-    # x402-rs e75adda + facilitator/x402-rs/patches and crates/x402-chain-bip122 (hemi.15), see
+    # x402-rs e75adda + facilitator/x402-rs/patches and crates/x402-chain-bip122 (hemi.16), see
     # facilitator/x402-rs/README.md.
     # Unpatched base, for comparison: the stock image this replaced,
     #   ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d824bf6a5f342add8ae22eb44a2c56894ad22e7d3f5b83ba38023226b9
     #   (x402-rs 2.0.2, revision 0b14f39; EVM code identical to e75adda, DECISIONS.md D-013).
-    image: hemi-x402-facilitator:e75adda-hemi.15
+    image: hemi-x402-facilitator:e75adda-hemi.16
     build:
       context: ./facilitator
     # Bounded, so a missing-contract or missing-key startup error stops instead of crash-looping
     # silently under `up -d`; `docker compose logs facilitator` shows why.
     restart: on-failure:5
+    # Least privilege (D-047): the image runs as an unprivileged user, and the container gets no Linux
+    # capabilities, no privilege escalation and a read-only root filesystem.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     # Loopback by default: /settle has no authentication and the signer pays its gas, so anyone who
     # can reach this port can spend that gas. README "The facilitator" says what a wider binding needs.
     ports:

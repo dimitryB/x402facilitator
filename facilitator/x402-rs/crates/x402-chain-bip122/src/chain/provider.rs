@@ -14,7 +14,7 @@ use x402_chain_eip155::chain::Eip155ChainProvider;
 use x402_types::chain::{ChainId, ChainProviderOps};
 
 use crate::chain::{Bip122ChainConfig, Bip122Network, ConfirmationPolicy};
-use crate::v2_bip122_exact::settler::HemiSettler;
+use crate::v2_bip122_exact::settler::{HemiSettler, Settler};
 
 /// A Bitcoin network served through a Hemi chain.
 #[derive(Debug)]
@@ -27,8 +27,9 @@ pub struct Bip122ChainProvider {
 
 impl Bip122ChainProvider {
     /// The provider of `config`'s chain, recording payments through `hemi`, which must be the provider
-    /// of `config.hemi()`. Checks the settler deployment and logs what it finds; a failed check is a
-    /// warning, not an error, so that an RPC outage at startup does not stop the EVM chains.
+    /// of `config.hemi()`. Checks the settler deployment and logs what it finds. A failed check does not
+    /// stop the facilitator, so the EVM chains are served either way; the scheme lists this network and
+    /// sends settlements only once a check passes (`V2Bip122ExactFacilitator::ready`).
     pub async fn new(
         config: &Bip122ChainConfig,
         settler: Address,
@@ -62,9 +63,13 @@ impl Bip122ChainProvider {
                 chain = %provider.network, hemi = %hemi_chain, settler = %settler, signer = %signer,
                 "Using bip122 provider"
             ),
-            Err(e) => tracing::warn!(
+            Err(crate::v2_bip122_exact::settler::DeploymentError::Invalid(e)) => tracing::error!(
                 chain = %provider.network, hemi = %hemi_chain, settler = %settler, error = %e,
-                "bip122 settler check failed; verify and settle will fail until it passes"
+                "bip122 settler unusable; this network is not listed in /supported and its verify and settle are refused"
+            ),
+            Err(crate::v2_bip122_exact::settler::DeploymentError::Unreachable(e)) => tracing::warn!(
+                chain = %provider.network, hemi = %hemi_chain, settler = %settler, error = %e,
+                "bip122 settler check could not run; this network is listed once a check passes"
             ),
         }
         let _ = check;

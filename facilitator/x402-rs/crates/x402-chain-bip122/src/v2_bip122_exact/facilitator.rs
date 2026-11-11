@@ -19,11 +19,17 @@
 //! same payment (same `accepted` and payload) is answered from the Hemi transaction; the first retry that
 //! sees it mined gets the success, later ones are replays; a success whose caller left is kept for the
 //! caller's retry (0016); a running settle's record is never evicted (0020).
+//!
+//! The network is listed in `/supported`, and verify and settle run, only once the settler check has
+//! passed: the contract answers `SETTLER()` and its `SETTLER` is one of the Hemi signers (D-047). A
+//! buyer pays before anyone settles, so advertising a settler that would revert lets a buyer pay for
+//! nothing.
 
 use alloy_primitives::{B256, Bytes, TxHash, keccak256};
 use bitcoin::secp256k1::{Secp256k1, VerifyOnly};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 use x402_chain_eip155::v2_eip155_exact::facilitator::pending::{
     InFlight, PendingSettlements, Record,
 };
@@ -38,7 +44,9 @@ use x402_types::scheme::{
 use crate::V2Bip122Exact;
 use crate::chain::{Bip122ChainProvider, Bip122Network, ConfirmationPolicy};
 use crate::v2_bip122_exact::derive::{AccountKey, PayToError, address, payment_ref};
-use crate::v2_bip122_exact::settler::{Check, SettleOutcome, SettleQuery, Settler, Verdict};
+use crate::v2_bip122_exact::settler::{
+    Check, DeploymentError, SettleOutcome, SettleQuery, Settler, Verdict,
+};
 use crate::v2_bip122_exact::types::{
     AddressType, BTC, EXACT, ExactBip122Request, UPFRONT, UTXO, parse_request,
 };
@@ -80,6 +88,23 @@ struct Prepared {
     address: String,
 }
 
+/// How often a settler check that could not reach Hemi is repeated, at most.
+const RECHECK: Duration = Duration::from_secs(30);
+
+/// What the facilitator knows about its settler (see [`V2Bip122ExactFacilitator::ready`]).
+#[derive(Debug, Clone)]
+enum Deployment {
+    /// The check passed. Final: the contract's `SETTLER` and the signers cannot change.
+    Ready,
+    /// The check ran and failed. Final until restart.
+    Invalid(String),
+    /// Not checked yet (`checked: None`), or the last check could not reach Hemi.
+    Unknown {
+        reason: String,
+        checked: Option<Instant>,
+    },
+}
+
 /// Facilitator of `exact` payments on one Bitcoin network.
 pub struct V2Bip122ExactFacilitator<S> {
     network: Bip122Network,
@@ -88,6 +113,8 @@ pub struct V2Bip122ExactFacilitator<S> {
     /// Outputs being settled, or whose settlement transaction on Hemi is pending.
     pending: PendingSettlements,
     secp: Secp256k1<VerifyOnly>,
+    deployment: Mutex<Deployment>,
+    recheck: Duration,
 }
 
 impl<S: Settler> V2Bip122ExactFacilitator<S> {
@@ -98,7 +125,63 @@ impl<S: Settler> V2Bip122ExactFacilitator<S> {
             confirmations,
             pending: PendingSettlements::default(),
             secp: Secp256k1::verification_only(),
+            deployment: Mutex::new(Deployment::Unknown {
+                reason: "the settler has not been checked yet".into(),
+                checked: None,
+            }),
+            recheck: RECHECK,
         }
+    }
+
+    /// Whether the settler can record payments. Checked on first use and remembered: a passed or a
+    /// failed check is final, and a check that could not reach Hemi is repeated at most every
+    /// `recheck`. Until it passes, the network is not listed and verify and settle are refused.
+    async fn ready(&self) -> Result<(), DeploymentError> {
+        let known = |state: &Deployment| match state {
+            Deployment::Ready => Some(Ok(())),
+            Deployment::Invalid(reason) => Some(Err(DeploymentError::Invalid(reason.clone()))),
+            Deployment::Unknown {
+                reason,
+                checked: Some(at),
+            } if at.elapsed() < self.recheck => Some(Err(DeploymentError::Unreachable(reason.clone()))),
+            Deployment::Unknown { .. } => None,
+        };
+        if let Some(known) = known(&self.lock_deployment()) {
+            return known;
+        }
+        let next = match self.settler.check_deployment().await {
+            Ok(_) => Deployment::Ready,
+            Err(DeploymentError::Invalid(reason)) => Deployment::Invalid(reason),
+            Err(DeploymentError::Unreachable(reason)) => Deployment::Unknown {
+                reason,
+                checked: Some(Instant::now()),
+            },
+        };
+        let mut state = self.lock_deployment();
+        // Another request may have finished a check meanwhile; a final answer is never overwritten.
+        if matches!(*state, Deployment::Unknown { .. }) {
+            #[cfg(feature = "telemetry")]
+            match &next {
+                Deployment::Ready => tracing::info!(chain = %self.network, "bip122 settler check passed"),
+                Deployment::Invalid(reason) => tracing::error!(
+                    chain = %self.network, error = %reason,
+                    "bip122 settler unusable; not listing this network"
+                ),
+                Deployment::Unknown { reason, .. } => tracing::warn!(
+                    chain = %self.network, error = %reason,
+                    "bip122 settler check could not run; not listing this network until it does"
+                ),
+            }
+            *state = next;
+        }
+        known(&state).unwrap_or_else(|| match &*state {
+            Deployment::Unknown { reason, .. } => Err(DeploymentError::Unreachable(reason.clone())),
+            _ => unreachable!("known() answers for Ready and Invalid"),
+        })
+    }
+
+    fn lock_deployment(&self) -> std::sync::MutexGuard<'_, Deployment> {
+        self.deployment.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Reads the request and checks everything that needs neither the chain nor the derivation.
@@ -305,6 +388,17 @@ fn verdict_error(check: &Check, prepared: &Prepared, hemi: &ChainId) -> X402Sche
 }
 
 /// An output that was already settled: x402 v2 §9 `invalid_transaction_state`.
+/// A settler that cannot be used: refused like a network this facilitator does not serve, which it no
+/// longer lists. One that could not be checked: an unexpected error, which the caller may retry.
+fn not_ready(error: DeploymentError) -> X402SchemeFacilitatorError {
+    match error {
+        DeploymentError::Invalid(_) => PaymentVerificationError::UnsupportedChain.into(),
+        DeploymentError::Unreachable(reason) => X402SchemeFacilitatorError::OnchainFailure(format!(
+            "the settler could not be checked: {reason}"
+        )),
+    }
+}
+
 fn already_settled() -> PaymentVerificationError {
     PaymentVerificationError::AuthorizationAlreadyUsed
 }
@@ -337,6 +431,7 @@ impl<S: Settler> X402SchemeFacilitator for V2Bip122ExactFacilitator<S> {
         if let Some(record) = self.pending.get(&self.record_id(&request)) {
             return Err(in_flight(record).into());
         }
+        self.ready().await.map_err(not_ready)?;
         let prepared = self.prepare(request, min_confirmations)?;
         self.check(&prepared).await?;
         // No payer: a Bitcoin payment has inputs, not one paying address.
@@ -376,6 +471,7 @@ impl<S: Settler> X402SchemeFacilitator for V2Bip122ExactFacilitator<S> {
         // request that fails its checks, such as one with a forged paymentId, must never hold the record,
         // or a watcher could block a payment's settlement for the length of an eth_call, again and again
         // (D-037). Two requests that both pass still race at `begin`, and one of them wins.
+        self.ready().await.map_err(not_ready)?;
         let prepared = self.prepare(request, min_confirmations)?;
         self.check(&prepared).await?;
         let in_flight_guard = match self.pending.begin(id, key) {
@@ -397,6 +493,13 @@ impl<S: Settler> X402SchemeFacilitator for V2Bip122ExactFacilitator<S> {
 
     async fn supported(&self) -> Result<proto::SupportedResponse, X402SchemeFacilitatorError> {
         let chain_id = self.network.chain_id();
+        if self.ready().await.is_err() {
+            return Ok(proto::SupportedResponse {
+                kinds: vec![],
+                extensions: vec![],
+                signers: HashMap::new(),
+            });
+        }
         let extra = V2Bip122ExactSupportedExtra {
             asset: BTC,
             asset_transfer_method: UTXO,
@@ -457,6 +560,9 @@ mod tests {
         sent: Vec<(SettleQuery, B256, TxHash)>,
         verified: Vec<SettleQuery>,
         rpc_down: bool,
+        /// What `check_deployment` answers: None passes.
+        deployment: Option<DeploymentError>,
+        deployment_checks: usize,
     }
 
     /// The settler contract, simulated: outputs become consumed when a settle is mined.
@@ -475,6 +581,8 @@ mod tests {
                 sent: vec![],
                 verified: vec![],
                 rpc_down: false,
+                deployment: None,
+                deployment_checks: 0,
             })))
         }
         fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -507,6 +615,14 @@ mod tests {
         }
         fn signer_addresses(&self) -> Vec<String> {
             vec![Address::repeat_byte(0x51).to_string()]
+        }
+        async fn check_deployment(&self) -> Result<Address, DeploymentError> {
+            let mut state = self.state();
+            state.deployment_checks += 1;
+            match &state.deployment {
+                None => Ok(Address::repeat_byte(0x51)),
+                Some(error) => Err(error.clone()),
+            }
         }
         async fn verify(
             &self,
@@ -960,5 +1076,62 @@ mod tests {
             json!({ "bip122:000000000019d6689c085ae165831e93": [Address::repeat_byte(0x51).to_string()] })
         );
         assert_eq!(json["extensions"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn the_settler_is_checked_once_when_it_passes() {
+        let (facilitator, settler) = facilitator();
+        facilitator.supported().await.unwrap();
+        facilitator.verify(&request()).await.unwrap();
+        facilitator.supported().await.unwrap();
+        assert_eq!(settler.state().deployment_checks, 1);
+    }
+
+    /// The audit's F04: a settler whose SETTLER is another address (or no settler at all) must not be
+    /// listed, or a seller offers BTC, a buyer pays, and every settle reverts.
+    #[tokio::test]
+    async fn an_unusable_settler_is_not_listed_and_its_payments_are_refused() {
+        let (facilitator, settler) = facilitator();
+        settler.state().deployment = Some(DeploymentError::Invalid(
+            "the settler only accepts settle() from 0x15d3…".into(),
+        ));
+        let supported = serde_json::to_value(facilitator.supported().await.unwrap()).unwrap();
+        assert_eq!(supported["kinds"], json!([]));
+        assert_eq!(supported["signers"], json!({}));
+        assert_eq!(
+            reason(facilitator.verify(&request()).await.unwrap_err()),
+            ErrorReason::InvalidNetwork
+        );
+        assert_eq!(
+            reason(facilitator.settle(&request()).await.unwrap_err()),
+            ErrorReason::InvalidNetwork
+        );
+        let state = settler.state();
+        assert!(state.verified.is_empty() && state.sent.is_empty());
+        // Final: not asked again.
+        assert_eq!(state.deployment_checks, 1);
+    }
+
+    #[tokio::test]
+    async fn a_check_that_cannot_reach_hemi_is_repeated_and_the_network_is_listed_once_it_passes() {
+        let (mut facilitator, settler) = facilitator();
+        settler.state().deployment = Some(DeploymentError::Unreachable("connection refused".into()));
+        let supported = serde_json::to_value(facilitator.supported().await.unwrap()).unwrap();
+        assert_eq!(supported["kinds"], json!([]));
+        assert!(matches!(
+            facilitator.settle(&request()).await.unwrap_err(),
+            X402SchemeFacilitatorError::OnchainFailure(_)
+        ));
+        // Within the recheck interval the answer is remembered, not asked again.
+        assert_eq!(settler.state().deployment_checks, 1);
+        assert_eq!(settler.sent(), 0);
+
+        settler.state().deployment = None;
+        facilitator.recheck = Duration::ZERO;
+        let supported = serde_json::to_value(facilitator.supported().await.unwrap()).unwrap();
+        assert_eq!(supported["kinds"][0]["network"], json!("bip122:000000000019d6689c085ae165831e93"));
+        assert_eq!(settler.state().deployment_checks, 2);
+        facilitator.settle(&request()).await.unwrap();
+        assert_eq!(settler.sent(), 1);
     }
 }

@@ -1,14 +1,14 @@
 # Packages the hemi-x402 build adds to x402-rs's Cargo.lock, as Cargo.lock entries: the `bitcoin`
 # crate and its dependencies that upstream's lock does not have, for x402-chain-bip122.
 #
-# The Dockerfile appends this file to the lock before `cargo fetch`, so these exact versions are used
-# (cargo keeps a locked version that satisfies the manifest), and check-lock-subset.sh accepts them,
-# and only them, besides the packages of upstream's lock. Every package upstream locked keeps its
+# They are in build/Cargo.lock, the lock the build uses, and check-lock-subset.sh accepts them, and only
+# them and the security upgrades in lock-upgrades.txt, besides the packages of upstream's lock. Every package upstream locked keeps its
 # version: bitcoin 0.32 reuses upstream's bitcoin_hashes 0.14.100, bitcoin-io 0.1.100,
 # hex-conservative 0.2.2 and secp256k1-sys 0.10.1.
 #
 # To change it: edit the [workspace.dependencies] `bitcoin` line in build/0001-…patch, run
-# `cargo update -p bitcoin` on the patched tree, and copy the new or changed entries here.
+# `cargo update -p bitcoin` on the patched tree with build/Cargo.lock in place, copy the resulting lock to
+# build/Cargo.lock, and copy the new or changed entries here.
 
 [[package]]
 name = "base58ck"

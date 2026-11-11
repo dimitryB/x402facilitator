@@ -171,6 +171,27 @@ impl fmt::Display for SettlerError {
 
 impl std::error::Error for SettlerError {}
 
+/// Why settlements cannot be sent to the settler, from [`Settler::check_deployment`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeploymentError {
+    /// The check could not run: the `eth_call` to Hemi failed. It is repeated later.
+    Unreachable(String),
+    /// The check ran and failed: nothing at the address answers `SETTLER()` like an `X402BtcSettler`,
+    /// or its `SETTLER` is not one of this facilitator's Hemi signers. Both are fixed until the
+    /// facilitator restarts with another settler address or key.
+    Invalid(String),
+}
+
+impl fmt::Display for DeploymentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unreachable(reason) | Self::Invalid(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for DeploymentError {}
+
 /// The facilitator's view of the settler contract. [`HemiSettler`] is the real one; tests use a mock.
 #[async_trait::async_trait]
 pub trait Settler: Send + Sync {
@@ -180,6 +201,9 @@ pub trait Settler: Send + Sync {
     fn hemi_chain(&self) -> ChainId;
     /// The Hemi signers that send `settle`; the contract accepts only its `SETTLER`.
     fn signer_addresses(&self) -> Vec<String>;
+    /// Whether settlements can be sent to the contract: it answers `SETTLER()` like an
+    /// `X402BtcSettler`, and its `SETTLER` is one of the Hemi signers. Returns that `SETTLER`.
+    async fn check_deployment(&self) -> Result<Address, DeploymentError>;
     /// `verify`, as an `eth_call`. It never reverts on a payment; an error here is Hemi or hBK failing.
     async fn verify(&self, query: &SettleQuery) -> Result<Check, SettlerError>;
     /// Sends `settle` and waits for its receipt.
@@ -228,28 +252,6 @@ mod hemi {
             })
         }
 
-        /// Checks that the contract answers and that one of the Hemi signers is its `SETTLER`.
-        /// Returns the contract's `SETTLER`.
-        pub async fn check_deployment(&self) -> Result<Address, SettlerError> {
-            let data = self
-                .call(IX402BtcSettler::SETTLERCall {}.abi_encode().into())
-                .await?;
-            let settler = IX402BtcSettler::SETTLERCall::abi_decode_returns(&data).map_err(|e| {
-                SettlerError(format!(
-                    "{} does not answer SETTLER() like an X402BtcSettler: {e}",
-                    self.address
-                ))
-            })?;
-            let signers = Eip155SignerAddresses::signer_addresses(&*self.hemi);
-            if !signers.contains(&settler) {
-                return Err(SettlerError(format!(
-                    "the settler {} only accepts settle() from {settler}, which is not a signer of {} ({signers:?})",
-                    self.address,
-                    self.hemi.chain_id()
-                )));
-            }
-            Ok(settler)
-        }
     }
 
     #[async_trait::async_trait]
@@ -264,6 +266,28 @@ mod hemi {
 
         fn signer_addresses(&self) -> Vec<String> {
             ChainProviderOps::signer_addresses(&*self.hemi)
+        }
+
+        async fn check_deployment(&self) -> Result<Address, DeploymentError> {
+            let data = self
+                .call(IX402BtcSettler::SETTLERCall {}.abi_encode().into())
+                .await
+                .map_err(|e| DeploymentError::Unreachable(e.0))?;
+            let settler = IX402BtcSettler::SETTLERCall::abi_decode_returns(&data).map_err(|e| {
+                DeploymentError::Invalid(format!(
+                    "{} does not answer SETTLER() like an X402BtcSettler: {e}",
+                    self.address
+                ))
+            })?;
+            let signers = Eip155SignerAddresses::signer_addresses(&*self.hemi);
+            if !signers.contains(&settler) {
+                return Err(DeploymentError::Invalid(format!(
+                    "the settler {} only accepts settle() from {settler}, which is not a signer of {} ({signers:?})",
+                    self.address,
+                    self.hemi.chain_id()
+                )));
+            }
+            Ok(settler)
         }
 
         async fn verify(&self, query: &SettleQuery) -> Result<Check, SettlerError> {
