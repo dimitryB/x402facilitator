@@ -1,4 +1,4 @@
-# Security upgrades of packages in x402-rs's Cargo.lock (DECISIONS.md D-047, D-049, D-050), as Cargo.lock entries.
+# Security upgrades of packages in x402-rs's Cargo.lock (DECISIONS.md D-047, D-049, D-050, D-052), as Cargo.lock entries.
 #
 # The build uses build/Cargo.lock: upstream's lock pruned to this build's workspace, plus
 # lock-additions.txt, with the versions below in place of the ones upstream pinned. `cargo fetch --locked`
@@ -15,6 +15,8 @@
 #   serde_with 3.20.0 -> 3.21.0         GHSA-7gcf-g7xr-8hxj [serde_with_macros 3.20.0 -> 3.21.0]
 #   tokio 1.52.3 -> 1.53.3              RUSTSEC-2026-0386
 #   block-buffer 0.12.0 -> 0.12.1       GHSA-qwgh-2vcv-g2f7 (D-050; 0.12.1 was out when D-047 listed it as unfixed)
+#   quinn-proto 0.11.14 -> 0.11.15      GHSA-4w2j-m93h-cj5j (D-052; not built: reqwest's optional http3 feature, which
+#                                       nothing here enables, is all that names it)
 #   alloy 2.0.5 -> 2.5.0 (its 17 crates: alloy-consensus, -consensus-any, -contract, -eips, -json-rpc,
 #     -network, -network-primitives, -provider, -rpc-client, -rpc-types-any, -rpc-types-eth, -serde,
 #     -signer, -signer-local, -transport, -transport-http, -tx-macros)
@@ -563,6 +565,28 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "quinn-proto"
+version = "0.11.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e"
+dependencies = [
+ "aws-lc-rs",
+ "bytes",
+ "getrandom 0.3.4",
+ "lru-slab",
+ "rand 0.9.4",
+ "ring",
+ "rustc-hash",
+ "rustls",
+ "rustls-pki-types",
+ "slab",
+ "thiserror",
+ "tinyvec",
+ "tracing",
+ "web-time",
+]
 
 [[package]]
 name = "ruint"
