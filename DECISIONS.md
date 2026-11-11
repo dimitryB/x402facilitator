@@ -1901,6 +1901,36 @@ image                         uid=10001(facilitator); apt 3.0.4; /var/lib/apt/li
 - The browser-origin (CORS) setting that x402-rs ships.
 - The GitHub settings of F07.
 
+## D-048. `main` is protected by a ruleset, the e2e check always reports, and Dependabot alerts are on
+
+The audit's F07 (D-046): `main` had no protection and no rulesets, and Dependabot alerts and security updates were off, so a change could reach `main` without passing CI. On 2026-11-10 the owner chose these settings.
+
+**The e2e check reports on every pull request.** The e2e workflow had a path filter, so a docs-only pull request got no "Image build, Rust tests, e2e on forks" check at all. A required check that never reports blocks a pull request forever.
+- The workflow now runs on every pull request. A first job lists the changed files, including the old names of renamed ones, and matches them against the paths the filter had.
+- The e2e job runs only if one matches. GitHub counts a job skipped by its condition as passed.
+- If that first job fails, the e2e job runs anyway, so an error there cannot let a pull request skip the suite.
+- This is PR #7 (`4c5f4c5`), whose own run took the run path.
+
+**Ruleset 27003451, "main"**, on the default branch, enforcement active:
+
+| Rule | Setting | Why |
+|------|------|------|
+| Pull request required | 0 approvals | The owner cannot approve their own pull requests, so one approval would block every merge. The rule still means every change to `main` goes through a pull request and its checks |
+| Required checks | `TypeScript (typecheck, unit tests)`, `Contracts (fmt, build, tests)`, `Image build, Rust tests, e2e on forks`, each from the GitHub Actions app (id 15368) | Pinning the app means no other integration can report them as passed |
+| Up to date with `main` | Not required | With pull requests that follow one another, as #4 and #5 did, it would force a branch update and another 11-minute e2e run each time |
+| Force pushes, deletion | Blocked | A history rewrite such as D-044's now needs the ruleset changed first |
+| Bypass | Repository admins, pull requests only | An emergency merge of a pull request whose checks are broken; never a direct push |
+
+GitHub added `require_extra_approval_for_unattributed_changes: true` to the pull request rule. It applies only to pull requests Copilot opens without a human collaborator, and only when approvals are required, so it has no effect here. GitHub's view of `main` afterwards (`GET /repos/…/rules/branches/main`) lists `deletion`, `non_fast_forward`, `pull_request` and `required_status_checks` with the three checks.
+
+**Dependabot alerts and security updates are on.**
+- The dependency graph reads the committed `facilitator/x402-rs/build/Cargo.lock` (D-047): 758 packages, 523 of them Rust crates.
+- No alert was open when this was written. Whether the remaining Rust advisories (`crypto-bigint`, `lru`) appear depends on GitHub's advisory database.
+- Security updates can open pull requests for npm only: no `Cargo.toml` sits next to the Rust lock.
+- Dependabot's open pull request #1 (13 npm updates) fails the TypeScript and e2e checks, so it cannot merge until it is fixed.
+
+Secret scanning, push protection and private vulnerability reporting were already on (D-044).
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).
