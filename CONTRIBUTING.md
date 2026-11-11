@@ -35,8 +35,9 @@ CI runs the same commands (`.github/workflows`).
   only. Push protection is on and will reject a commit that contains a recognised credential.
 - **Facilitator patches** (`facilitator/x402-rs/patches`) are small, one concern each, and written so
   they could go upstream. The series must apply in order on the pinned commit; bump the image tag in
-  `docker-compose.yml` when the image changes. The Rust dependency versions come from x402-rs's
-  `Cargo.lock`; the build fails if the lock drifts
+  `docker-compose.yml` when the image changes. The Rust dependency versions come from
+  `facilitator/x402-rs/build/Cargo.lock`: x402-rs's lock with the additions and security upgrades listed
+  next to it. The build fails on any other package
   ([facilitator/x402-rs/README.md](facilitator/x402-rs/README.md)).
 - **Contracts:** `contracts/src/x402` is kept byte-identical to the x402 reference and
   `contracts/lib` is vendored third-party code; neither is edited here. `contracts/src/btc` is the

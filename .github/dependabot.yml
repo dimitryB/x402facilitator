@@ -1,6 +1,7 @@
 # Monthly, grouped: one pull request per ecosystem. Security updates are separate (repository setting).
-# The facilitator's Rust dependencies are not listed: they come from x402-rs's Cargo.lock at the pinned
-# commit (facilitator/Dockerfile), and the build refuses a lock that drifts from it.
+# The facilitator's Rust dependencies are not listed: they come from facilitator/x402-rs/build/Cargo.lock,
+# x402-rs's lock at the pinned commit with listed additions and security upgrades, and the build refuses
+# any other package (facilitator/x402-rs/README.md).
 version: 2
 updates:
   - package-ecosystem: npm

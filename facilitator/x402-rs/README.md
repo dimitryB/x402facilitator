@@ -87,11 +87,17 @@ Spec references are to `x402-foundation/x402` at `e4a0868`:
 cuts the workspace down to the EVM facilitator, which removes Solana, Aptos and TRON. A full workspace
 resolve clones `aptos-core`, which is very large. It also adds `crates/chains/x402-chain-bip122` as a
 member, `bitcoin` 0.32 as a workspace dependency, and the facilitator feature `chain-bip122`, off by default.
-`build/check-lock-subset.sh` checks that the pruned `Cargo.lock` only removed packages, except for the ones
-listed in [`build/lock-additions.txt`](build/lock-additions.txt): every remaining crate keeps the version
-and checksum upstream locked. The additions are `bitcoin` and the eight packages it brings that upstream's
-lock lacks. The file is in Cargo.lock format, and the Dockerfile appends it to the lock before
-`cargo fetch`, so a newer release of any of them on crates.io does not change the build.
+The build uses [`build/Cargo.lock`](build/Cargo.lock): upstream's lock pruned to this workspace, with the
+packages the Bitcoin crate adds and a few security upgrades. `cargo fetch --locked` refuses it if it does
+not match the manifests, so a newer release on crates.io never changes the build.
+`build/check-lock-subset.sh` then refuses any package that is not in upstream's lock or listed in one of
+two files, both in Cargo.lock format:
+- [`build/lock-additions.txt`](build/lock-additions.txt): `bitcoin` and the eight packages it brings that
+  upstream's lock lacks.
+- [`build/lock-upgrades.txt`](build/lock-upgrades.txt): upgrades of packages upstream pinned at versions
+  with security advisories (`rustls`, `rustls-webpki`, `h2`, `tokio`, `anyhow`, `ruint`, `serde_with`),
+  and what they brought with them, 17 entries (DECISIONS.md D-047). Its header says which advisories are
+  left and why.
 
 ## Related upstream pull requests
 
@@ -311,13 +317,13 @@ payer without tokens gets 402 `insufficient_funds`. A Permit2 payer without an a
 ## Building
 
 `docker compose build` from the repo root builds the image named in `docker-compose.yml`
-(`hemi-x402-facilitator:e75adda-hemi.15` for this patch set). The stock image this replaces,
+(`hemi-x402-facilitator:e75adda-hemi.16` for this patch set). The stock image this replaces,
 `ghcr.io/x402-rs/x402-facilitator@sha256:4ebe09d8…`, is kept in a comment there. The Dockerfile works with
 the classic builder, which is all Colima's Docker CLI has without buildx. It runs these steps in order:
 
 1. Fetch x402-rs at the pinned commit and check `git rev-parse HEAD`.
 2. Copy the Bitcoin crate's manifest, with an empty `src/lib.rs` in place of its sources. Apply the build
-   patch, append `build/lock-additions.txt` to `Cargo.lock`, prune and check the lock, and compile all
+   patch, put `build/Cargo.lock` in place, fetch with `--locked` and check the lock, and compile all
    dependencies once against unpatched sources, `bitcoin` included.
 3. Apply each patch in order with `git apply --check`, then `git apply`, copy the crate's sources, and
    build again with `--features chain-bip122`. Editing a patch or the crate re-runs only this step.
@@ -1422,10 +1428,13 @@ each case: `null` receipts, frozen at an old block, a block during the wait, and
     every config working on a chain that has no settler (Hemi testnet today), and needs no second set of
     config files.
   - With a settler set, the provider calls its `SETTLER()` and checks it is one of the Hemi signers. A failed
-    check is a warning, not an error, so an RPC outage at startup cannot stop the EVM chains. With no contract
-    at the address, verify and settle answer `unexpected_verify_error` / `unexpected_settle_error`. With a
-    `SETTLER` that is not a signer, verify works and settle fails in gas estimation
-    (`unexpected_settle_error`), before anything is sent.
+    check never stops the facilitator, so the EVM chains are served either way. Until a check passes, the
+    scheme does not list the Bitcoin network in `/supported` and refuses its verify and settle (D-047): a
+    buyer pays before anyone settles, so listing a settler that cannot record payments let a buyer pay for
+    nothing. No contract at the address, or a `SETTLER` that is not a signer, is final until restart, and
+    verify and settle answer `invalid_network`. A check that could not reach Hemi is repeated, at most every
+    30 seconds, when the network is next asked about; until it passes, verify and settle answer
+    `unexpected_verify_error` / `unexpected_settle_error`.
 - **Upstream.** The Cargo side (workspace member, dependency, feature) is in the build patch here, because
   the crate lives outside x402-rs's tree. Upstream, the crate would be `crates/chains/x402-chain-bip122` and
   this patch would carry those lines.
