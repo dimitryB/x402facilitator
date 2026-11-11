@@ -24,7 +24,7 @@ npm run test:e2e                  # end-to-end suite against that image on local
 buyer/demo-fork.sh                # the whole flow once: forks, facilitator, seller, five payments
 ```
 
-CI runs the same commands (`.github/workflows`).
+CI runs the same commands (`.github/workflows`). A pull request into `main` needs its three checks to pass: TypeScript, Contracts, and the image and e2e job, which is skipped (and counts as passed) when the change touches nothing it builds or tests. Force pushes to `main` are blocked.
 
 ## Rules for a change
 
