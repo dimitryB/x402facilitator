@@ -7,5 +7,5 @@
   "main": "index.ts",
   "exports": { ".": "./index.ts", "./hemi.json": "./hemi.json" },
   "scripts": { "typecheck": "tsc --noEmit -p ." },
-  "dependencies": { "viem": "2.57.5" }
+  "dependencies": { "viem": "2.57.16" }
 }
