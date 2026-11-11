@@ -6,7 +6,9 @@
  * createPaymentPayload pays on Bitcoin L1 (through the PayBtc callback or a BtcWallet) to the address
  * derived from `payTo` and `extra.paymentId`, and returns `{ txid, vout }`. The payment is real and
  * irreversible, so the scheme journals it by paymentId: a second call for the same paymentId returns the
- * recorded output instead of paying again. Concurrent calls for one paymentId share one payment.
+ * recorded output instead of paying again. Concurrent calls for one paymentId share one payment, and
+ * clients that share a journal (a FilePaymentJournal across processes) claim the paymentId atomically
+ * before paying, so only one of them pays.
  *
  * The facilitator can accept the payload only once hVM sees the transaction with enough confirmations,
  * so the buyer re-sends the same payload until then (buyer/btc-l1.ts). Do not use wrapFetchWithPayment
@@ -70,6 +72,13 @@ export interface CheckedBtcRequirements {
   sats: bigint;
 }
 
+/** What a payment pays: two requests for one paymentId may share a payment only if these agree. */
+interface PaymentTerms {
+  network: BtcNetwork;
+  address: string;
+  amount: string;
+}
+
 /** Everything a buyer must check in a bip122 accept before paying it. Throws with the reason. */
 export function checkBtcRequirements(requirements: PaymentRequirements): CheckedBtcRequirements {
   const { network, asset, amount, extra } = requirements;
@@ -77,13 +86,18 @@ export function checkBtcRequirements(requirements: PaymentRequirements): Checked
   if (!isBtcNetwork(network)) throw new Error(`not a supported Bitcoin network: ${network}`);
   if (asset !== BTC_ASSET) throw new Error(`asset must be "${BTC_ASSET}", got ${JSON.stringify(asset)}`);
   if (!SATS.test(amount)) throw new Error(`amount must be a positive integer of satoshis, got ${JSON.stringify(amount)}`);
-  const atm = extra?.assetTransferMethod ?? UTXO_TRANSFER_METHOD;
+  // Required, as the facilitator requires them: a default here would pay for requirements it then rejects.
+  const atm = extra?.assetTransferMethod;
   if (atm !== UTXO_TRANSFER_METHOD) throw new Error(`extra.assetTransferMethod must be "${UTXO_TRANSFER_METHOD}", got ${JSON.stringify(atm)}`);
-  const flow = extra?.paymentFlow ?? "upfront";
+  const flow = extra?.paymentFlow;
   if (flow !== "upfront") throw new Error(`extra.paymentFlow must be "upfront", got ${JSON.stringify(flow)}`);
   if (!isPaymentId(extra?.paymentId)) throw new Error(`extra.paymentId must be 32 lowercase hex chars, got ${JSON.stringify(extra?.paymentId)}`);
   const addressType = extra?.addressType ?? DEFAULT_ADDRESS_TYPE;
   if (!isAddressType(addressType)) throw new Error(`extra.addressType ${JSON.stringify(addressType)} is not supported`);
+  const minConfirmations = extra?.minConfirmations;
+  if (minConfirmations !== undefined && !(Number.isInteger(minConfirmations) && (minConfirmations as number) >= 1 && (minConfirmations as number) <= 0xffffffff)) {
+    throw new Error(`extra.minConfirmations must be a whole number >= 1, got ${JSON.stringify(minConfirmations)}`);
+  }
   return { network, paymentId: extra.paymentId as string, addressType, sats: BigInt(amount) };
 }
 
@@ -92,7 +106,7 @@ export class ExactBtcClientScheme implements SchemeNetworkClient {
   readonly journal: PaymentJournal;
   private readonly pay: PayBtc;
   private readonly maxSats?: bigint;
-  private readonly inflight = new Map<string, Promise<BtcOutputRef>>();
+  private readonly inflight = new Map<string, { terms: PaymentTerms; payment: Promise<BtcOutputRef> }>();
 
   constructor(payer: PayBtc | BtcPayer, options: ExactBtcClientSchemeOptions = {}) {
     this.pay = typeof payer === "function" ? payer : (address, sats, ctx) => payer.pay(address, sats, ctx);
@@ -113,19 +127,24 @@ export class ExactBtcClientScheme implements SchemeNetworkClient {
     if (this.maxSats !== undefined && checked.sats > this.maxSats) {
       throw new Error(`amount ${checked.sats} sats exceeds this client's cap of ${this.maxSats}`);
     }
+    const derived = derivePaymentAddress(requirements.payTo, checked.network, checked.paymentId, checked.addressType);
+    const terms: PaymentTerms = { network: checked.network, address: derived.address, amount: checked.sats.toString() };
     let pending = this.inflight.get(checked.paymentId);
-    if (!pending) {
-      pending = this.payOnce(requirements, checked).finally(() => this.inflight.delete(checked.paymentId));
+    if (pending) {
+      assertSameTerms(pending.terms, terms, checked.paymentId);
+    } else {
+      const payment = this.payOnce(requirements, checked, derived).finally(() => this.inflight.delete(checked.paymentId));
+      pending = { terms, payment };
       this.inflight.set(checked.paymentId, pending);
     }
-    return { x402Version, payload: btcPayload(await pending) };
+    return { x402Version, payload: btcPayload(await pending.payment) };
   }
 
-  private async payOnce(requirements: PaymentRequirements, c: CheckedBtcRequirements): Promise<BtcOutputRef> {
-    const derived = derivePaymentAddress(requirements.payTo, c.network, c.paymentId, c.addressType);
-    const existing = await this.journal.get(c.paymentId);
-    if (existing) return this.recorded(existing, derived.address, c);
-
+  private async payOnce(
+    requirements: PaymentRequirements,
+    c: CheckedBtcRequirements,
+    derived: { address: string; script: string },
+  ): Promise<BtcOutputRef> {
     const now = new Date().toISOString();
     const entry: JournalEntry = {
       paymentId: c.paymentId,
@@ -140,7 +159,8 @@ export class ExactBtcClientScheme implements SchemeNetworkClient {
       createdAt: now,
       updatedAt: now,
     };
-    await this.journal.put(entry);
+    const existing = await this.journal.claim(entry);
+    if (existing) return this.recorded(existing, derived.address, c);
     const ref = btcPayload(
       await this.pay(derived.address, c.sats, {
         network: c.network,
@@ -155,7 +175,7 @@ export class ExactBtcClientScheme implements SchemeNetworkClient {
   }
 
   private recorded(entry: JournalEntry, address: string, c: CheckedBtcRequirements): BtcOutputRef {
-    if (entry.network !== c.network || entry.address !== address || BigInt(entry.amount) < c.sats) {
+    if (!covers(entry, { network: c.network, address, amount: c.sats.toString() })) {
       throw new Error(
         `paymentId ${c.paymentId} is already in the journal for another payment ` +
           `(${entry.amount} sats to ${entry.address} on ${entry.network}); refusing to pay it again`,
@@ -163,10 +183,25 @@ export class ExactBtcClientScheme implements SchemeNetworkClient {
     }
     if (entry.status !== "paid" || entry.txid === undefined || entry.vout === undefined) {
       throw new Error(
-        `paymentId ${c.paymentId} was started at ${entry.createdAt} but never recorded as paid; the transaction ` +
-          `may have been broadcast. Check the wallet's transactions to ${entry.address} before doing anything else.`,
+        `paymentId ${c.paymentId} was started at ${entry.createdAt} but is not recorded as paid: another client ` +
+          `may still be paying it, or the transaction may have been broadcast without being recorded. Check the ` +
+          `wallet's transactions to ${entry.address} before doing anything else.`,
       );
     }
     return { txid: entry.txid, vout: entry.vout };
+  }
+}
+
+/** A recorded payment covers a request if it pays the same address on the same network at least as much. */
+function covers(paid: PaymentTerms, asked: PaymentTerms): boolean {
+  return paid.network === asked.network && paid.address === asked.address && BigInt(paid.amount) >= BigInt(asked.amount);
+}
+
+function assertSameTerms(running: PaymentTerms, asked: PaymentTerms, paymentId: string): void {
+  if (!covers(running, asked)) {
+    throw new Error(
+      `paymentId ${paymentId} is being paid as ${running.amount} sats to ${running.address} on ${running.network}; ` +
+        `refusing a concurrent request for ${asked.amount} sats to ${asked.address} on ${asked.network}`,
+    );
   }
 }

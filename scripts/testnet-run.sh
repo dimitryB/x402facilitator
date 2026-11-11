@@ -39,8 +39,10 @@ for v in FACILITATOR_TESTNET_PRIVATE_KEY BUYER_PRIVATE_KEY SELLER_PAY_TO; do
 done
 [ "$(cast chain-id --rpc-url "$RPC")" = 743111 ] || die "$RPC is not Hemi testnet"
 
-FAC=$(cast wallet address "$FACILITATOR_TESTNET_PRIVATE_KEY")
-BUYER=$(cast wallet address "$BUYER_PRIVATE_KEY")
+# The keys stay in the environment: scripts/evm-key.mjs reads them there, so no command line shows them.
+export FACILITATOR_TESTNET_PRIVATE_KEY BUYER_PRIVATE_KEY
+FAC=$(node scripts/evm-key.mjs address FACILITATOR_TESTNET_PRIVATE_KEY)
+BUYER=$(node scripts/evm-key.mjs address BUYER_PRIVATE_KEY)
 bal() { cast call "$1" 'balanceOf(address)(uint256)' "$2" --rpc-url "$RPC" | awk '{print $1}'; }
 # a >= b for decimal integers of any size: bash integers end at 2^63-1 wei, about 9.2 ETH.
 ge() {

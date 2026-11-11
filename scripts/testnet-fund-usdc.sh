@@ -32,7 +32,9 @@ ge() {
 [ -n "${BUYER_PRIVATE_KEY:-}" ] || die "BUYER_PRIVATE_KEY is not set (see .env.example)"
 [ "$(cast chain-id --rpc-url "$SEPOLIA_RPC")" = 11155111 ] || die "$SEPOLIA_RPC is not Ethereum Sepolia"
 [ "$(cast chain-id --rpc-url "$HEMI_RPC")" = 743111 ] || die "$HEMI_RPC is not Hemi testnet"
-BUYER=$(cast wallet address "$BUYER_PRIVATE_KEY")
+# The key stays in the environment: scripts/evm-key.mjs reads it there, so no command line shows it.
+export BUYER_PRIVATE_KEY
+BUYER=$(node scripts/evm-key.mjs address BUYER_PRIVATE_KEY)
 TO=${FUND_TO:-$BUYER}
 
 # The route comes from chain state: USDC.e's L1 token and bridge, and the bridge pair, must agree.
@@ -61,9 +63,10 @@ ge "$eth" "$need" || {
   [ "${1:-}" = --go ] && die "fund the buyer on Ethereum Sepolia first"; exit 1; }
 [ "${1:-}" = --go ] || { echo "Route and balance OK. Re-run with --go."; exit 0; }
 
-send() { # label, cast send args...
-  local label=$1; shift
-  local r; r=$(cast send "$@" --private-key "$BUYER_PRIVATE_KEY" --rpc-url "$SEPOLIA_RPC" --json | jq '.data // .')
+send() { # label, to, signature, args...: cast builds the calldata, evm-key.mjs signs and sends it
+  local label=$1 to=$2; shift 2
+  local data r; data=$(cast calldata "$@")
+  r=$(node scripts/evm-key.mjs send BUYER_PRIVATE_KEY "$SEPOLIA_RPC" "$to" "$data") || die "$label: not sent (see the error above)"
   [ "$(jq -r .status <<<"$r")" = 0x1 ] || die "$label failed: $(jq -c . <<<"$r")"
   local tx; tx=$(jq -r .transactionHash <<<"$r")
   case $SEPOLIA_RPC in
