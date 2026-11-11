@@ -33,7 +33,7 @@ The `bip122` namespace reference is the first 32 lowercase hex characters of the
 
 ## Asset Transfer Method and Payment Flow
 
-`"utxo"` is the only asset transfer method. `extra.assetTransferMethod` MAY be omitted and then means `"utxo"`; any explicit value MUST be `"utxo"`.
+`"utxo"` is the only asset transfer method. The resource server MUST set `extra.assetTransferMethod` to `"utxo"`. Clients and facilitators MUST reject requirements without it or with any other value.
 
 `"upfront"` is the only payment flow, because the payment exists on Bitcoin before the request is served. The resource server MUST set `extra.paymentFlow` to `"upfront"`. Clients and resource servers MUST reject any other value.
 
@@ -78,11 +78,11 @@ SDKs MUST use an explicit atomic price, `{ "asset": "BTC", "amount": "1000" }`. 
 |------|------|------|
 | `payTo` | Yes | The resource server's account-level extended public key, constant per seller: `xpub…` on mainnet, `tpub…` on testnet3. SLIP-132 forms (`ypub`, `zpub`, `upub`, `vpub`, …) MUST be rejected by clients and resource servers; the same key with `xpub`/`tpub` version bytes is the canonical form. A facilitator MAY accept `zpub`/`vpub` as p2wpkh. |
 | `maxTimeoutSeconds` | Yes | How long the client should keep re-sending after paying. It SHOULD be large (3600 to 7200): a payment is verifiable one block after inclusion at the earliest, and hVM lags the Bitcoin tip. A Bitcoin transaction has no expiry, so the facilitator does not enforce it. |
-| `extra.assetTransferMethod` | No | `"utxo"` if present. |
+| `extra.assetTransferMethod` | Yes | `"utxo"`. |
 | `extra.paymentFlow` | Yes | `"upfront"`. |
 | `extra.paymentId` | Yes | 32 lowercase hex characters (16 bytes) from a CSPRNG, fresh for every challenge. **Dynamic**: implementations MUST declare it in `dynamicExtraFields`, so it is ignored when a paid retry's `accepted` is matched against the requirements rebuilt for that request. |
 | `extra.addressType` | No | `"p2wpkh"` (default) or `"p2tr"`. |
-| `extra.minConfirmations` | No | Bitcoin confirmations required before settlement, default 1. The resource server chooses it per price; the facilitator MAY refuse values outside its policy. |
+| `extra.minConfirmations` | No | Bitcoin confirmations required before settlement: a whole number, at least 1; default 1. The resource server chooses it per price; the facilitator MAY refuse values outside its policy. |
 
 Every core field and every `extra` field except `paymentId` MUST match between `accepted` and the requirements.
 
@@ -139,9 +139,9 @@ Each payment lands on its own address. The path is effectively random, so wallet
 
 ## Client Payment Construction
 
-1. Validate the accept: `scheme`, network, `asset`, `amount`, transfer method, flow, a well-formed `paymentId`, a supported `addressType`, and `payTo` with the right version bytes for the network. Apply the client's own spend cap.
+1. Validate the accept: `scheme`, network, `asset`, `amount`, transfer method, flow, a well-formed `paymentId`, a supported `addressType`, a `minConfirmations` that is a whole number of at least 1 if present, and `payTo` with the right version bytes for the network. Apply the client's own spend cap. The client pays before any facilitator sees the requirements, and the payment cannot be undone, so a client MUST NOT fill in a missing required field with its expected value: requirements a facilitator would reject must be rejected before paying.
 2. Derive the address. Pay `amount` to it in one output of a standard transaction. Other outputs (change) are allowed.
-3. Record the payment by `paymentId` **before** broadcasting and again with the txid after. A client MUST NOT pay a `paymentId` it has already recorded; if a record has no txid, a broadcast may have happened and the client MUST NOT pay again automatically.
+3. Record the payment by `paymentId` **before** broadcasting and again with the txid after. A client MUST NOT pay a `paymentId` it has already recorded; if a record has no txid, a broadcast may have happened and the client MUST NOT pay again automatically. Where several clients or processes share one record, recording before broadcasting MUST be an atomic claim, so that only one of them pays. Concurrent requests for one `paymentId` MAY share one payment only if they ask for the same network and address and no more than its amount.
 4. Send the payload and re-send the same payload while the answer is retryable. A client SHOULD NOT use a generic "pay on every 402" wrapper with this scheme: the first answers after paying are always "not yet", and paying again on them pays twice.
 
 ## Facilitator Validation

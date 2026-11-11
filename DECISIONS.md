@@ -1774,6 +1774,52 @@ On 2026-11-10 the owner chose what to do with the two patch sets that change ups
 
 **Left for the owner.** Review the six changed files in #4213 and mark the PR ready for review. Go and Python parity is offered in the PR, not done.
 
+## D-046. Audit fixes, first batch: one payment per paymentId across clients, required fields, keys off the command line
+
+On 2026-11-10 an open-source readiness audit of this repository (at `9091a07`) was run outside this session. It reported seven findings: three P1, four P2. Each was checked against the code, the built image and the advisory databases before anything was changed, and all seven hold:
+
+| | Finding | Checked |
+|------|------|------|
+| F01 | The runtime stage runs `apt-get` with apt 3.0.3, which Debian lists under CVE-2026-109518 (fixed in 3.0.4 by DSA-6607-1) | `apt-get --version` in `hemi-x402-facilitator:e75adda-hemi.15`; sources are `http://deb.debian.org`. The flaw needs an on-path attacker while the image is built; the running service never uses apt |
+| F02 | Rust dependencies with advisories | `crypto-bigint` 0.5.5, `rustls` 0.23.40, `rustls-webpki` 0.103.13 and `h2` 0.4.14 in upstream's `Cargo.lock` at `e75adda`; RUSTSEC-2026-0387, -0285, -0382 and -0258 exist. Already left for the owner in D-042 |
+| F03 | Two clients sharing one journal could both pay a paymentId | `ExactBtcClientScheme` guarded only its own in-flight map; the journal's `get` then `put` was not atomic |
+| F04 | A Bitcoin network is advertised although its settler check failed | `provider.rs` logs the failed `check_deployment` and discards it (`let _ = check`). With the wrong signer `/verify` passes and `/settle` reverts, so in the upfront flow a buyer pays and is not served |
+| F05 | Spec, client and facilitator disagree on fields | The spec let `extra.assetTransferMethod` be omitted; the facilitator rejects that. The client filled in `assetTransferMethod` and `paymentFlow` and never checked `minConfirmations` |
+| F06 | Testnet scripts put private keys on command lines | `scripts/testnet-run.sh:42-43` and `scripts/testnet-fund-usdc.sh:35,66` passed real keys to `cast` |
+| F07 | No protection on `main`, Dependabot alerts off | As recorded in D-044 |
+
+The owner chose to fix the TypeScript, spec and script findings first (F03, F05, F06): they need no new image.
+
+**F03: a paymentId is claimed atomically before the wallet pays.**
+
+- `PaymentJournal` gains `claim(entry)`: it records the `paying` entry only if the journal has nothing for that paymentId, and otherwise returns what is there. Of concurrent claims, exactly one wins.
+- `MemoryPaymentJournal` checks and writes with no `await` in between, so clients sharing one instance in one process cannot both win.
+- `FilePaymentJournal` first creates `<journal>.claims/<paymentId>` with `O_CREAT | O_EXCL`, which the filesystem grants to one process only, and writes the entry into it. A client that stopped between its claim and its journal line therefore still blocks the next one; so does an empty claim file still being written. Every journal line and claim file is now flushed with `fsync` before the wallet is called. The paymentId names a file, so the journal itself rejects anything that is not 32 lowercase hex characters.
+- Concurrent requests in one client now share a payment only if they ask for the same network and address and no more than its amount, the rule a recorded payment already followed. A request for more is refused instead of being answered with the smaller payment.
+- The spec's client steps say the same; `btc/README.md`, `buyer/README.md` and the README describe the claim files.
+
+**F05: required means required.** The spec now requires `extra.assetTransferMethod: "utxo"`, as the facilitator already did, and says a client must not fill in a missing required field, because it pays before any facilitator sees the requirements. The client rejects a missing `assetTransferMethod` or `paymentFlow`, and a `minConfirmations` that is not a whole number of at least 1. The seller and the facilitator were already strict, so neither changes.
+
+**F06: keys stay in the environment.** cast 1.8.6 takes a raw key only as `--private-key` on its command line (`cast send --help` lists no environment variable for it). `scripts/evm-key.mjs` reads the key from the environment variable it is given by name, with viem: `address` prints the address, and `send` signs and sends a transaction whose calldata `cast calldata` built, then prints `{status, transactionHash}`. The two scripts use it. `contracts/deploy*.sh` already passed keys through the environment, and `scripts/fork.sh` uses anvil's published key.
+
+**Verification**, 2026-11-10:
+
+```
+npm test -w btc            Tests 103 passed (103)                    (90 before; 13 new)
+  two clients on one MemoryPaymentJournal, two FilePaymentJournal instances on one file:  1 wallet call each
+  4 processes racing to claim the same 40 paymentIds:                                    each won exactly once
+  claim written with "w" instead of "wx" (deliberately, then reverted):                  3 tests fail
+npm run typecheck          clean
+npm run test:e2e           Test Files 14 passed (14), Tests 147 passed (147), 375 s
+buyer/demo-fork.sh         exit 0: all five payments settled; the Bitcoin one created journal.jsonl.claims/ (mode 0700)
+scripts/evm-key.mjs        same address as cast wallet address for anvil key #0, with and without 0x;
+                           two sends to a local anvil: status 0x1; a failing send: "evm-key: Transaction creation failed."
+```
+
+The two testnet scripts were not run against live networks: they send testnet transactions. Their syntax was checked with `bash -n`, and each piece they now call was run on its own.
+
+**Left.** The image batch (F01, F04, the routine Rust bumps of F02, a non-root user and this repository in the image's source label; a new tag and a full e2e run), the `crypto-bigint` upgrade of F02, the GitHub settings of F07, and the audit's hardening notes on browser origins, seller recovery records and the buyer journal's location. The client still cannot check `minConfirmations` against a facilitator's policy before paying: it does not see `/supported`. The audit report is not in the repository.
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

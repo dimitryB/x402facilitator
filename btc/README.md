@@ -5,7 +5,7 @@ The `exact` scheme on `bip122:*` for the x402 TypeScript SDK: native BTC paid on
 | Export | Use |
 |------|------|
 | `ExactBtcServerScheme` | Seller side. Register one per Bitcoin network: `server.register(BTC_MAINNET, new ExactBtcServerScheme({ network: BTC_MAINNET, payTo: xpub }))`. Price the accept as `{ asset: "BTC", amount: "<sats>" }` with `payTo` = the xpub. |
-| `ExactBtcClientScheme` | Buyer side. Takes a `PayBtc` callback (`(address, sats, ctx) => { txid, vout }`) or a `BtcWallet`, and a `PaymentJournal`. It pays once per `paymentId`, whatever happens after. |
+| `ExactBtcClientScheme` | Buyer side. Takes a `PayBtc` callback (`(address, sats, ctx) => { txid, vout }`) or a `BtcWallet`, and a `PaymentJournal`. It pays at most once per `paymentId`: clients that share a journal claim the `paymentId` atomically before paying (a `FilePaymentJournal` does so across processes, with an exclusive claim file). |
 | `BtcWallet`, `EsploraClient` | A single-key demo wallet over mempool.space: largest-first coin selection, change to self, broadcast. |
 | `derivePaymentAddress`, `paymentIndices`, `paymentRef`, `isPaymentId` | The derivation rule shared with the facilitator: `payTo/0/i1/i2/i3` from `sha256("x402-btc" ‖ paymentId)`. |
 | `@hemi-x402/btc/mock-hbk` | Local forks only: write fabricated Bitcoin transactions into the mock hBK. It refuses non-local RPC URLs. |
