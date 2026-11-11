@@ -15,7 +15,7 @@ It is the [x402-rs](https://github.com/x402-rs/x402-rs) facilitator at a pinned 
 | [`seller/`](seller/) | Demo paid endpoint `GET /echo` ($0.001), accepting USDC.e and hemiBTC, and optionally native BTC on Bitcoin L1 |
 | [`buyer/`](buyer/) | Demo buyer using `@x402/fetch`; pays the seller and prints the settlement tx |
 | [`tests/`](tests/) | End-to-end tests of `/verify` and `/settle` on local forks of both Hemi chains, plus read-only live checks |
-| [`sdk-patch/`](sdk-patch/) | Patch adding Hemi to the x402 TypeScript SDK's default assets, submitted upstream as [x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213) |
+| [`sdk-patch/`](sdk-patch/) | Patch adding Hemi to the default assets of the x402 TypeScript, Go and Python SDKs, merged upstream on 2026-11-11 as [x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213); not in an SDK release yet |
 | [`btc/`](btc/) | Phase 2: the `exact` scheme on Bitcoin L1 for the x402 TypeScript SDK (seller and buyer sides), derivation, a minimal wallet |
 | [`docs/specs/scheme_exact_bip122.md`](docs/specs/scheme_exact_bip122.md), [`docs/phase2/`](docs/phase2/) | Phase 2: the scheme spec draft, the design and the working notes it was built from |
 | [`shared/hemi.json`](shared/hemi.json) | Every Hemi address used here, in one file |
@@ -195,7 +195,7 @@ const server = new x402ResourceServer(new HTTPFacilitatorClient({ url: "http://l
 server.register("eip155:743111", new ExactEvmScheme());
 ```
 
-Until Hemi is in the SDK's default assets ([`sdk-patch/`](sdk-patch/), proposed upstream in [x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213)), price with an explicit asset rather than a `"$0.001"` string. Set `extra` per asset:
+Hemi's default assets are merged upstream ([x402-foundation/x402#4213](https://github.com/x402-foundation/x402/pull/4213), 2026-11-11) but not yet released: the newest `@x402/evm` is 2.30.0, from 2026-11-04 (D-053). Until a release includes them, price with an explicit asset rather than a `"$0.001"` string. Set `extra` per asset:
 
 | Asset | `extra` |
 |------|------|
