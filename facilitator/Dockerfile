@@ -6,8 +6,8 @@
 # the crate's sources only re-runs the last builder step: dependencies are compiled once, against
 # unpatched x402-rs.
 
-# rust:1.93-trixie (x402-rs needs Rust >= 1.93.0)
-FROM rust@sha256:ecbe59a8408895edd02d9ef422504b8501dd9fa1526de27a45b73406d734d659 AS builder
+# rust:1.94.1-trixie. x402-rs needs Rust 1.93 or later; alloy 2.5, in build/Cargo.lock, needs 1.94.1 (D-049).
+FROM rust@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS builder
 
 ARG X402_RS_REPO=https://github.com/x402-rs/x402-rs.git
 ARG X402_RS_COMMIT=e75adda8a0e3cf23db446883ba91b88bbab2fe28

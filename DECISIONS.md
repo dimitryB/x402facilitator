@@ -1931,6 +1931,36 @@ GitHub added `require_extra_approval_for_unattributed_changes: true` to the pull
 
 Secret scanning, push protection and private vulnerability reporting were already on (D-044).
 
+## D-049. alloy 2.5 for the `lru` advisory, built with Rust 1.94.1; `crypto-bigint` accepted until alloy moves to k256 0.14
+
+The two Rust advisories D-047 left, both reached only through alloy.
+
+**`lru` (RUSTSEC-2026-0253) is fixed by alloy 2.5.0.**
+- `lru` 0.18.2 fixes it. `alloy-provider` asks for `lru` ^0.16 up to 2.3.0 and ^0.18.2 from 2.4.0 (2026-08-12) on. x402-rs asks for alloy "2.0", which allows any 2.x, so no change to x402-rs or the patches is needed.
+- In the committed lock the 17 crates of the alloy 2.x family move from 2.0.5 to 2.5.0 (2026-09-23), the latest, and `lru` from 0.16.4 to 0.18.5. With them come `alloy-eip7928` 0.3.7 → 0.4.12, `alloy-trie` 0.9.5 → 0.9.9 and a new `alloy-eip8141` 0.1.1. alloy-core (`alloy-primitives`, `alloy-sol-types` and so on, 1.6.0) does not move.
+- Every alloy release from 2.2.0 on requires Rust 1.94.1, and the builder had 1.93. The builder image is now `rust:1.94.1-trixie`, pinned by its multi-arch index `sha256:652612f0…165c` (rustc 1.94.1 of 2026-03-25, image built 2026-04-07). It runs no apt, as before.
+- x402-rs's workspace still declares `rust-version = "1.93.0"`, and cargo's resolver chooses only releases that version supports: without help it stopped at alloy 2.1.1, still on `lru` 0.16. The update therefore ran with `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=allow`. The build itself needs nothing special: the toolchain is 1.94.1, and the lock is fetched with `--locked`.
+- `lock-upgrades.txt` now lists 38 entries. The lock check reads `478 packages as upstream locked them (of 1200); 48 others, all listed`.
+
+The bug was not reachable here: it needs a cache key whose `Drop` panics during `pop()`, and alloy's cache keys are hashes and numbers. The upgrade removes the advisory and brings five minor alloy releases of fixes. It also brings their risk to the settlement patches 0019 to 0028, which lean on the provider's behaviour (fallback, receipts, nonces). The e2e suite covers that: RPC failover, settlement pending, retries and replays.
+
+**`crypto-bigint` (RUSTSEC-2026-0387) is accepted.**
+- **No compatible fix.** The fix is in 0.7.6. Even `alloy-signer` 2.5.0 requires `k256` ^0.13, which needs `elliptic-curve` 0.13 and so `crypto-bigint` 0.5. `k256` 0.14, on the fixed line, has been stable since 2026-07-08, but alloy has not adopted it; that is a breaking change for alloy, likely its 3.0.
+- **The alternatives are worse.** One is a backport of constant-time arithmetic fixes, maintained here. The other is moving signing out of the process, to a remote signer or KMS, which is an architecture change for a demo-scale facilitator.
+- **Exposure.** The advisory says exploitability depends on compiler, CPU and the algorithm. An attacker would have to time many of the signer's signatures precisely over the network. The signer only signs settlements, and each one needs a real, paid payment.
+- **Impact if the key leaked.** The signer only pays gas: it never holds payment funds. An attacker could spend its gas and, as the Bitcoin settler's `SETTLER`, record bogus settlements that block real ones. It could not redirect any payment.
+- **Revisit** when an alloy release depends on `k256` 0.14. If Dependabot raises the advisory, dismiss it as tolerable risk, pointing here.
+
+**Verification**, 2026-11-10, image `e75adda-hemi.17`:
+
+```
+docker compose build          exit 0; "Cargo.lock: 478 packages as upstream locked them (of 1200); 48 others, all listed";
+                              lru 0.18.5 and alloy-provider 2.5.0 compiled; no compiler warnings
+Rust tests (CI's commands, --network none)   179 passed, 0 failed, 27 ignored (as on hemi.16)
+npm run test:e2e              Test Files 14 passed (14), Tests 147 passed (147), 375 s
+buyer/demo-fork.sh            exit 0: all five payments settled
+```
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).
