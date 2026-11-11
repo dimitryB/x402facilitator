@@ -240,6 +240,29 @@ for (const network of BTC_NETWORKS_UNDER_TEST) {
       expect(res.body).toEqual({ isValid: true });
     });
 
+    it("numbers compare by value: the seller's 7200.0 and 1.0 come back from a JavaScript buyer as 7200 and 1 (audit R07)", async () => {
+      const requirements = btcRequirementsFor(network, xpub, SATS, { maxTimeoutSeconds: 7200 });
+      const ref = await seedBtcPayment(fork, { script: addressOf(requirements).script, sats: SATS });
+      // A seller's JSON with whole numbers written with a fraction, as a Python or Rust seller may write them.
+      const withFractions = (r: PaymentRequirements) =>
+        JSON.stringify(r).replace('"maxTimeoutSeconds":7200,', '"maxTimeoutSeconds":7200.0,').replace('"minConfirmations":1,', '"minConfirmations":1.0,');
+      const sellerText = withFractions(sellerCopy(requirements));
+      expect(sellerText.match(/\d\.0[,}]/g)).toHaveLength(2);
+      // The buyer reads the 402's copy with JSON.parse, pays, and sends it back with JSON.stringify.
+      const payment = btcPayment(JSON.parse(withFractions(requirements)) as PaymentRequirements, ref);
+      expect(JSON.stringify(payment.accepted)).toBe(JSON.stringify(requirements));
+      const body = `{"x402Version":2,"paymentPayload":${JSON.stringify(payment)},"paymentRequirements":${sellerText}}`;
+
+      const verified = await postRaw("/verify", body);
+      record(`verify seller 7200.0/1.0, buyer 7200/1: ${network}`, verified);
+      expect(verified.status).toBe(STATUS_VERDICT);
+      expect(verified.body).toEqual({ isValid: true });
+      const settled = await postRaw("/settle", body);
+      record(`settle seller 7200.0/1.0, buyer 7200/1: ${network}`, settled);
+      expect(settled.status).toBe(STATUS_VERDICT);
+      expect(settleSuccessViolations(settled.body, { network, transaction: ref.txid })).toEqual([]);
+    });
+
     it("payTo of the other Bitcoin network -> invalid_exact_bip122_pay_to", async () => {
       const otherKey = TEST_XPUB[network === BTC_MAINNET ? BTC_NETWORKS_UNDER_TEST[1] : BTC_MAINNET];
       const requirements = { ...btcRequirementsFor(network, xpub, SATS), payTo: otherKey };

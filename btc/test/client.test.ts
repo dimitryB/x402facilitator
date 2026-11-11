@@ -221,6 +221,59 @@ describe("clients that share a journal pay once", () => {
     expect([...journal.all().keys()]).toEqual([paymentId]);
   });
 
+  it("an append that stopped part way: a later payment's line stays whole, and both resume after a restart (audit R06)", async () => {
+    const file = join(dir, "stopped-append.jsonl");
+    const journal = new FilePaymentJournal(file);
+    const first = requirements();
+    const firstId = first.extra.paymentId as string;
+    const d = derivePaymentAddress(XPUB, BTC_MAINNET, firstId);
+    const claimed: JournalEntry = {
+      paymentId: firstId, status: "paying", network: BTC_MAINNET, payTo: XPUB, addressType: "p2wpkh", address: d.address, script: d.script,
+      amount: "1000", requirements: first, createdAt: "2026-11-11T00:00:00.000Z", updatedAt: "2026-11-11T00:00:00.000Z",
+    };
+    // A client claimed the first paymentId, then stopped 33 characters into its journal line.
+    mkdirSync(journal.claims, { recursive: true });
+    writeFileSync(join(journal.claims, firstId), JSON.stringify(claimed) + "\n");
+    const fragment = JSON.stringify(claimed).slice(0, 33);
+    writeFileSync(file, fragment);
+
+    // Another client pays another paymentId: its line starts on a new line instead of joining the fragment.
+    const second = requirements();
+    const secondId = second.extra.paymentId as string;
+    const { calls, pay } = recorder();
+    const payment = await new ExactBtcClientScheme(pay, { journal }).createPaymentPayload(2, second);
+    expect(calls).toHaveLength(1);
+    const lines = readFileSync(file, "utf8").split("\n");
+    expect(lines[0]).toBe(fragment);
+    expect(lines.slice(1).map(l => JSON.parse(l || "null")?.status)).toEqual(["paying", "paid", undefined]);
+
+    // After a restart, both paymentIds read back: the second as paid, the first as its claim.
+    const restarted = new FilePaymentJournal(file);
+    expect(await restarted.get(secondId)).toMatchObject({ status: "paid", txid: payment.payload.txid, vout: payment.payload.vout });
+    expect(await restarted.get(firstId)).toEqual(claimed);
+    expect([...restarted.all().keys()]).toEqual([secondId]);
+    // Resuming the second returns its payload without paying; the first is still refused, not paid again.
+    const again = recorder();
+    expect(await new ExactBtcClientScheme(again.pay, { journal: restarted }).createPaymentPayload(2, second)).toEqual(payment);
+    await expect(new ExactBtcClientScheme(again.pay, { journal: restarted }).createPaymentPayload(2, first)).rejects.toThrow(/not recorded as paid/);
+    expect(again.calls).toEqual([]);
+  });
+
+  it("a whole line that is not an entry is skipped; the next append after a whole line adds no blank line", async () => {
+    const file = join(dir, "not-entries.jsonl");
+    const req = requirements();
+    writeFileSync(file, '\n{"note":"not an entry"}\nnull\n[1]\n');
+    const journal = new FilePaymentJournal(file);
+    expect(journal.all().size).toBe(0);
+    const { calls, pay } = recorder();
+    await new ExactBtcClientScheme(pay, { journal }).createPaymentPayload(2, req);
+    expect(calls).toHaveLength(1);
+    const text = readFileSync(file, "utf8");
+    expect(text.startsWith('\n{"note":"not an entry"}\nnull\n[1]\n{')).toBe(true);
+    expect(text).not.toMatch(/\n\n\{/);
+    expect([...journal.all().values()].map(e => e.status)).toEqual(["paid"]);
+  });
+
   it("a client that stopped between its claim and its journal line still blocks the next", async () => {
     const file = join(dir, "stopped.jsonl");
     const journal = new FilePaymentJournal(file);

@@ -9,7 +9,7 @@
  * successor means another client is still paying, or a broadcast may have happened without being
  * recorded; the client scheme refuses to pay that paymentId again until a person looks.
  */
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, statSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, writeSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import { isPaymentId, type AddressType } from "./derive.js";
@@ -92,6 +92,12 @@ export class MemoryPaymentJournal implements PaymentJournal {
  * filesystem: network filesystems may not honour O_EXCL or a directory fsync. On macOS, fsync reaches the
  * drive but not necessarily past its write cache; Windows cannot fsync a directory, so there only files
  * are flushed.
+ *
+ * Each entry is appended with one write that ends in a newline. An append that stopped part way (a crash,
+ * a power loss, a full disk) leaves the start of a line without its newline: readers skip it, and the next
+ * append starts with a newline, so that line never joins a later entry. The stopped client's claim file
+ * still blocks a second payment of its paymentId, and `get` returns that payment's last whole line, or its
+ * claim.
  */
 export class FilePaymentJournal implements PaymentJournal {
   constructor(readonly file: string) {}
@@ -107,7 +113,7 @@ export class FilePaymentJournal implements PaymentJournal {
 
   async put(entry: JournalEntry): Promise<void> {
     this.create();
-    writeDurably(this.file, "a", JSON.stringify(entry) + "\n");
+    appendLine(this.file, JSON.stringify(entry));
   }
 
   async claim(entry: JournalEntry): Promise<JournalEntry | undefined> {
@@ -153,14 +159,13 @@ export class FilePaymentJournal implements PaymentJournal {
     const out = new Map<string, JournalEntry>();
     if (!existsSync(this.file)) return out;
     const lines = readFileSync(this.file, "utf8").split("\n");
-    // Each line is appended whole, with its newline. Text after the last newline is a line another client is
-    // still writing, which a read can catch half done: it is not an entry yet. That client's claim file
-    // already exists, so leaving the line out cannot let a second client pay.
+    // Text after the last newline is not an entry yet: a line another client is still writing, which a read
+    // can catch half done, or one whose writer stopped. Either client's claim file already exists, so leaving
+    // the line out cannot let a second client pay.
     lines.pop();
     for (const line of lines) {
-      if (!line.trim()) continue;
-      const entry = JSON.parse(line) as JournalEntry;
-      out.set(entry.paymentId, entry);
+      const entry = parseEntry(line);
+      if (entry) out.set(entry.paymentId, entry);
     }
     return out;
   }
@@ -175,6 +180,22 @@ export class FilePaymentJournal implements PaymentJournal {
       return undefined; // being written; claim() treats the file's existence as the claim
     }
   }
+}
+
+/**
+ * A journal line as an entry. Undefined for a blank line, and for the start of an append whose writer stopped,
+ * which the next append ended with its leading newline (appendLine).
+ */
+function parseEntry(line: string): JournalEntry | undefined {
+  if (!line.trim()) return undefined;
+  let entry: Partial<JournalEntry> | null;
+  try {
+    entry = JSON.parse(line) as Partial<JournalEntry> | null;
+  } catch {
+    return undefined;
+  }
+  const whole = typeof entry?.paymentId === "string" && (entry.status === "paying" || entry.status === "paid");
+  return whole ? (entry as JournalEntry) : undefined;
 }
 
 /** The paymentId names a file, so it must be a paymentId: 32 lowercase hex characters, nothing else. */
@@ -222,9 +243,39 @@ function fsyncDir(dir: string): void {
 function writeDurably(path: string, flag: "a" | "wx", text: string): void {
   const fd = openSync(path, flag, 0o600);
   try {
-    writeSync(fd, text);
+    writeAll(fd, path, text);
     fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * Appends `line` and its newline in one write, and flushes it. A local filesystem applies each append whole,
+ * after any other, so appends from several clients never interleave. A file that does not end in a newline
+ * holds the start of an append whose writer stopped, or one this client caught half done: the write then
+ * starts with a newline, so its own line stays whole. If that other writer was still writing, its append
+ * lands whole before this one, and the extra newline leaves only a blank line.
+ */
+function appendLine(path: string, line: string): void {
+  const fd = openSync(path, "a+", 0o600);
+  try {
+    const size = fstatSync(fd).size;
+    const last = Buffer.alloc(1);
+    const ended = size === 0 || (readSync(fd, last, 0, 1, size - 1) === 1 && last[0] === 0x0a);
+    writeAll(fd, path, (ended ? "" : "\n") + line + "\n");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Writes all of `text` with one write. A short write (a full disk) throws: writing the rest with a second
+ * append could land after another client's line.
+ */
+function writeAll(fd: number, path: string, text: string): void {
+  const bytes = Buffer.from(text, "utf8");
+  const written = writeSync(fd, bytes);
+  if (written !== bytes.length) throw new Error(`short write to ${path}: ${written} of ${bytes.length} bytes`);
 }

@@ -2009,6 +2009,41 @@ buyer/demo-fork.sh            exit 0: all five payments settled, the fifth 1000 
 
 **Later the same day: a reader could catch a line half written.** CI on PR #11 failed once in the cross-process test: one of four processes crashed in `JSON.parse` on a journal line cut off at 33 characters, read while another process was appending it. `FilePaymentJournal.all()` parsed every line, the unfinished last one too. Each line is appended whole with its newline, so text after the last newline is a line still being written; `all()` now leaves it out. That cannot let a second client pay: the writer's claim file exists before its line. A unit test reads a journal ending in such a fragment (it failed on the old reader); the cross-process test then passed 15 of 15 runs locally.
 
+## D-051. Audit second follow-up: a stopped journal append cannot join the next entry; requirement numbers compare by value
+
+The audit's second follow-up review of 2026-11-11 (`docs/OPEN_SOURCE_AUDIT_2026-11-10.md`, at `81ce7c8`, image hemi.18) found R01 to R05 fixed and two more P2 gaps, R06 and R07. Both were checked against the code before they were fixed; both held.
+
+**R06: a journal append that stopped part way joined the next entry.**
+- `886d7c2` made readers skip the text after the last newline, as a line another client is still writing. If that client had stopped instead (a crash, a power loss, a full disk), the text stayed, and the next client's `put` appended its JSON straight onto it. The completed line was the fragment followed by the new entry, and from then on every read threw `SyntaxError`, for every paymentId, so a restarted buyer could not resume payments it had already sent.
+- Each append now starts on a new line. `appendLine` opens the journal for reading and appending; when the file does not end in a newline, the same write puts one before the entry. Readers skip a whole line that is not an entry (`parseEntry`: JSON with a string `paymentId` and the status `paying` or `paid`). A short write now throws; before, `put` returned as if the line were whole. The rest is not written with a second append, which could land after another client's line.
+- The audit offered a lock that tells a live writer from an abandoned tail, then repairs the tail. Neither is needed. A local filesystem applies each append whole, after any other; concurrent appends already rely on that. Text without its newline at the end of the file is then either a write that is still landing, which completes before the next append lands, or one that stopped. A leading newline is right in both cases, and at worst leaves a blank line. Nothing is truncated, so a live writer is never cut.
+- A stopped append loses only its own entry. That payment's claim file still blocks a second payment, and `get` returns its last whole line, or its claim. A stopped `paid` line therefore reads as `paying`, which the client refuses to pay again until a person looks, as before.
+- Tests: the audit's case: a claim file and the first 33 characters of its line, then another payment. The wallet is called once and the new lines are whole. A restarted journal reads both, resumes the second without paying, and refuses the first. Also: whole lines that are not entries are skipped, and an append after a whole line adds no blank line; a short write of the claim file, or of the journal line, stops the payment and leaves the paymentId claimed. All four failed on the old journal.
+
+**R07: the facilitator compared the two copies of the requirements as raw JSON.**
+- `parse_request` compared `accepted` with the seller's requirements as `serde_json::Value`s, in which `1.0` (a float) and `1` (an integer) differ. A seller that writes `minConfirmations: 1.0`, or `maxTimeoutSeconds: 7200.0`, gets `1` or `7200` back from a JavaScript buyer, who has paid by then. The facilitator answered `invalid_payment_requirements`. D-050 made the parser read `1.0` as 1, but the comparison runs first.
+- Both copies are now read as JavaScript reads them before they are compared (`as_javascript_reads`): each number becomes the double a JavaScript parser holds, written as an integer when it is whole. Both SDKs compare the terms that way. So `1.0`, `1` and `1e0` are equal, while `1` and `2`, or `1` and `"1"`, are not. The parser reads `accepted` the same way: a buyer that keeps a seller's `7200.0` is read as 7200, and `confirmations()` no longer needs its float branch. A retry is identified by the normalized `accepted`, so a retry that writes its numbers differently is still the same payment.
+- Shared cases: the crate now runs every case of `requirements-cases.json` through `parse_request`. The seller's copy is as written, with another paymentId, as a stock seller sends it. `accepted` is what a JavaScript buyer sends back: the new `sent` field, where JSON.parse and JSON.stringify write a value differently, and the seller's values otherwise. The new cases `6.0` and `1e0` make 25. The btc test checks each `sent` against JSON.parse and JSON.stringify of the case's `set`, taken from the file's text, and checks that a real `x402Client` sends the requirements unchanged.
+- Tests: a Rust unit test, and an e2e test in `11-btc-l1`. The unit test accepts `7200.0`, `1.0` and an unknown extra field with fractions against integers, in both directions, and an exponent, with one retry key for all three. It refuses `2.0`, `1.5`, `"1"` and a changed fraction against `1`. The e2e test posts a seller's text with `7200.0` and `1.0` and the payload a JavaScript buyer built from it: verify is valid and settle succeeds. On the old comparison, the unit test failed at its first pair and the shared cases at `1.0`, with the audit's `Accepted does not match payment requirements`.
+
+**Image `e75adda-hemi.19`.** Compose, the READMEs and the issue template name it.
+
+**Verification**, 2026-11-11:
+
+```
+docker compose build          exit 0; the crate and the facilitator recompiled, no compiler warnings
+Rust tests (CI's commands, --network none)   182 passed, 0 failed, 27 ignored (181 before, plus the R07 test)
+the new Rust tests on the old comparison     2 failed: the R07 test at its first pair, the shared cases at "1.0"
+                                             ("Accepted does not match payment requirements")
+rustfmt --check (edition 2024)               clean
+npm test -w btc               146 passed, 0 failed (137 before, plus 4 journal tests, 3 sent checks, cases 6.0 and 1e0)
+the 4 journal tests on the old journal       4 failed
+separate-processes journal test              10 of 10 runs passed
+npm run typecheck --workspaces   exit 0
+npm run test:e2e              Test Files 15 passed (15), Tests 151 passed (151), 451 s (149 before, plus the R07
+                              test on both Bitcoin networks)
+```
+
 ## Pre-spike context: what the reference code requires
 
 Read at x402-rs `e75adda` (2026-07-13) and x402-foundation/x402 `e4a0868` (2026-10-28).

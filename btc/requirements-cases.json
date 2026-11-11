@@ -1,5 +1,5 @@
 {
-  "_about": "How every implementation of the exact bip122 scheme reads the extra fields of an accept: a buyer pays only what the facilitator accepts, so both must agree on each case. Each case applies `set` and `remove` to base.extra; `accept` cases give the values the fields resolve to (minConfirmations null: absent, the facilitator's default applies), reject cases name the field the error is about. Run by btc/test/requirements-cases.test.ts and the x402-chain-bip122 crate (types.rs); its copy, facilitator/x402-rs/crates/x402-chain-bip122/requirements-cases.json, must stay identical (a btc test checks).",
+  "_about": "How every implementation of the exact bip122 scheme reads the extra fields of an accept: a buyer pays only what the facilitator accepts, so both must agree on each case. Each case applies `set` and `remove` to base.extra; `accept` cases give the values the fields resolve to (minConfirmations null: absent, the facilitator's default applies), reject cases name the field the error is about. The facilitator reads each case as a whole request: the seller's requirements with `set` as written here, and the payload's accepted as a JavaScript buyer sends them back, which is `sent` where JSON.parse and JSON.stringify write a value differently (`1.0` comes back as `1`), and `set` otherwise; numbers compare by value. Run by btc/test/requirements-cases.test.ts and the x402-chain-bip122 crate (types.rs); its copy, facilitator/x402-rs/crates/x402-chain-bip122/requirements-cases.json, must stay identical (a btc test checks).",
   "base": {
     "scheme": "exact",
     "network": "bip122:000000000019d6689c085ae165831e93",
@@ -25,7 +25,9 @@
     { "name": "addressType a number", "set": { "addressType": 1 }, "accept": false, "field": "addressType" },
     { "name": "minConfirmations absent", "remove": ["minConfirmations"], "accept": true, "addressType": "p2wpkh", "minConfirmations": null },
     { "name": "minConfirmations 6", "set": { "minConfirmations": 6 }, "accept": true, "addressType": "p2wpkh", "minConfirmations": 6 },
-    { "name": "minConfirmations 1.0 (a whole number written with a fraction)", "set": { "minConfirmations": 1.0 }, "accept": true, "addressType": "p2wpkh", "minConfirmations": 1 },
+    { "name": "minConfirmations 1.0 (a whole number written with a fraction)", "set": { "minConfirmations": 1.0 }, "sent": { "minConfirmations": 1 }, "accept": true, "addressType": "p2wpkh", "minConfirmations": 1 },
+    { "name": "minConfirmations 6.0", "set": { "minConfirmations": 6.0 }, "sent": { "minConfirmations": 6 }, "accept": true, "addressType": "p2wpkh", "minConfirmations": 6 },
+    { "name": "minConfirmations 1e0 (written with an exponent)", "set": { "minConfirmations": 1e0 }, "sent": { "minConfirmations": 1 }, "accept": true, "addressType": "p2wpkh", "minConfirmations": 1 },
     { "name": "minConfirmations 2^32 - 1", "set": { "minConfirmations": 4294967295 }, "accept": true, "addressType": "p2wpkh", "minConfirmations": 4294967295 },
     { "name": "minConfirmations null", "set": { "minConfirmations": null }, "accept": false, "field": "minConfirmations" },
     { "name": "minConfirmations 0", "set": { "minConfirmations": 0 }, "accept": false, "field": "minConfirmations" },
